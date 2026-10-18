@@ -9,6 +9,9 @@
 The project is designed to boot in QEMU and currently implements a BIOS-based boot sequence, 64-bit processor initialization, graphics setup, and an animated startup experience leading to an initial setup screen.
 
 
+<img width="1279" height="715" alt="Ekran Görüntüsü - 2026-10-18 13-34-05" src="https://github.com/user-attachments/assets/06d6d1fa-5092-4c34-a2f1-618065b3fd0f" />
+
+
 
 ## Current Features
 
@@ -19,6 +22,9 @@ NetizenCore currently implements the following boot and startup sequence:
 3. **Kernel startup:** The kernel initializes the display, calibrates its clock, and plays the startup animation. The animation features a logo and the `NetizenCore` wordmark fading from blurred to sharp, a breathing line beneath them, a `PREPARING SETUP` message, and blinking dots.
 4. **Initial setup screen:** Once the preparation sequence finishes, the startup animation fades away and the `Welcome` setup screen appears. Execution currently stops at this screen.
 
+5. <img width="1279" height="715" alt="Ekran Görüntüsü - 2026-10-18 13-32-20" src="https://github.com/user-attachments/assets/c0cac5a2-7df9-4ca0-bf78-f96b82120616" />
+
+
 ## Interface Design
 
 NetizenCore uses a clean, predominantly white interface inspired by HarmonyOS and EMUI.
@@ -26,6 +32,9 @@ NetizenCore uses a clean, predominantly white interface inspired by HarmonyOS an
 Frutiger Aero influences are reserved for subtle visual accents rather than the entire interface. These include azure and aqua glass spheres, gradient pill-shaped elements, and a soft highlight effect on cards.
 
 For detailed interface specifications and implementation information, see [`crates/nc-ui/README.md`](crates/nc-ui/README.md).
+
+<img width="1279" height="715" alt="Ekran Görüntüsü - 2026-10-18 13-32-04" src="https://github.com/user-attachments/assets/778c1f9a-a4ad-459e-ada9-2ed281b4b75f" />
+
 
 ## Build Profiles
 
