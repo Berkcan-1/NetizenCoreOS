@@ -21,6 +21,8 @@ members = [
     "crates/nc-desktop",
     "crates/nc-app",
     "crates/nc-app-files",
+    "crates/nc-uefi",
+    "crates/nc-js",
     "crates/nc-app-browser",
     "crates/nc-app-settings",
     "crates/nc-app-system",

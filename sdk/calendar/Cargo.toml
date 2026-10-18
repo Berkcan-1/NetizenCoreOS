@@ -1,0 +1,16 @@
+[package]
+name = "calendar"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+nc-sdk = { path = "../nc-sdk" }
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+
+# Bu satırı ekleyerek paketi ana workspace'ten izole ediyoruz:
+[workspace]

@@ -35,6 +35,14 @@ SECTIONS
         __bss_end = .;
     }
 
+    .stack : ALIGN(16)
+    {
+        __stack_bottom = .;
+        KEEP(*(.stack))
+        . = ALIGN(16);
+        __stack_top = .;
+    }
+
     /DISCARD/ :
     {
         *(.eh_frame*)

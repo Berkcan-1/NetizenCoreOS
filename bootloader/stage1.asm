@@ -86,17 +86,19 @@ entry:
     mov bx, 0x08
     mov ds, bx
     mov es, bx
-    and al, 0xFE
-    mov cr0, eax
-    xor ax, ax
-    mov ds, ax
-    mov es, ax
+
 
     mov esi, BOUNCE_BUFFER
     mov edi, [target_ptr]
     mov ecx, 512
     a32 rep movsd
     mov [target_ptr], edi
+
+    and al, 0xFE
+    mov cr0, eax
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
     sti
 
     inc dword [dap_lba]

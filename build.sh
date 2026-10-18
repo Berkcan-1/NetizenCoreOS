@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +54,9 @@ check_tools() {
     need cargo
     need stat
     need truncate
+    need mkfs.vfat
+    need mcopy
+    need mmd
 }
 
 configure_profile() {
@@ -74,22 +78,6 @@ configure_profile() {
     ISO="$BUILD/netizencore-$PROFILE.iso"
 }
 
-build_bootloader() {
-    nasm -f bin "$ROOT/bootloader/mbr.asm" -o "$ROOT/crates/nc-storage/mbr.bin"
-    [ "$(file_size "$ROOT/crates/nc-storage/mbr.bin")" -eq 446 ] || fail "mbr boyutu 446 olmali"
-
-    nasm -f bin "$ROOT/bootloader/stage1.asm" -o "$OUT/stage1.bin"
-    [ "$(file_size "$OUT/stage1.bin")" -eq 2048 ] || fail "stage1 boyutu 2048 olmali"
-
-    nasm -f bin \
-        -DPREFERRED_WIDTH="$PREFERRED_WIDTH" \
-        -DPREFERRED_HEIGHT="$PREFERRED_HEIGHT" \
-        -DFALLBACK_WIDTH="$FALLBACK_WIDTH" \
-        -DFALLBACK_HEIGHT="$FALLBACK_HEIGHT" \
-        "$ROOT/bootloader/stage2.asm" -o "$OUT/stage2.bin"
-    [ "$(file_size "$OUT/stage2.bin")" -eq 4096 ] || fail "stage2 boyutu 4096 olmali"
-}
-
 build_kernel() {
     if command -v rustup >/dev/null 2>&1; then
         rustup target add "$TARGET"
@@ -107,18 +95,55 @@ build_kernel() {
     [ "$size" -le "$KERNEL_LIMIT" ] || fail "kernel $KERNEL_LIMIT bayttan buyuk olamaz (simdiki: $size)"
     local padded=$(( (size + SECTOR - 1) / SECTOR * SECTOR ))
     truncate -s "$padded" "$OUT/kernel.bin"
-    echo "kernel boyutu: $size bayt (dinamik yukleyici aktif)"
+    KERNEL_SECTORS_512=$(( padded / 512 ))
+    echo "kernel boyutu: $size bayt ($KERNEL_SECTORS_512 adet 512B sektor)"
+}
+
+build_bootloader() {
+    nasm -f bin "$ROOT/bootloader/mbr.asm" -o "$ROOT/crates/nc-storage/mbr.bin"
+    [ "$(file_size "$ROOT/crates/nc-storage/mbr.bin")" -eq 446 ] || fail "mbr boyutu 446 olmali"
+
+    nasm -f bin "$ROOT/bootloader/stage1.asm" -o "$OUT/stage1.bin"
+    [ "$(file_size "$OUT/stage1.bin")" -eq 2048 ] || fail "stage1 boyutu 2048 olmali"
+
+    nasm -f bin \
+        -DPREFERRED_WIDTH="$PREFERRED_WIDTH" \
+        -DPREFERRED_HEIGHT="$PREFERRED_HEIGHT" \
+        -DFALLBACK_WIDTH="$FALLBACK_WIDTH" \
+        -DFALLBACK_HEIGHT="$FALLBACK_HEIGHT" \
+        -DKERNEL_SECTORS_512="${KERNEL_SECTORS_512:-4096}" \
+        "$ROOT/bootloader/stage2.asm" -o "$OUT/stage2.bin"
+    [ "$(file_size "$OUT/stage2.bin")" -eq 4096 ] || fail "stage2 boyutu 4096 olmali"
 }
 
 build_uefi_optional() {
-    if [ -f "$ROOT/crates/nc-uefi/Cargo.toml" ] && command -v rustup >/dev/null 2>&1; then
-        rustup target add "$UEFI_TARGET" >/dev/null 2>&1 || true
-        NC_KERNEL_BIN="$OUT/kernel.bin" cargo build --release \
+    if [ -f "$ROOT/crates/nc-uefi/Cargo.toml" ]; then
+        echo "UEFI ikilisi derleniyor..."
+        if command -v rustup >/dev/null 2>&1; then
+            rustup target add "$UEFI_TARGET" >/dev/null 2>&1 || true
+        fi
+        NC_KERNEL_BIN="$OUT/kernel.bin" \
+        NC_STAGE2_BIN="$OUT/stage2.bin" \
+            cargo build --release \
             --manifest-path "$ROOT/crates/nc-uefi/Cargo.toml" \
             --target "$UEFI_TARGET" \
-            --target-dir "$BUILD/cargo-uefi-$PROFILE" && \
-        mkdir -p "$OUT/iso/EFI/BOOT" && \
-        cp "$BUILD/cargo-uefi-$PROFILE/$UEFI_TARGET/release/nc-uefi.efi" "$OUT/iso/EFI/BOOT/BOOTX64.EFI" || true
+            --target-dir "$BUILD/cargo-uefi-$PROFILE"
+
+        local efi_bin="$BUILD/cargo-uefi-$PROFILE/$UEFI_TARGET/release/nc-uefi.efi"
+        [ -f "$efi_bin" ] || fail "nc-uefi.efi derlenemedi"
+
+        mkdir -p "$OUT/iso/EFI/BOOT"
+        cp "$efi_bin" "$OUT/iso/EFI/BOOT/BOOTX64.EFI"
+
+        mkdir -p "$OUT/iso/boot"
+        local img="$OUT/iso/boot/efiboot.img"
+        rm -f "$img"
+        dd if=/dev/zero of="$img" bs=1M count=16 status=none
+        mkfs.vfat -F 16 -n "NETIZEN_EFI" "$img" >/dev/null 2>&1
+        mmd -i "$img" ::EFI || true
+        mmd -i "$img" ::EFI/BOOT || true
+        mcopy -i "$img" "$efi_bin" ::EFI/BOOT/BOOTX64.EFI
+        echo "UEFI FAT boot imaji olusturuldu: $img"
     fi
 }
 
@@ -127,6 +152,17 @@ build_iso() {
     mkdir -p "$OUT/iso/boot"
     cat "$OUT/stage1.bin" "$OUT/stage2.bin" "$OUT/kernel.bin" > "$OUT/iso/boot/ncboot.bin"
     build_uefi_optional
+
+    local uefi_args=()
+    if [ -f "$OUT/iso/boot/efiboot.img" ]; then
+        uefi_args=(
+            -eltorito-alt-boot
+            -e boot/efiboot.img
+            -no-emul-boot
+            -isohybrid-gpt-basdat
+        )
+    fi
+
     "${ISO_CMD[@]}" \
         -V NETIZENCORE \
         -b boot/ncboot.bin \
@@ -134,6 +170,7 @@ build_iso() {
         -no-emul-boot \
         -boot-load-size 4 \
         -boot-info-table \
+        "${uefi_args[@]}" \
         -o "$ISO" \
         "$OUT/iso"
 }
@@ -142,10 +179,54 @@ build_profile() {
     configure_profile "$1"
     rm -rf "$OUT"
     mkdir -p "$OUT"
-    build_bootloader
     build_kernel
+    build_bootloader
     build_iso
     echo "hazir: $ISO"
+}
+
+# LBA 0'daki MBR bootstrap kodunu (ilk 446 bayt) koruyarak
+# Bolum 1 (LBA 2048..65535, 0x83) ve Bolum 2 (LBA 65536..196607, 0xEF ESP) tablosunu kesin hizalar
+ensure_hybrid_partition_table() {
+    local disk_path="$1"
+    local mbr_backup="$BUILD/mbr_code.tmp"
+    dd if="$disk_path" of="$mbr_backup" bs=1 count=446 status=none 2>/dev/null || true
+    if command -v sfdisk >/dev/null 2>&1; then
+        printf "label: dos\nstart=65536, size=65536, type=ef, bootable\n" \
+            | sfdisk --no-reread "$disk_path" >/dev/null 2>&1 || true
+    fi
+    if [ -f "$mbr_backup" ]; then
+        dd if="$mbr_backup" of="$disk_path" bs=1 count=446 conv=notrunc status=none 2>/dev/null || true
+        rm -f "$mbr_backup"
+    fi
+}
+
+write_esp_partition() {
+    local disk_path="$1"
+    local esp_tmp="$BUILD/esp_part.img"
+    rm -f "$esp_tmp"
+    dd if=/dev/zero of="$esp_tmp" bs=1M count=32 status=none
+    mkfs.vfat -F 16 -n "NETIZEN_ESP" "$esp_tmp" >/dev/null 2>&1
+    mmd -i "$esp_tmp" ::EFI ::EFI/BOOT || true
+
+    local efi_bin="$BUILD/cargo-uefi-$PROFILE/$UEFI_TARGET/release/nc-uefi.efi"
+    if [ -f "$efi_bin" ]; then
+        mcopy -i "$esp_tmp" "$efi_bin" ::EFI/BOOT/BOOTX64.EFI
+    fi
+
+    # Tam LBA 65536 (32 MiB) ofsetine 32 MiB'lik ESP yaz (LBA 65536..131071)
+    dd if="$esp_tmp" of="$disk_path" bs=1M seek=32 conv=notrunc status=none
+    rm -f "$esp_tmp"
+}
+
+prepare_hybrid_disk() {
+    local disk_path="$1"
+    if [ ! -f "$disk_path" ]; then
+        echo "Hibrit (BIOS + UEFI) 20 GB disk olusturuluyor: $disk_path"
+        truncate -s 20G "$disk_path"
+        ensure_hybrid_partition_table "$disk_path"
+        write_esp_partition "$disk_path"
+    fi
 }
 
 ascii_clean() {
@@ -233,6 +314,22 @@ start_radio_bridge() {
         while IFS= read -r cmd <&3; do
             cmd=$(echo "$cmd" | tr -d '\r')
             case "$cmd" in
+                CMD:STARTUP_SOUND)
+                    snd_file=$(find "$ROOT/assets/sound" -maxdepth 1 -type f \( -name "*.wav" -o -name "*.mp3" -o -name "*.ogg" \) | head -n 1 || true)
+                    if [ -n "$snd_file" ]; then
+                        if command -v ffplay >/dev/null 2>&1; then
+                            ffplay -nodisp -autoexit -loglevel quiet "$snd_file" >/dev/null 2>&1 &
+                        elif command -v mpv >/dev/null 2>&1; then
+                            mpv --no-video --really-quiet "$snd_file" >/dev/null 2>&1 &
+                        elif command -v mpg123 >/dev/null 2>&1 && [[ "$snd_file" == *.mp3 ]]; then
+                            mpg123 -q "$snd_file" >/dev/null 2>&1 &
+                        elif command -v paplay >/dev/null 2>&1 && [[ "$snd_file" != *.mp3 ]]; then
+                            paplay "$snd_file" >/dev/null 2>&1 &
+                        elif command -v aplay >/dev/null 2>&1 && [[ "$snd_file" == *.wav ]]; then
+                            aplay -q "$snd_file" >/dev/null 2>&1 &
+                        fi
+                    fi
+                    ;;
                 CMD:INIT)
                     send_hw_info
                     ;;
@@ -302,7 +399,31 @@ start_radio_bridge() {
         done
     ) &
     RADIO_PID=$!
-    trap 'kill "$RADIO_PID" 2>/dev/null || true' EXIT
+    trap 'kill "$RADIO_PID" "${USB_WATCH_PID:-}" 2>/dev/null || true' EXIT
+}
+
+resolve_usb_args() {
+    USB_ARGS=()
+    local dev="${USB_DEV:-}"
+    if [ -z "$dev" ] && command -v lsblk >/dev/null 2>&1; then
+        dev=$(lsblk -dnpo NAME,TRAN,TYPE 2>/dev/null | awk '$2=="usb" && $3=="disk" {print $1; exit}')
+    fi
+    if [ -z "$dev" ]; then
+        echo "USB bellek bulunamadi. Takip acin ya da USB_DEV=/dev/sdX verin." >&2
+        return 0
+    fi
+    [ -b "$dev" ] || fail "$dev blok aygiti degil"
+    [ -r "$dev" ] || fail "$dev okunamiyor: kullaniciyi 'disk' grubuna ekleyin veya sudo ile calistirin"
+    lsblk -lnpo NAME,MOUNTPOINT "$dev" 2>/dev/null | awk '$2!="" {print $1}' | while read -r part; do
+        umount "$part" >/dev/null 2>&1 || udisksctl unmount -b "$part" --no-user-interaction >/dev/null 2>&1 || true
+    done
+    local mode="snapshot=on"
+    if [ "${USB_RW:-0}" = "1" ]; then
+        [ -w "$dev" ] || fail "$dev yazilamiyor"
+        mode="snapshot=off"
+    fi
+    USB_ARGS=(-drive "file=$dev,format=raw,if=ide,index=1,media=disk,cache=none,$mode")
+    echo "USB: $dev gercek disk olarak IDE kanal 1'e baglaniyor ($mode)"
 }
 
 run_qemu() {
@@ -312,11 +433,8 @@ run_qemu() {
         accel=(-enable-kvm -cpu host)
     fi
 
-    if [ ! -f "$BUILD/disk.img" ]; then
-        echo "20 GB test diski olusturuluyor: $BUILD/disk.img"
-        truncate -s 20G "$BUILD/disk.img"
-    fi
-
+    prepare_hybrid_disk "$BUILD/disk.img"
+    resolve_usb_args
     start_radio_bridge
 
     local sig=""
@@ -324,29 +442,47 @@ run_qemu() {
         sig=$(dd if="$BUILD/disk.img" bs=1 count=7 skip=3 2>/dev/null | tr -d '\0' || true)
     fi
 
-   if [ "$sig" = "NETIZEN" ]; then
-        echo "Kurulu NetizenCore algilandi: Yeni cekirdek diske yaziliyor ve baslatiliyor..."
+    local ovmf_bios=()
+    for ovmf_path in /usr/share/ovmf/OVMF.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/qemu/OVMF.fd; do
+        if [ -f "$ovmf_path" ]; then
+            ovmf_bios=(-bios "$ovmf_path")
+            break
+        fi
+    done
+
+    if [ "$sig" = "NETIZEN" ] && [ "${FORCE_ISO:-0}" != "1" ]; then
+        echo "Kurulu NetizenCore sabit diskten (ISO olmadan) baslatiliyor..."
+        # Kurulum sirasinda MBR bolum tablosundaki 0xEF ESP kaydi ezildiyse geri yukle
+        ensure_hybrid_partition_table "$BUILD/disk.img"
         dd if="$OUT/stage2.bin" of="$BUILD/disk.img" bs=512 seek=2048 conv=notrunc status=none
         dd if="$OUT/kernel.bin" of="$BUILD/disk.img" bs=512 seek=2056 conv=notrunc status=none
+        write_esp_partition "$BUILD/disk.img"
+
         qemu-system-x86_64 \
             ${accel[@]+"${accel[@]}"} \
-            -m 256 \
+            ${ovmf_bios[@]+"${ovmf_bios[@]}"} \
+            -m 512 \
             -drive file="$BUILD/disk.img",format=raw,if=ide,index=0,media=disk \
+            ${USB_ARGS[@]+"${USB_ARGS[@]}"} \
             -boot order=c \
             -netdev user,id=net0 \
             -device e1000,netdev=net0 \
             -vga std \
+            -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
+            -device AC97,audiodev=snd0 \
             -serial stdio \
             -chardev pipe,id=ncradio,path="$BUILD/radio" \
             -serial chardev:ncradio \
             -debugcon "file:$BUILD/debugcon.log" \
             -device isa-debug-exit,iobase=0xf4,iosize=0x04
     else
-        echo "Kurulum medyasi (ISO) ile baslatiliyor (kurulum bitince diskten acilacak)..."
+        echo "Kurulum medyasi (ISO) ile baslatiliyor..."
         qemu-system-x86_64 \
             ${accel[@]+"${accel[@]}"} \
-            -m 256 \
+            ${ovmf_bios[@]+"${ovmf_bios[@]}"} \
+            -m 512 \
             -drive file="$BUILD/disk.img",format=raw,if=ide,index=0,media=disk \
+            ${USB_ARGS[@]+"${USB_ARGS[@]}"} \
             -cdrom "$ISO" \
             -boot once=d,order=c \
             -netdev user,id=net0 \
@@ -360,7 +496,6 @@ run_qemu() {
     fi
 }
 
-# build.sh içinde run_vbox() fonksiyonunu bununla değiştir:
 build_drivers() {
     mkdir -p "$ROOT/drivers" "$BUILD/drivers"
     cat > "$ROOT/drivers/generic-display.efra.src" << 'EOF'
@@ -377,25 +512,57 @@ write_combining=true
 dma_burst=true
 EOF
     printf "EFRA\x01\x00\x00\x00" > "$BUILD/drivers/generic-display.efra"
-    echo "Harici .efra derleme alani hazir: $BUILD/drivers/generic-display.efra (ve cekirdek ici EfraCompiler aktif)"
+    echo "Harici .efra derleme alani hazir: $BUILD/drivers/generic-display.efra"
 }
 
 run_vbox() {
     need VBoxManage
+    local fw_mode="${VBOX_FIRMWARE:-efi}"
+
     if ! VBoxManage showvminfo "$VM_NAME" >/dev/null 2>&1; then
         VBoxManage createvm --name "$VM_NAME" --ostype Other_64 --register
-        VBoxManage modifyvm "$VM_NAME" --memory 512 --vram 64 --firmware bios \
+        VBoxManage modifyvm "$VM_NAME" --memory 512 --vram 64 --firmware "$fw_mode" \
             --graphicscontroller vboxvga --nic1 nat --nictype1 82540EM \
             --boot1 dvd --boot2 disk --boot3 none --boot4 none
         VBoxManage storagectl "$VM_NAME" --name IDE --add ide
+    else
+        VBoxManage modifyvm "$VM_NAME" --firmware "$fw_mode"
     fi
+
     if [ ! -f "$BUILD/vbox-disk.vdi" ]; then
-        VBoxManage createmedium disk --filename "$BUILD/vbox-disk.vdi" --size 20480 --format VDI
+        echo "VirtualBox icin Hibrit (BIOS + UEFI) sabit disk hazirlaniyor..."
+        local raw_disk="$BUILD/vbox-raw.img"
+        rm -f "$raw_disk"
+        prepare_hybrid_disk "$raw_disk"
+        VBoxManage convertfromraw "$raw_disk" "$BUILD/vbox-disk.vdi" --format VDI
+        rm -f "$raw_disk"
+        echo "Hibrit vbox-disk.vdi olusturuldu."
     fi
+
     VBoxManage storageattach "$VM_NAME" --storagectl IDE --port 0 --device 0 \
         --type hdd --medium "$BUILD/vbox-disk.vdi"
-    VBoxManage storageattach "$VM_NAME" --storagectl IDE --port 1 --device 0 \
-        --type dvddrive --medium "$ISO"
+
+    # Eger VDI diske kurulum yapildiysa ("NETIZEN" imzasi varsa), ESP tablosunu onar ve ISO'yu cikar
+    local check_raw="$BUILD/vbox-head.bin"
+    rm -f "$check_raw"
+    VBoxManage internalcommands converttoraw -start 0 -size 1024 "$BUILD/vbox-disk.vdi" "$check_raw" >/dev/null 2>&1 || true
+    local vbox_sig=""
+    if [ -f "$check_raw" ]; then
+        vbox_sig=$(dd if="$check_raw" bs=1 count=7 skip=3 2>/dev/null | tr -d '\0' || true)
+        rm -f "$check_raw"
+    fi
+
+    if [ "$vbox_sig" = "NETIZEN" ] && [ "${FORCE_ISO:-0}" != "1" ]; then
+        echo "VirtualBox: Kurulu sistem tespit edildi, ISO cikariliyor ve diskten baslatiliyor..."
+        VBoxManage storageattach "$VM_NAME" --storagectl IDE --port 1 --device 0 \
+            --type dvddrive --medium emptydrive >/dev/null 2>&1 || true
+        VBoxManage modifyvm "$VM_NAME" --boot1 disk --boot2 dvd
+    else
+        VBoxManage storageattach "$VM_NAME" --storagectl IDE --port 1 --device 0 \
+            --type dvddrive --medium "$ISO"
+        VBoxManage modifyvm "$VM_NAME" --boot1 dvd --boot2 disk
+    fi
+
     VBoxManage startvm "$VM_NAME"
 }
 
@@ -432,7 +599,7 @@ case "${1:-qemu}" in
         rm -rf "$BUILD"
         ;;
     *)
-        echo "kullanim: bash build.sh [qemu|generic|all|run|vbox|clean]" >&2
+        echo "kullanim: bash build.sh [qemu|generic|drivers|all|run|vbox|clean]" >&2
         exit 1
         ;;
 esac
