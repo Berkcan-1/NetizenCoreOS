@@ -8,7 +8,7 @@
 
 The project is designed to boot in QEMU and currently implements a BIOS-based boot sequence, 64-bit processor initialization, graphics setup, and an animated startup experience leading to an initial setup screen.
 
-Source code contains no inline comments. Detailed explanations of each component, its responsibilities, and its implementation are provided in the corresponding `README.md` files throughout the repository.
+
 
 ## Current Features
 
