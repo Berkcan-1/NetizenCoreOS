@@ -1,13 +1,28 @@
 #![no_std]
+
 use core::arch::asm;
 
+pub mod idt;
 pub mod rand;
 pub mod serial;
 pub mod time;
 
 pub unsafe fn disable_pic() {
-    outb(0x21, 0xFF); // Master PIC tüm kesmeleri maskele
-    outb(0xA1, 0xFF); // Slave PIC tüm kesmeleri maskele
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
+}
+
+#[inline]
+pub fn wait_for_interrupt() {
+    unsafe {
+        let rflags: u64;
+        asm!("pushfq; pop {}", out(reg) rflags, options(nomem, preserves_flags));
+        if rflags & 0x200 != 0 {
+            asm!("hlt", options(nomem, nostack, preserves_flags));
+        } else {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 pub unsafe fn outb(port: u16, value: u8) {

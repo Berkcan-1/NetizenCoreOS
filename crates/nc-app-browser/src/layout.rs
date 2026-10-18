@@ -85,6 +85,7 @@ pub enum WidgetKind {
 
 #[derive(Clone, Debug)]
 pub struct LayoutBox {
+    pub node_id: usize,
     pub rect: Rect,
     pub text: Option<String>,
     pub style: ComputedStyle,
@@ -355,6 +356,7 @@ impl LayoutEngine {
                     for word in raw_text.split_whitespace() {
                         let ww = text_width(word, &font).sclamp(6, max_width);
                         out.push(LayoutBox {
+                            node_id: nid,
                             rect: Rect::new(0, 0, ww, lh),
                             text: Some(String::from(word)),
                             style: st.clone(),
@@ -370,6 +372,7 @@ impl LayoutEngine {
                     }
                     if tag == "br" {
                         out.push(LayoutBox {
+                            node_id: nid,
                             rect: Rect::new(0, 0, -1, 0),
                             text: None,
                             style: parent_style.clone(),
@@ -509,6 +512,7 @@ impl LayoutEngine {
                 if tag == "hr" {
                     *cursor_y += 6;
                     let hr_box = LayoutBox {
+                        node_id: node_id,
                         rect: Rect::new(x, *cursor_y, available_width, 2),
                         text: None,
                         style,
@@ -538,6 +542,7 @@ impl LayoutEngine {
                     let bx = align_x(x, available_width, iw, style.text_align);
                     let top_y = *cursor_y + collapsed_top;
                     let svg_box = LayoutBox {
+                        node_id: node_id,
                         rect: Rect::new(bx, top_y, iw, ih),
                         text: None,
                         style: style.clone(),
@@ -589,6 +594,7 @@ impl LayoutEngine {
                     let bx = align_x(x, available_width, iw, style.text_align);
                     let top_y = *cursor_y + collapsed_top;
                     let img_box = LayoutBox {
+                        node_id: node_id,
                         rect: Rect::new(bx, top_y, iw, ih),
                         text: None,
                         style: style.clone(),
@@ -627,6 +633,7 @@ impl LayoutEngine {
                         let bh = 30;
                         let bx = align_x(x, available_width, bw, style.text_align);
                         let btn_box = LayoutBox {
+                            node_id: node_id,
                             rect: Rect::new(bx, top_y, bw, bh),
                             text: Some(label.clone()),
                             style: style.clone(),
@@ -656,6 +663,7 @@ impl LayoutEngine {
                     let ih = 34;
                     let bx = align_x(x, available_width, iw, style.text_align);
                     let input_box = LayoutBox {
+                        node_id: node_id,
                         rect: Rect::new(bx, top_y, iw, ih),
                         text: None,
                         style: style.clone(),
@@ -694,6 +702,7 @@ impl LayoutEngine {
                     let bx = align_x(x, available_width, bw, style.text_align);
                     let top_y = *cursor_y + collapsed_top;
                     let btn_box = LayoutBox {
+                        node_id: node_id,
                         rect: Rect::new(bx, top_y, bw, bh),
                         text: Some(label.clone()),
                         style: style.clone(),
@@ -773,6 +782,7 @@ impl LayoutEngine {
                 *prev_margin_bottom = style.margin_bottom;
 
                 Some(LayoutBox {
+                    node_id: node_id,
                     rect: Rect::new(box_x, start_y, box_w, block_h),
                     text: None,
                     style,
@@ -796,6 +806,7 @@ impl LayoutEngine {
                     let lw = text_width(&l, &font).min(available_width);
                     let lx = align_x(x, available_width, lw, st.text_align);
                     children.push(LayoutBox {
+                        node_id: node_id,
                         rect: Rect::new(lx, *cursor_y, lw.max(8), line_h),
                         text: Some(l),
                         style: st.clone(),
@@ -809,6 +820,7 @@ impl LayoutEngine {
                 *cursor_y += 4;
                 *prev_margin_bottom = 4;
                 Some(LayoutBox {
+                    node_id: node_id,
                     rect: Rect::new(x, start_y, available_width, total_h),
                     text: None,
                     style: st,

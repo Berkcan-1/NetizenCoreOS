@@ -9,3 +9,4 @@ nc-ui = { path = "../nc-ui" }
 nc-gfx = { path = "../nc-gfx" }
 nc-font = { path = "../nc-font" }
 nc-net = { path = "../nc-net" }
+nc-js = { path = "../nc-js" }

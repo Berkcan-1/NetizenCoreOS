@@ -5,6 +5,8 @@ extern crate alloc;
 pub mod icon;
 pub mod text;
 pub mod theme;
+pub mod locale;
+
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -12,6 +14,7 @@ use nc_gfx::{Canvas, Rect};
 
 pub use icon::{draw_icon, Icon};
 pub use nc_hal::KeyCode;
+pub use locale::{ tr, KeyboardLayout, Language, TextId };
 
 pub struct AppInfo {
     pub id: String,
@@ -54,6 +57,8 @@ pub struct Settings {
     pub launch_anim_speed: u8,
     pub wifi_enabled: bool,
     pub bluetooth_enabled: bool,
+    pub language: Language,
+    pub keyboard: KeyboardLayout,
 }
 
 impl Settings {
@@ -61,14 +66,16 @@ impl Settings {
         Settings {
             wallpaper: 0,
             accent: 0,
-            wallpaper_animated: true,
+            wallpaper_animated: false, // Boşta sıfır CPU/GPU yükü (Ayarlar'dan açılabilir)
             wallpaper_speed: 2,
             custom_wallpaper: None,
-            glass_blur: 2,
-            dock_auto_hide: true,
-            launch_anim_speed: 2,
+            glass_blur: 1,             // Hafif ve akıcı cam geçişi
+            dock_auto_hide: false,     // Sabit ve sade dock (fare hareketinde sürekli animasyon tetiklemez)
+            launch_anim_speed: 3,      // Anında pencere açılışı
             wifi_enabled: true,
             bluetooth_enabled: true,
+            language: Language::Turkish,
+            keyboard: KeyboardLayout::TurkishQ,
         }
     }
 
@@ -94,6 +101,7 @@ pub struct Pointer {
     pub y: i32,
     pub down: bool,
     pub clicked: bool,
+    pub right_clicked: bool,
 }
 
 #[derive(Clone, Copy)]

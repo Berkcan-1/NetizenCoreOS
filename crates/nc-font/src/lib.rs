@@ -58,18 +58,19 @@ impl Path {
     }
 }
 
+// crates/nc-font/src/lib.rs içinde normalize_char fonksiyonunu bununla değiştir:
 fn normalize_char(c: char) -> char {
     match c {
-        'â' | 'ä' | 'à' | 'á' | 'ã' | 'å' => 'a',
-        'Â' | 'Ä' | 'À' | 'Á' | 'Ã' | 'Å' => 'A',
-        'ê' | 'ë' | 'è' | 'é' => 'e',
-        'Ê' | 'Ë' | 'È' | 'É' => 'E',
-        'î' | 'ï' | 'ì' | 'í' => 'i',
-        'Î' | 'Ï' | 'Ì' | 'Í' => 'I',
-        'ô' | 'ø' | 'ò' | 'ó' => 'o',
-        'Ô' | 'Ø' | 'Ò' | 'Ó' => 'O',
-        'û' | 'ù' | 'ú' => 'u',
-        'Û' | 'Ù' | 'Ú' => 'U',
+        '\u{00E0}' | '\u{00E1}' | '\u{00E2}' | '\u{00E4}' => 'a',
+        '\u{00C0}' | '\u{00C1}' | '\u{00C2}' | '\u{00C4}' => 'A',
+        '\u{00E8}' | '\u{00E9}' | '\u{00EA}' | '\u{00EB}' => 'e',
+        '\u{00C8}' | '\u{00C9}' | '\u{00CA}' | '\u{00CB}' => 'E',
+        '\u{00EC}' | '\u{00ED}' | '\u{00EE}' | '\u{00EF}' => 'i',
+        '\u{00CC}' | '\u{00CD}' | '\u{00CE}' | '\u{00CF}' => 'I',
+        '\u{00F2}' | '\u{00F3}' | '\u{00F4}' => 'o',
+        '\u{00D2}' | '\u{00D3}' | '\u{00D4}' => 'O',
+        '\u{00F9}' | '\u{00FA}' | '\u{00FB}' => 'u',
+        '\u{00D9}' | '\u{00DA}' | '\u{00DB}' => 'U',
         _ => c,
     }
 }
@@ -805,8 +806,9 @@ fn draw_path(path: &Path, origin_x: i32, origin_y: i32, style: &Style, plot: &mu
     }
 }
 
+
 fn effective_tracking(style: &Style) -> i32 {
-    style.tracking.max(style.cap_height * 22 / 100).max(2)
+    (style.cap_height * 14 / 100).max(2)
 }
 
 pub fn text_width(text: &str, style: &Style) -> i32 {
@@ -825,9 +827,10 @@ pub fn text_width(text: &str, style: &Style) -> i32 {
 
 pub fn draw_text(text: &str, x: i32, y: i32, style: &Style, plot: &mut dyn FnMut(i32, i32, u8)) {
     let mut cursor = x;
+    let track = effective_tracking(style);
     for character in text.chars() {
         let path = glyph(character);
         draw_path(&path, cursor, y, style, plot);
-        cursor += glyph_width_pixels(&path, style.cap_height) + style.tracking;
+        cursor += glyph_width_pixels(&path, style.cap_height) + track;
     }
 }

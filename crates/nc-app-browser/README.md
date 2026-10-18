@@ -4,13 +4,13 @@ NetizenCore tarayici uygulamasi. HTML ayristirici, CSS motoru, yerlesim motoru v
 
 ## Dosyalar
 
-- lib.rs: BrowserApp, gezinme, alt kaynak kuyrugu, hata sayfasi, cizim
+- lib.rs: modulleri baglar. BrowserApp, B/F/R gecmisi, ana belge + css + resim kuyrugu, form gonderimi, hata sayfasi, cizim
 - html.rs: tokenizer, DOM agaci, metin temizleme, YouTube ve meta yedek kartlari
 - css.rs: stylesheet ayristirma, secici eslestirme, var() cozumleme, media sorgusu degerlendirme, SafeClamp
 - layout.rs: akis yerlesimi, satir ici yerlesim, tablo satiri, hesaplanan stiller
 - image.rs: PNG, JPEG, BMP, SVG cozucu
 - url.rs: URL normalize ve cozumleme
-- engine.rs: eski motor, derlenmez, referans icin duruyor
+- legacy/: eski monolit lib.rs ve eski engine.rs, derlemeye dahil degil, sadece referans
 
 ## Kararlilik kurallari
 
@@ -28,3 +28,14 @@ NetizenCore tarayici uygulamasi. HTML ayristirici, CSS motoru, yerlesim motoru v
 - Gorunum alani altina durum cubugu zemini cizilir, tasan kutular durum cubugunun ustune cikmaz.
 - Gorunum alani yuksekligi cizim, tiklama ve kaydirma icin ayni (area.height - unit * 7) degerini kullanir.
 - HTML ayristirma siniri 1 MB, yanit siniri 1 MB.
+
+## JavaScript koprusu (v6)
+- `jsdom.rs`: nc-js motorunu DOM'a baglar. Rust tarafi yalnizca ilkel dugum islemlerini (`__dom.*`) ve ag kuyrugunu saglar.
+- `prelude.js`: DOM/BOM'un kendisi JavaScript ile yazildi (Node, Element, Document, olay sistemi, classList, style, dataset,
+  location, URL/URLSearchParams, localStorage, fetch, XMLHttpRequest, MutationObserver taslaklari...). Sayfa basina bir kez calisir.
+- `sel.rs`: querySelector icin secici motoru (`>`, `+`, `~`, `[attr^=]`, `:not()`, `:nth-child()`...).
+- Yukleme sirasi: ana belge -> CSS -> scriptler (belge sirasiyla; satir ici ve `src`) -> DOMContentLoaded/load -> resimler.
+  JS'in sonradan eklediği `<script src>`, `<link>`, `<img>` ogeleri de yuklenir.
+- Hata ayiklama: adres cubuguna `about:debug` yaz (script hatalari + console.log ciktilari), `view-source:URL` ham HTML'i gosterir.
+  Durum cubugunda `JS ERR n` gorunur.
+- Sinirlar: yalnizca GET isteklerini yapabilir (fetch/XHR POST yok), cerez yok, `<script type=module>` atlanir.

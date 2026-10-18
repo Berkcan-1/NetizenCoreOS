@@ -1,5 +1,6 @@
+// crates/nc-app/src/text.rs
 use nc_font::{text_width, Style};
-use nc_gfx::Canvas;
+use nc_gfx::{Canvas, Rect};
 use nc_ui::draw_text_color;
 
 pub struct Line {
@@ -61,5 +62,30 @@ pub fn shadowed(canvas: &mut Canvas<'_>, text: &str, x: i32, y: i32, style: &Sty
 pub fn horizontal_line(canvas: &mut Canvas<'_>, x: i32, y: i32, width: i32, color: u32, alpha: u8) {
     for offset in 0..width {
         canvas.blend_pixel(x + offset, y, color, alpha);
+    }
+}
+
+pub fn draw_text_clipped(
+    canvas: &mut Canvas<'_>,
+    text: &str,
+    x: i32,
+    y: i32,
+    max_width: i32,
+    style: &Style,
+    color: u32,
+) {
+    if max_width <= 4 {
+        return;
+    }
+    let prev_clip = canvas.clip_rect();
+    let box_clip = Rect::new(x, y - 4, max_width, style.cap_height + 10);
+    let cx0 = box_clip.x.max(prev_clip.x);
+    let cy0 = box_clip.y.max(prev_clip.y);
+    let cx1 = (box_clip.x + box_clip.width).min(prev_clip.x + prev_clip.width);
+    let cy1 = (box_clip.y + box_clip.height).min(prev_clip.y + prev_clip.height);
+    if cx1 > cx0 && cy1 > cy0 {
+        canvas.set_clip(Rect::new(cx0, cy0, cx1 - cx0, cy1 - cy0));
+        draw_text_color(canvas, text, x, y, style, color);
+        canvas.set_clip(prev_clip);
     }
 }

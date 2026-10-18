@@ -1,3 +1,4 @@
+// crates/nc-fs/src/lib.rs
 #![no_std]
 
 extern crate alloc;
@@ -6,6 +7,8 @@ pub mod erofs;
 pub mod exfat;
 pub mod memfs;
 pub mod vfs;
+pub mod fat32;
+
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -13,17 +16,20 @@ use alloc::vec::Vec;
 
 pub use erofs::Erofs;
 pub use exfat::Exfat;
+pub use fat32::Fat32;
 pub use memfs::MemFs;
 pub use vfs::{DirEntry, FileStat, FileSystem, FileType, FsError};
 
 use nc_storage::{
-    make_ntzc_pkg, make_sample_mp4, make_sample_png, scan_channel, AtaPartition,
+    find_external_usb_disk, make_ntzc_pkg, make_sample_mp4, make_sample_png, scan_channel,
+    AtaPartition,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PartitionTarget {
     System,
     Data,
+    Usb,
     Ram,
 }
 
@@ -43,6 +49,9 @@ pub struct PartitionMetrics {
 pub struct VfsManager {
     system_fs: Option<Erofs>,
     data_fs: Option<Exfat>,
+    usb_fs: Option<Box<dyn FileSystem>>,
+    usb_model: String,
+    usb_total_mb: u64,
     ram_fs: MemFs,
 }
 
@@ -50,58 +59,88 @@ impl VfsManager {
     pub fn new() -> Self {
         let mut system_fs = None;
         let mut data_fs = None;
+
         if let Some(ata) = nc_storage::find_installed_disk().or_else(|| scan_channel(0)) {
             let part1 = AtaPartition::new(ata, 133_120, 4_194_304);
             if let Ok(fs) = Erofs::new(Box::new(part1)) {
                 system_fs = Some(fs);
             }
+
             let part3 = AtaPartition::new(ata, 4_851_712, 2_097_152);
             if let Ok(mut fs) = Exfat::new(Box::new(part3)) {
-                Self::ensure_data_structure(&mut fs);
+                Self::init_locale_once(&mut fs);
                 data_fs = Some(fs);
             }
         }
-        let mut ram_fs = MemFs::new();
-        let _ = ram_fs.write_file("media/ornek_gorsel.png", &make_sample_png(1));
-        let _ = ram_fs.write_file("media/tanitim_klip.mp4", &make_sample_mp4(1, 24));
-        VfsManager {
+
+        let mut vfs = VfsManager {
             system_fs,
             data_fs,
-            ram_fs,
+            usb_fs: None,
+            usb_model: String::from("Takili Degil"),
+            usb_total_mb: 0,
+            ram_fs: MemFs::new(),
+        };
+        vfs.rescan_usb();
+        vfs
+    }
+
+    fn init_locale_once(fs: &mut Exfat) {
+        if fs.read_file("system/locale.cfg").is_err() {
+            if let Some((lang, kbd)) = nc_storage::read_initial_locale() {
+                let _ = fs.create_dir("system");
+                let cfg = alloc::format!("lang={}\nkbd={}\n", lang, kbd);
+                let _ = fs.write_file("system/locale.cfg", cfg.as_bytes());
+            }
         }
     }
 
-    fn ensure_data_structure(fs: &mut Exfat) {
-        let _ = fs.create_dir("app");
-        let _ = fs.create_dir("media");
-        let _ = fs.create_dir("documents");
-        let _ = fs.create_dir("drivers");
-        if fs.read_file("app/calculator.ntzc").is_err() {
-            let pkg = make_ntzc_pkg("nc.calculator", "Hesap Makinesi", "generic", 28, 22, 10001, 4);
-            let _ = fs.write_file("app/calculator.ntzc", &pkg);
+   pub fn rescan_usb(&mut self) -> bool {
+        if let Some((dev, start_lba, sectors)) = find_external_usb_disk() {
+            let model = String::from(dev.info.model_str());
+            let total_mb = (sectors * 512 / (1024 * 1024)).max(16);
+            let part = AtaPartition::new(dev, start_lba, sectors);
+            if let Ok(fs) = Exfat::new(Box::new(part)) {
+                self.usb_fs = Some(Box::new(fs));
+                self.usb_model = model;
+                self.usb_total_mb = total_mb;
+                return true;
+            }
+            let part2 = AtaPartition::new(dev, start_lba, sectors);
+            if let Ok(fs) = Fat32::new(Box::new(part2)) {
+                self.usb_fs = Some(Box::new(fs));
+                self.usb_model = model;
+                self.usb_total_mb = total_mb;
+                return true;
+            }
         }
-        if fs.read_file("media/aurora_cam.png").is_err() {
-            let png = make_sample_png(0);
-            let _ = fs.write_file("media/aurora_cam.png", &png);
-        }
-        if fs.read_file("media/aero_tanitim.mp4").is_err() {
-            let mp4 = make_sample_mp4(0, 18);
-            let _ = fs.write_file("media/aero_tanitim.mp4", &mp4);
-        }
-        if fs.read_file("documents/hosgeldiniz.txt").is_err() {
-            let txt = b"NetizenCore Kalici Veri Bolumu (/data - exFAT)\n==============================================\nBu bolumde olusturdugunuz tum .txt, .png, .mp4 ve .ntzc\ndosyalari dogrudan sabit diske yazilir ve silinmez.\n";
-            let _ = fs.write_file("documents/hosgeldiniz.txt", txt);
-        }
+        self.usb_fs = None;
+        self.usb_model = String::from("Takili Degil");
+        self.usb_total_mb = 0;
+        false
     }
 
-    pub fn partition_metrics(&mut self) -> Vec<PartitionMetrics> {
+    pub fn is_usb_online(&self) -> bool {
+        self.usb_fs.is_some()
+    }
+
+    pub fn usb_label(&self) -> &str {
+        &self.usb_model
+    }
+
+        pub fn partition_metrics(&mut self) -> Vec<PartitionMetrics> {
+             self.rescan_usb();
         let sys_online = self.system_fs.is_some();
         let data_online = self.data_fs.is_some();
+        let usb_online = self.usb_fs.is_some();
         let data_used_mb = if let Some(ref mut dfs) = self.data_fs {
             ((dfs.used_clusters_count() as u64) * 4 / 1024).max(16)
         } else {
             24
         };
+        let usb_used_mb = if self.usb_fs.is_some() { 4 } else { 0 };
+
+
         alloc::vec![
             PartitionMetrics {
                 mount_point: "/boot",
@@ -126,19 +165,8 @@ impl VfsManager {
                 online: sys_online,
             },
             PartitionMetrics {
-                mount_point: "/security",
-                label: "Bolum 3: Guvenlik Kasasi",
-                fs_type: "KeyVault",
-                start_lba: 4_327_424,
-                sector_count: 524_288,
-                total_mb: 256,
-                used_mb: 12,
-                readonly: true,
-                online: true,
-            },
-            PartitionMetrics {
                 mount_point: "/data",
-                label: "Bolum 4: Kullanici Verisi",
+                label: "Bolum 4: Kisisel Disk",
                 fs_type: "exFAT",
                 start_lba: 4_851_712,
                 sector_count: 2_097_152,
@@ -146,6 +174,17 @@ impl VfsManager {
                 used_mb: data_used_mb,
                 readonly: false,
                 online: data_online,
+            },
+            PartitionMetrics {
+                mount_point: "/usb",
+                label: "Harici USB / SSD Surucu",
+                fs_type: "exFAT",
+                start_lba: 0,
+                sector_count: self.usb_total_mb * 2048,
+                total_mb: self.usb_total_mb.max(64),
+                used_mb: usb_used_mb,
+                readonly: false,
+                online: usb_online,
             },
             PartitionMetrics {
                 mount_point: "/ram",
@@ -176,51 +215,39 @@ impl VfsManager {
     pub fn list_dir_path(&mut self, path: &str) -> Result<Vec<DirEntry>, FsError> {
         let (mount, rel) = self.split_mount_path(path);
         if mount.is_empty() {
-            return Ok(alloc::vec![
+            let mut root_list = alloc::vec![
                 DirEntry {
-                    name: String::from("system"),
+                    name: String::from("data"),
                     file_type: FileType::Directory,
                     size: 0,
                     id: 1,
                 },
                 DirEntry {
-                    name: String::from("data"),
+                    name: String::from("usb"),
                     file_type: FileType::Directory,
                     size: 0,
                     id: 2,
                 },
                 DirEntry {
-                    name: String::from("ram"),
+                    name: String::from("system"),
                     file_type: FileType::Directory,
                     size: 0,
                     id: 3,
                 },
-            ]);
+                DirEntry {
+                    name: String::from("ram"),
+                    file_type: FileType::Directory,
+                    size: 0,
+                    id: 4,
+                },
+            ];
+            let _ = &mut root_list;
+            return Ok(root_list);
         }
         match mount {
             "system" => {
                 if let Some(ref mut fs) = self.system_fs {
-                    if let Ok(mut res) = fs.list_dir(rel) {
-                        if rel.trim_matches('/') == "app" && !res.iter().any(|e| e.name == "files.ntzc") {
-                            res.insert(
-                                0,
-                                DirEntry {
-                                    name: String::from("files.ntzc"),
-                                    file_type: FileType::RegularFile,
-                                    size: 256,
-                                    id: 90,
-                                },
-                            );
-                            res.insert(
-                                1,
-                                DirEntry {
-                                    name: String::from("browser.ntzc"),
-                                    file_type: FileType::RegularFile,
-                                    size: 256,
-                                    id: 91,
-                                },
-                            );
-                        }
+                    if let Ok(res) = fs.list_dir(rel) {
                         return Ok(res);
                     }
                 }
@@ -234,6 +261,15 @@ impl VfsManager {
                 }
                 Self::fallback_dir(PartitionTarget::Data, rel)
             }
+                "usb" => {
+                self.rescan_usb();
+                if let Some(ref mut fs) = self.usb_fs {
+                    fs.list_dir(rel)
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+
             "ram" => self.ram_fs.list_dir(rel),
             _ => Err(FsError::NotFound),
         }
@@ -258,6 +294,13 @@ impl VfsManager {
                 }
                 Self::fallback_read(PartitionTarget::Data, rel)
             }
+            "usb" => {
+                if let Some(ref mut fs) = self.usb_fs {
+                    fs.read_file(rel)
+                } else {
+                    Err(FsError::NotFound)
+                }
+            }
             "ram" => self.ram_fs.read_file(rel),
             _ => Err(FsError::NotFound),
         }
@@ -271,6 +314,13 @@ impl VfsManager {
                     fs.write_file(rel, content)
                 } else {
                     self.ram_fs.write_file(rel, content)
+                }
+            }
+            "usb" => {
+                if let Some(ref mut fs) = self.usb_fs {
+                    fs.write_file(rel, content)
+                } else {
+                    Err(FsError::DiskError)
                 }
             }
             "ram" => self.ram_fs.write_file(rel, content),
@@ -289,6 +339,13 @@ impl VfsManager {
                     self.ram_fs.create_dir(rel)
                 }
             }
+            "usb" => {
+                if let Some(ref mut fs) = self.usb_fs {
+                    fs.create_dir(rel)
+                } else {
+                    Err(FsError::DiskError)
+                }
+            }
             "ram" => self.ram_fs.create_dir(rel),
             "system" => Err(FsError::ReadOnly),
             _ => Err(FsError::NotFound),
@@ -303,6 +360,13 @@ impl VfsManager {
                     fs.remove(rel)
                 } else {
                     self.ram_fs.remove(rel)
+                }
+            }
+            "usb" => {
+                if let Some(ref mut fs) = self.usb_fs {
+                    fs.remove(rel)
+                } else {
+                    Err(FsError::DiskError)
                 }
             }
             "ram" => self.ram_fs.remove(rel),
@@ -337,6 +401,13 @@ impl VfsManager {
                     })
                 }
             }
+            "usb" => {
+                if let Some(ref mut fs) = self.usb_fs {
+                    fs.file_stat(rel)
+                } else {
+                    Err(FsError::NotFound)
+                }
+            }
             "ram" => self.ram_fs.file_stat(rel),
             _ => Err(FsError::NotFound),
         }
@@ -346,6 +417,7 @@ impl VfsManager {
         let full_path = match target {
             PartitionTarget::System => alloc::format!("/system/{}", path.trim_start_matches('/')),
             PartitionTarget::Data => alloc::format!("/data/{}", path.trim_start_matches('/')),
+            PartitionTarget::Usb => alloc::format!("/usb/{}", path.trim_start_matches('/')),
             PartitionTarget::Ram => alloc::format!("/ram/{}", path.trim_start_matches('/')),
         };
         self.list_dir_path(&full_path)
@@ -355,6 +427,7 @@ impl VfsManager {
         let full_path = match target {
             PartitionTarget::System => alloc::format!("/system/{}", path.trim_start_matches('/')),
             PartitionTarget::Data => alloc::format!("/data/{}", path.trim_start_matches('/')),
+            PartitionTarget::Usb => alloc::format!("/usb/{}", path.trim_start_matches('/')),
             PartitionTarget::Ram => alloc::format!("/ram/{}", path.trim_start_matches('/')),
         };
         self.read_file_path(&full_path)
@@ -371,73 +444,22 @@ impl VfsManager {
                 id: 1,
             });
             if target == PartitionTarget::Data {
-                list.push(DirEntry {
-                    name: String::from("media"),
-                    file_type: FileType::Directory,
-                    size: 0,
-                    id: 2,
-                });
-                list.push(DirEntry {
-                    name: String::from("documents"),
-                    file_type: FileType::Directory,
-                    size: 0,
-                    id: 3,
-                });
+                for (id, name) in [(2, "desktop"), (3, "documents"), (4, "downloads"), (5, "media")] {
+                    list.push(DirEntry {
+                        name: String::from(name),
+                        file_type: FileType::Directory,
+                        size: 0,
+                        id,
+                    });
+                }
             } else {
                 list.push(DirEntry {
                     name: String::from("build.prop"),
                     file_type: FileType::RegularFile,
                     size: 214,
-                    id: 4,
+                    id: 6,
                 });
             }
-        } else if trimmed == "app" {
-            if target == PartitionTarget::System {
-                for (idx, name) in [
-                    "files.ntzc",
-                    "browser.ntzc",
-                    "settings.ntzc",
-                    "system.ntzc",
-                    "stopwatch.ntzc",
-                ]
-                .iter()
-                .enumerate()
-                {
-                    list.push(DirEntry {
-                        name: String::from(*name),
-                        file_type: FileType::RegularFile,
-                        size: 512,
-                        id: 10 + idx as u64,
-                    });
-                }
-            } else {
-                list.push(DirEntry {
-                    name: String::from("calculator.ntzc"),
-                    file_type: FileType::RegularFile,
-                    size: 512,
-                    id: 20,
-                });
-            }
-        } else if trimmed == "media" {
-            list.push(DirEntry {
-                name: String::from("aurora_cam.png"),
-                file_type: FileType::RegularFile,
-                size: 512,
-                id: 30,
-            });
-            list.push(DirEntry {
-                name: String::from("aero_tanitim.mp4"),
-                file_type: FileType::RegularFile,
-                size: 512,
-                id: 31,
-            });
-        } else if trimmed == "documents" {
-            list.push(DirEntry {
-                name: String::from("hosgeldiniz.txt"),
-                file_type: FileType::RegularFile,
-                size: 248,
-                id: 40,
-            });
         } else {
             return Err(FsError::NotFound);
         }
@@ -447,7 +469,7 @@ impl VfsManager {
     fn fallback_read(_target: PartitionTarget, path: &str) -> Result<Vec<u8>, FsError> {
         let trimmed = path.trim_matches('/');
         if trimmed == "build.prop" {
-            return Ok(b"ro.netizen.os.name=NetizenCore\nro.netizen.os.version=1.2.0\nro.netizen.arch=x86_64\nro.netizen.ui.style=EMUI-Porcelain-Aero\nro.netizen.vfs.mounts=/system,/data,/ram\n".to_vec());
+            return Ok(b"ro.netizen.os.name=NetizenCore\nro.netizen.os.version=2.8.0\n".to_vec());
         }
         if trimmed.ends_with(".png") {
             return Ok(make_sample_png(0).to_vec());
@@ -455,24 +477,8 @@ impl VfsManager {
         if trimmed.ends_with(".mp4") {
             return Ok(make_sample_mp4(0, 18).to_vec());
         }
-        if trimmed.ends_with(".txt") {
-            return Ok(b"NetizenCore Dosya Sistemi\nKalici /data (exFAT) ve /system (EROFS) bolumleri aktif.\n".to_vec());
-        }
         if trimmed.ends_with(".ntzc") {
-            let pkg = if trimmed.contains("files") {
-                make_ntzc_pkg("nc.files", "Dosyalar", "generic", 46, 30, 1000, 7)
-            } else if trimmed.contains("browser") {
-                make_ntzc_pkg("nc.browser", "Tarayici", "monitor", 44, 28, 1000, 5)
-            } else if trimmed.contains("settings") {
-                make_ntzc_pkg("nc.settings", "Ayarlar", "sliders", 38, 24, 1000, 3)
-            } else if trimmed.contains("system") {
-                make_ntzc_pkg("nc.system", "Sistem", "monitor", 32, 24, 1000, 1)
-            } else if trimmed.contains("stopwatch") {
-                make_ntzc_pkg("nc.stopwatch", "Kronometre", "stopwatch", 26, 16, 1000, 0)
-            } else {
-                make_ntzc_pkg("nc.calculator", "Hesap Makinesi", "generic", 28, 22, 10001, 4)
-            };
-            return Ok(pkg.to_vec());
+            return Ok(make_ntzc_pkg("nc.calculator", "Hesap Makinesi", "generic", 28, 22, 10001, 4).to_vec());
         }
         Err(FsError::NotFound)
     }

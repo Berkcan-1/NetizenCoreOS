@@ -91,7 +91,7 @@ pub fn normalize_input_url(raw: &str) -> String {
     if trimmed.contains('.') && !trimmed.contains(' ') {
         return alloc::format!("https://{}", trimmed);
     }
-    alloc::format!("https://www.google.com/search?q={}", encode_uri_component(trimmed))
+    alloc::format!("https://html.duckduckgo.com/html/?q={}", encode_uri_component(trimmed))
 }
 
 pub fn resolve_url(base: &str, href: &str) -> String {

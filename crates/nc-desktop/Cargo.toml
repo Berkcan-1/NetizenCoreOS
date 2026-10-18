@@ -2,6 +2,7 @@
 name = "nc-desktop"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 nc-hal = { path = "../nc-hal" }
@@ -11,3 +12,4 @@ nc-math = { path = "../nc-math" }
 nc-ui = { path = "../nc-ui" }
 nc-app = { path = "../nc-app" }
 nc-fs = { path = "../nc-fs" }
+nc-assets = { path = "../nc-assets" }

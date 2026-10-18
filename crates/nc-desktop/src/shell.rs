@@ -1,932 +1,374 @@
 use nc_app::draw_icon;
-use nc_app::icon::{draw_cross, draw_grid};
 use nc_app::text::{shadowed, Line};
 use nc_font::text_width;
-use nc_gfx::{lerp_color, rgb, Canvas, Rect};
-use nc_math::{cos_milli, sin_milli};
-use nc_ui::{draw_dot, draw_panel, draw_shadow, draw_text_color, text_style, WHITE};
+use nc_gfx::{Canvas, Rect};
+use nc_ui::{draw_text_color, text_style, WHITE};
 
+use crate::icons::{
+    draw_doc_glyph, draw_folder_glyph, draw_power_glyph, draw_reboot_glyph, draw_start_logo,
+    draw_tile, draw_wifi, tile_radius,
+};
 use crate::layout::{
-    context_item_rect, context_menu_rect, desktop_modal_rect, dock_app_pill, dock_rect,
-    dock_sensor_strip, dock_start_orb, icon_tile, launch_toast_rect, snake_head_pod_rect,
-    snake_node_rect, snake_power_buttons, task_manager_action_btn, task_manager_close_rect,
-    task_manager_rect, task_manager_row_rect, title_height,
+    context_item_rect, context_menu_rect, desktop_modal_rect, dock_bottom_gap, dock_height,
+    dock_hint_rect, dock_pad, icon_tile, modal_buttons, start_cell, start_dot_rect, start_layout,
+    start_tile, task_manager_action_btn, task_manager_close_rect, task_manager_rect,
+    task_manager_row_rect, title_height, volume_osd_rect,
+};
+
+use crate::motion::{
+    clamp01, ease_out_back, ease_out_cubic, lerp, scale_rect_about, scale_u32, staggered, ONE,
+};
+use crate::paint::{
+    fade_text_color, fill_rr, fill_rr_vgrad, fit_text, glass_surface, shadow_rr, stroke_rr,
 };
 use crate::theme::{
-    AQUA_CORE, AQUA_DEEP, AQUA_SOFT, AZURE_CORE, AZURE_DEEP, BLACK, CLOSE_HOVER, DANGER_CORAL,
-    GLASS_BORDER, GLASS_PORCELAIN_BOT, GLASS_PORCELAIN_TOP, INK_BODY, INK_DARK, INK_MUTED,
-    SHADOW_DEEP, WARN_AMBER,
+    dock_glass, hash_str, lighten, menu_glass, modal_glass, start_glass, tile_colors, BLACK,
+    CLOSE_RED, CLOSE_RED_TOP, DANGER, FROST, INK, INK_MUTED, INK_SOFT, SNOW, WARN,
 };
 use crate::{ContextMenuKind, DesktopIconId, DesktopModal, DesktopState, Target};
+use nc_gfx::rgb;
 
-const MAX_BLUR_SPAN: usize = 2048;
-
-pub fn blur_rect_in_place(canvas: &mut Canvas<'_>, rect: Rect, radius: usize) {
-    let cw = canvas.width() as i32;
-    let ch = canvas.height() as i32;
-    let x0 = rect.x.clamp(0, cw);
-    let y0 = rect.y.clamp(0, ch);
-    let x1 = (rect.x + rect.width).clamp(0, cw);
-    let y1 = (rect.y + rect.height).clamp(0, ch);
-    let rw = (x1 - x0) as usize;
-    let rh = (y1 - y0) as usize;
-    if rw == 0 || rh == 0 || radius == 0 || rw > MAX_BLUR_SPAN || rh > MAX_BLUR_SPAN {
-        return;
-    }
-
-    let stride = cw as usize;
-    let pixels = canvas.pixels_mut();
-    let mut scratch = [0u32; MAX_BLUR_SPAN];
-    let r = radius.min(16);
-    let win = (r * 2 + 1) as u32;
-
-    for _ in 0..2 {
-        for y in (y0 as usize)..(y1 as usize) {
-            let base = y * stride + (x0 as usize);
-            for i in 0..rw {
-                scratch[i] = pixels[base + i];
-            }
-            let first = scratch[0];
-            let mut sr = ((first >> 16) & 0xFF) * (r as u32 + 1);
-            let mut sg = ((first >> 8) & 0xFF) * (r as u32 + 1);
-            let mut sb = (first & 0xFF) * (r as u32 + 1);
-            for i in 1..=r {
-                let p = scratch[i.min(rw - 1)];
-                sr += (p >> 16) & 0xFF;
-                sg += (p >> 8) & 0xFF;
-                sb += p & 0xFF;
-            }
-            for i in 0..rw {
-                pixels[base + i] = ((sr / win) << 16) | ((sg / win) << 8) | (sb / win);
-                let out_p = scratch[i.saturating_sub(r)];
-                let in_p = scratch[(i + r + 1).min(rw - 1)];
-                sr = sr + ((in_p >> 16) & 0xFF) - ((out_p >> 16) & 0xFF);
-                sg = sg + ((in_p >> 8) & 0xFF) - ((out_p >> 8) & 0xFF);
-                sb = sb + (in_p & 0xFF) - (out_p & 0xFF);
-            }
-        }
-
-        for x in (x0 as usize)..(x1 as usize) {
-            for j in 0..rh {
-                scratch[j] = pixels[(y0 as usize + j) * stride + x];
-            }
-            let first = scratch[0];
-            let mut sr = ((first >> 16) & 0xFF) * (r as u32 + 1);
-            let mut sg = ((first >> 8) & 0xFF) * (r as u32 + 1);
-            let mut sb = (first & 0xFF) * (r as u32 + 1);
-            for j in 1..=r {
-                let p = scratch[j.min(rh - 1)];
-                sr += (p >> 16) & 0xFF;
-                sg += (p >> 8) & 0xFF;
-                sb += p & 0xFF;
-            }
-            for j in 0..rh {
-                pixels[(y0 as usize + j) * stride + x] =
-                    ((sr / win) << 16) | ((sg / win) << 8) | (sb / win);
-                let out_p = scratch[j.saturating_sub(r)];
-                let in_p = scratch[(j + r + 1).min(rh - 1)];
-                sr = sr + ((in_p >> 16) & 0xFF) - ((out_p >> 16) & 0xFF);
-                sg = sg + ((in_p >> 8) & 0xFF) - ((out_p >> 8) & 0xFF);
-                sb = sb + (in_p & 0xFF) - (out_p & 0xFF);
-            }
-        }
-    }
+fn text_h(unit: i32, pct: i32) -> i32 {
+    (unit * pct / 100).max(9)
 }
 
-pub fn draw_aero_glass_surface(
+fn draw_label(
     canvas: &mut Canvas<'_>,
-    rect: Rect,
-    radius: i32,
-    blur_radius: usize,
-    fill_alpha: u32,
-    shadow_strength: u32,
+    name: &str,
+    cell: Rect,
+    y: i32,
+    unit: i32,
+    selected: bool,
+    accent: u32,
 ) {
-    if rect.width <= 2 || rect.height <= 2 {
-        return;
+    let style = text_style(text_h(unit, 46), 14);
+    let max_w = cell.width - unit / 2;
+    let text = fit_text(name, max_w, &|t| text_width(t, &style));
+    let w = text_width(&text, &style);
+    let x = cell.x + (cell.width - w) / 2;
+    if selected {
+        let plate = Rect::new(x - unit / 3, y - 2, w + unit * 2 / 3, style.cap_height + 6);
+        fill_rr(canvas, plate, plate.height / 2, accent, 215);
     }
-    if shadow_strength > 0 {
-        draw_shadow(canvas, rect, radius, 4, 14, SHADOW_DEEP, shadow_strength);
-    }
-    if blur_radius > 0 {
-        blur_rect_in_place(canvas, rect, blur_radius);
-    }
-    draw_panel(
-        canvas,
-        rect,
-        radius,
-        GLASS_PORCELAIN_TOP,
-        fill_alpha,
-        GLASS_BORDER,
-        235,
-    );
-    let inner_bottom = Rect::new(
-        rect.x + 2,
-        rect.y + rect.height / 2,
-        rect.width - 4,
-        rect.height / 2 - 1,
-    );
-    if inner_bottom.width > 4 && inner_bottom.height > 2 {
-        draw_panel(
-            canvas,
-            inner_bottom,
-            (radius - 2).max(1),
-            GLASS_PORCELAIN_BOT,
-            fill_alpha / 3,
-            GLASS_PORCELAIN_BOT,
-            0,
-        );
-    }
-    let glint_w = (rect.width * 60 / 100).max(12);
-    let glint_x = rect.x + (rect.width - glint_w) / 2;
-    if rect.y >= 0 && rect.y < canvas.height() as i32 {
-        for i in 0..glint_w {
-            let t = (i * 255 / glint_w.max(1)) as u32;
-            let c = lerp_color(AZURE_CORE, AQUA_CORE, t);
-            canvas.blend_pixel(glint_x + i, rect.y + 1, c, 150);
-        }
-    }
+    shadowed(canvas, &text, x, y, &style, WHITE, BLACK);
 }
 
-fn draw_floating_orb(
-    canvas: &mut Canvas<'_>,
-    cx: i32,
-    cy: i32,
-    radius: i32,
-    c1: u32,
-    c2: u32,
-    alpha: u32,
-) {
-    if radius <= 2 {
-        return;
-    }
-    let r2 = (radius as i64) * (radius as i64);
-    let x0 = (cx - radius).max(0);
-    let x1 = (cx + radius).min(canvas.width() as i32 - 1);
-    let y0 = (cy - radius).max(0);
-    let y1 = (cy + radius).min(canvas.height() as i32 - 1);
-    for y in y0..=y1 {
-        let dy = (y - cy) as i64;
-        for x in x0..=x1 {
-            let dx = (x - cx) as i64;
-            let d2 = dx * dx + dy * dy;
-            if d2 >= r2 {
-                continue;
-            }
-            let t = (d2 * 255 / r2) as u32;
-            let col = lerp_color(c1, c2, t);
-            let a = ((255 - t * 180 / 255) * alpha / 256).min(255) as u8;
-            canvas.blend_pixel(x, y, col, a);
-            if t > 200 {
-                canvas.blend_pixel(x, y, WHITE, (alpha / 3).min(180) as u8);
-            }
-        }
-    }
-}
-
-pub fn draw_animated_wallpaper_effects(canvas: &mut Canvas<'_>, state: &DesktopState) {
-    if !state.settings.wallpaper_animated {
-        return;
-    }
-    let w = canvas.width() as i32;
-    let h = canvas.height() as i32;
-    let speed = state.settings.wallpaper_speed.max(1) as u32;
-    let deg1 = ((state.uptime_ms / (22 / speed.max(1)).max(4)) % 360) as i32;
-    let deg2 = ((state.uptime_ms / (28 / speed.max(1)).max(5) + 120) % 360) as i32;
-    let deg3 = ((state.uptime_ms / (34 / speed.max(1)).max(6) + 240) % 360) as i32;
-
-    let ox1 = w * 24 / 100 + (cos_milli(deg1) * (w / 9) / 1000);
-    let oy1 = h * 30 / 100 + (sin_milli(deg1) * (h / 10) / 1000);
-    draw_floating_orb(canvas, ox1, oy1, h / 6, AQUA_SOFT, AZURE_CORE, 56);
-
-    let ox2 = w * 74 / 100 + (sin_milli(deg2) * (w / 8) / 1000);
-    let oy2 = h * 66 / 100 + (cos_milli(deg2) * (h / 9) / 1000);
-    draw_floating_orb(canvas, ox2, oy2, h / 5, rgb(180, 228, 255), AQUA_CORE, 52);
-
-    let ox3 = w * 52 / 100 + (cos_milli(deg3) * (w / 10) / 1000);
-    let oy3 = h * 22 / 100 + (sin_milli(deg3) * (h / 12) / 1000);
-    draw_floating_orb(canvas, ox3, oy3, h / 9, WHITE, AQUA_SOFT, 44);
-}
-
-fn draw_fs_tile_art(canvas: &mut Canvas<'_>, tile: Rect, is_dir: bool, unit: i32) {
-    if is_dir {
-        let tab = Rect::new(
-            tile.x + unit / 2,
-            tile.y + unit / 2,
-            unit * 5 / 4,
-            unit / 3 + 2,
-        );
-        draw_panel(canvas, tab, 2, AQUA_CORE, 255, AQUA_CORE, 0);
-        let folder = Rect::new(
-            tile.x + unit / 3,
-            tile.y + unit * 3 / 4,
-            tile.width - unit * 2 / 3,
-            tile.height - unit * 4 / 3,
-        );
-        draw_panel(canvas, folder, unit / 3, AZURE_CORE, 245, WHITE, 190);
-        let front = Rect::new(
-            folder.x,
-            folder.y + unit / 3,
-            folder.width,
-            folder.height - unit / 3,
-        );
-        draw_panel(canvas, front, unit / 3, AQUA_SOFT, 210, WHITE, 140);
-    } else {
-        let doc = Rect::new(
-            tile.x + unit * 2 / 3,
-            tile.y + unit / 2,
-            tile.width - unit * 4 / 3,
-            tile.height - unit,
-        );
-        draw_panel(canvas, doc, unit / 4, WHITE, 250, AZURE_CORE, 220);
-        let lx = doc.x + 5;
-        let lw = (doc.width - 10).max(4);
-        canvas.fill_rect(lx, doc.y + 6, lw, 2, AZURE_CORE);
-        canvas.fill_rect(lx, doc.y + 11, lw, 2, AQUA_CORE);
-        canvas.fill_rect(lx, doc.y + 16, lw * 2 / 3, 2, INK_MUTED);
-    }
-}
-
-pub fn draw_icons(canvas: &mut Canvas<'_>, state: &DesktopState, height: i32, unit: i32) {
-    let label_style = text_style((unit * 54 / 100).max(10), 15);
-    let accent = state.settings.accent_color();
-    let blur_r = state.blur_radius(6);
-
-    for (index, slot) in state.apps.iter().enumerate() {
-        let info = slot.app.info();
-        let cell = state.app_icon_rect(index, height, unit);
-        let is_selected = state.selected_icon == Some(DesktopIconId::App(index));
-        let is_hovered = state.hover == Target::AppIcon(index);
-
-        if is_selected {
-            draw_aero_glass_surface(canvas, cell, unit / 2, blur_r, 195, 32);
-            draw_panel(canvas, cell, unit / 2, AQUA_SOFT, 75, AZURE_CORE, 245);
-        } else if is_hovered {
-            draw_aero_glass_surface(canvas, cell, unit / 2, blur_r, 125, 16);
-        }
-
-        let tile = icon_tile(cell, unit);
-        let top_c = if index % 2 == 0 { accent } else { AZURE_DEEP };
-        let bot_c = if index % 2 == 0 { AQUA_CORE } else { AZURE_CORE };
-        draw_shadow(canvas, tile, unit * 3 / 4, unit / 4, unit * 3 / 4, SHADOW_DEEP, 52);
-        draw_panel(canvas, tile, unit * 3 / 4, top_c, 245, WHITE, 175);
-        let lower_half = Rect::new(
-            tile.x + 2,
-            tile.y + tile.height / 2,
-            tile.width - 4,
-            tile.height / 2 - 2,
-        );
-        draw_panel(canvas, lower_half, unit / 2, bot_c, 110, bot_c, 0);
-        draw_icon(
-            canvas,
-            info.icon,
-            tile.x + tile.width / 2,
-            tile.y + tile.height / 2,
-            unit * 7 / 4,
-            WHITE,
-        );
-        if slot.pinned_dock {
-            draw_dot(canvas, tile.x + tile.width - 5, tile.y + 5, 3, AQUA_SOFT, 255);
-        }
-        let width = text_width(&info.name, &label_style);
-        let label_y = tile.y + tile.height + unit / 3;
-        if is_selected {
-            draw_text_color(
-                canvas,
-                &info.name,
-                cell.x + (cell.width - width) / 2,
-                label_y,
-                &label_style,
-                INK_DARK,
-            );
-        } else {
-            shadowed(
-                canvas,
-                &info.name,
-                cell.x + (cell.width - width) / 2,
-                label_y,
-                &label_style,
-                WHITE,
-                BLACK,
-            );
-        }
-    }
-
-    for (f_idx, item) in state.fs_items.iter().enumerate() {
-        let cell = state.fs_icon_rect(f_idx, height, unit);
-        let is_selected = state.selected_icon == Some(DesktopIconId::Fs(f_idx));
-        let is_hovered = state.hover == Target::FsIcon(f_idx);
-
-        if is_selected {
-            draw_aero_glass_surface(canvas, cell, unit / 2, blur_r, 195, 32);
-            draw_panel(canvas, cell, unit / 2, AQUA_SOFT, 75, AZURE_CORE, 245);
-        } else if is_hovered {
-            draw_aero_glass_surface(canvas, cell, unit / 2, blur_r, 125, 16);
-        }
-
-        let tile = icon_tile(cell, unit);
-        draw_shadow(canvas, tile, unit * 3 / 4, unit / 4, unit * 3 / 4, SHADOW_DEEP, 44);
-        draw_panel(
-            canvas,
-            tile,
-            unit * 3 / 4,
-            GLASS_PORCELAIN_TOP,
-            210,
-            GLASS_BORDER,
-            220,
-        );
-        draw_fs_tile_art(canvas, tile, item.is_dir, unit);
-
-        let width = text_width(&item.name, &label_style);
-        let label_y = tile.y + tile.height + unit / 3;
-        if is_selected {
-            draw_text_color(
-                canvas,
-                &item.name,
-                cell.x + (cell.width - width) / 2,
-                label_y,
-                &label_style,
-                INK_DARK,
-            );
-        } else {
-            shadowed(
-                canvas,
-                &item.name,
-                cell.x + (cell.width - width) / 2,
-                label_y,
-                &label_style,
-                WHITE,
-                BLACK,
-            );
-        }
-    }
-}
-
-pub fn draw_launch_toast(
+fn draw_icon_cell(
     canvas: &mut Canvas<'_>,
     state: &DesktopState,
-    width: i32,
-    height: i32,
+    id: DesktopIconId,
+    cell: Rect,
     unit: i32,
+    accent: u32,
+    lifted: bool,
 ) {
-    let Some(launching_idx) = state.launching_app() else {
-        return;
+    let selected = state.selected_icon == Some(id);
+    let hover = match id {
+        DesktopIconId::App(i) => state.hover == Target::AppIcon(i),
+        DesktopIconId::Fs(i) => state.hover == Target::FsIcon(i),
     };
-    let slot = &state.apps[launching_idx];
-    let toast = launch_toast_rect(width, height, unit);
-    draw_aero_glass_surface(canvas, toast, toast.height / 2, state.blur_radius(8), 236, 48);
-
-    let orb_cx = toast.x + unit * 3 / 2;
-    let orb_cy = toast.y + toast.height / 2;
-    draw_dot(canvas, orb_cx, orb_cy, unit * 4 / 5, AZURE_CORE, 255);
-    draw_icon(
-        canvas,
-        slot.app.info().icon,
-        orb_cx,
-        orb_cy,
-        unit,
-        WHITE,
-    );
-
-    let label_st = text_style((unit * 52 / 100).max(9), 15);
-    let mut msg = Line::new();
-    msg.text(&slot.app.info().name)
-        .text(" arka planda hazirlaniyor...");
-    draw_text_color(
-        canvas,
-        msg.as_str(),
-        toast.x + unit * 3,
-        toast.y + unit / 2,
-        &label_st,
-        INK_DARK,
-    );
-
-    let bar = Rect::new(
-        toast.x + unit * 3,
-        toast.y + toast.height - unit,
-        toast.width - unit * 4,
-        unit / 3 + 2,
-    );
-    draw_panel(canvas, bar, 3, GLASS_PORCELAIN_BOT, 255, GLASS_BORDER, 255);
-    let total = slot.window.launch_total.max(1);
-    let done = total.saturating_sub(slot.window.launch_delay);
-    let fill_w = (bar.width * done as i32 / total as i32).max(6);
-    draw_panel(
-        canvas,
-        Rect::new(bar.x, bar.y, fill_w, bar.height),
-        3,
-        AQUA_CORE,
-        255,
-        AQUA_CORE,
-        0,
-    );
+    if selected {
+        fill_rr(canvas, cell, unit / 2, WHITE, 58);
+        stroke_rr(canvas, cell, unit / 2, 1, WHITE, 170);
+    } else if hover {
+        fill_rr(canvas, cell, unit / 2, WHITE, 34);
+        stroke_rr(canvas, cell, unit / 2, 1, WHITE, 90);
+    }
+    let mut tile = icon_tile(cell, unit);
+    let lift = if lifted { unit / 3 } else { 0 };
+    if lifted {
+        let grow = unit / 5;
+        tile = Rect::new(tile.x - grow, tile.y - grow - lift, tile.width + grow * 2, tile.height + grow * 2);
+    }
+    let label_y = icon_tile(cell, unit).y + icon_tile(cell, unit).height + unit / 3;
+    match id {
+        DesktopIconId::App(i) => {
+            let info = state.apps[i].app.info();
+            let (top, bottom) = tile_colors(hash_str(&info.id));
+            let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, col: u32| {
+                draw_icon(c, info.icon, x, y, s, col)
+            };
+            draw_tile(canvas, tile, top, bottom, ONE, lift, &glyph, 56);
+            let name: &str = &info.name;
+            draw_label(canvas, name, cell, label_y, unit, selected, accent);
+        }
+        DesktopIconId::Fs(i) => {
+            let item = &state.fs_items[i];
+            if item.is_dir {
+                let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, col: u32| {
+                    draw_folder_glyph(c, x, y, s, col)
+                };
+                draw_tile(canvas, tile, rgb(255, 214, 112), rgb(246, 154, 36), ONE, lift, &glyph, 58);
+            } else {
+                let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, col: u32| {
+                    draw_doc_glyph(c, x, y, s, col, rgb(120, 142, 190))
+                };
+                draw_tile(canvas, tile, rgb(168, 188, 222), rgb(84, 106, 150), ONE, lift, &glyph, 58);
+            }
+            let name: &str = &item.name;
+            draw_label(canvas, name, cell, label_y, unit, selected, accent);
+        }
+    }
 }
 
-pub fn draw_task_manager(
-    canvas: &mut Canvas<'_>,
-    state: &DesktopState,
-    unit: i32,
-) {
-    if !state.task_mgr.open {
-        return;
+pub fn draw_icons(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, height: i32, unit: i32) {
+    let accent = state.settings.accent_color();
+    if let Some(g) = state.drag_ghost(width, height, unit) {
+        let r = Rect::new(g.x + 3, g.y + 3, g.width - 6, g.height - 6);
+        fill_rr(canvas, r, unit / 2, WHITE, 34);
+        stroke_rr(canvas, r, unit / 2, 1, WHITE, 130);
     }
-    let tm = task_manager_rect(state.task_mgr.x, state.task_mgr.y, unit);
-    draw_aero_glass_surface(canvas, tm, unit * 3 / 4, state.blur_radius(10), 238, 68);
-
-    let title_h = title_height(unit);
-    let title_st = text_style((unit * 58 / 100).max(10), 16);
-    let label_st = text_style((unit * 50 / 100).max(9), 15);
-    let cap_st = text_style((unit * 44 / 100).max(8), 16);
-
-    draw_dot(canvas, tm.x + unit * 3 / 2, tm.y + title_h / 2, 5, AQUA_CORE, 255);
-    draw_text_color(
-        canvas,
-        "Gorev Yoneticisi ve Arka Plan Islemleri",
-        tm.x + unit * 5 / 2,
-        tm.y + (title_h - title_st.cap_height) / 2,
-        &title_st,
-        INK_DARK,
-    );
-
-    let close_r = task_manager_close_rect(tm, unit);
-    let close_hov = state.hover == Target::TaskMgrClose;
-    if close_hov {
-        draw_panel(canvas, close_r, unit / 3, CLOSE_HOVER, 255, CLOSE_HOVER, 0);
+    let rects = state.icon_rects(width, height, unit);
+    let dragging = state.dragging_icon();
+    for (id, cell) in rects.iter() {
+        if Some(*id) == dragging {
+            continue;
+        }
+        draw_icon_cell(canvas, state, *id, *cell, unit, accent, false);
     }
-    draw_cross(
-        canvas,
-        close_r.x + close_r.width / 2,
-        close_r.y + close_r.height / 2,
-        unit / 4,
-        if close_hov { WHITE } else { INK_BODY },
-    );
-
-    let graph_card = Rect::new(
-        tm.x + unit,
-        tm.y + title_h + unit / 4,
-        tm.width - unit * 2,
-        unit * 5 + unit / 2,
-    );
-    draw_panel(
-        canvas,
-        graph_card,
-        unit / 3,
-        WHITE,
-        215,
-        GLASS_BORDER,
-        240,
-    );
-
-    let cpu_pct = state.total_cpu_percent();
-    let used_ram = state.used_ram_mb();
-    let mut m_line = Line::new();
-    m_line
-        .text("Toplam CPU Yuku: %")
-        .number(cpu_pct, 1)
-        .text("    |    Bellek Kullanimi: ")
-        .number(used_ram, 1)
-        .text(" / ")
-        .number(state.total_memory_mb, 1)
-        .text(" MB");
-    draw_text_color(
-        canvas,
-        m_line.as_str(),
-        graph_card.x + unit * 3 / 4,
-        graph_card.y + unit / 2,
-        &label_st,
-        AZURE_DEEP,
-    );
-
-    let bars_x = graph_card.x + unit * 3 / 4;
-    let bars_y = graph_card.y + unit * 2;
-    let bars_w = graph_card.width - unit * 3 / 2;
-    let bars_h = unit * 3;
-    canvas.fill_rect(bars_x, bars_y, bars_w, bars_h, GLASS_PORCELAIN_BOT);
-
-    let step_w = (bars_w / 32).max(2);
-    for i in 0..32usize {
-        let hist_idx = (state.task_mgr.hist_cursor + i) % 32;
-        let val = state.task_mgr.cpu_history[hist_idx].min(100) as i32;
-        let bh = (bars_h * val / 100).max(2);
-        let bx = bars_x + (i as i32) * step_w;
-        let by = bars_y + bars_h - bh;
-        let col = if val > 70 {
-            WARN_AMBER
-        } else if i % 2 == 0 {
-            AZURE_CORE
-        } else {
-            AQUA_CORE
-        };
-        canvas.fill_rect(bx, by, (step_w - 1).max(1), bh, col);
+    for (id, cell) in rects.iter() {
+        if Some(*id) == dragging {
+            draw_icon_cell(canvas, state, *id, *cell, unit, accent, true);
+        }
     }
-
-    let hdr_y = tm.y + unit * 8 + unit / 5;
-    draw_text_color(canvas, "Islem Adi", tm.x + unit * 3 / 2, hdr_y, &cap_st, INK_MUTED);
-    draw_text_color(canvas, "PID", tm.x + unit * 15, hdr_y, &cap_st, INK_MUTED);
-    draw_text_color(canvas, "Durum", tm.x + unit * 19, hdr_y, &cap_st, INK_MUTED);
-    draw_text_color(canvas, "CPU", tm.x + unit * 26, hdr_y, &cap_st, INK_MUTED);
-    draw_text_color(canvas, "Bellek", tm.x + unit * 29, hdr_y, &cap_st, INK_MUTED);
-
-    let rows = state.collect_task_rows();
-    for (idx, row_data) in rows.iter().take(7).enumerate() {
-        let rr = task_manager_row_rect(tm, idx, unit);
-        let sel = state.task_mgr.selected_row == idx;
-        let hov = state.hover == Target::TaskMgrRow(idx);
-        let fill = if sel {
-            AQUA_SOFT
-        } else if hov {
-            GLASS_PORCELAIN_BOT
-        } else {
-            WHITE
-        };
-        let brd = if sel { AZURE_CORE } else { GLASS_BORDER };
-        draw_panel(canvas, rr, unit / 4, fill, 220, brd, 220);
-
-        let dot_c = if row_data.is_app {
-            AZURE_CORE
-        } else {
-            AQUA_CORE
-        };
-        draw_dot(canvas, rr.x + unit / 2, rr.y + rr.height / 2, 3, dot_c, 255);
-
-        let ty = rr.y + (rr.height - cap_st.cap_height) / 2;
-        draw_text_color(canvas, row_data.name, rr.x + unit, ty, &cap_st, INK_DARK);
-
-        let mut pid_l = Line::new();
-        pid_l.number(row_data.pid, 1);
-        draw_text_color(canvas, pid_l.as_str(), tm.x + unit * 15, ty, &cap_st, INK_BODY);
-
-        draw_text_color(
-            canvas,
-            row_data.status,
-            tm.x + unit * 19,
-            ty,
-            &cap_st,
-            if row_data.is_app { AZURE_DEEP } else { AQUA_DEEP },
-        );
-
-        let mut cpu_l = Line::new();
-        cpu_l.text("%").number(row_data.cpu_pct as u32, 1);
-        draw_text_color(canvas, cpu_l.as_str(), tm.x + unit * 26, ty, &cap_st, INK_DARK);
-
-        let mut mem_l = Line::new();
-        mem_l.number(row_data.mem_mb as u32, 1).text(" MB");
-        draw_text_color(canvas, mem_l.as_str(), tm.x + unit * 29, ty, &cap_st, INK_BODY);
-    }
-
-    let opt_btn = task_manager_action_btn(tm, false, unit);
-    let kill_btn = task_manager_action_btn(tm, true, unit);
-
-    let opt_hov = state.hover == Target::TaskMgrOptimize;
-    draw_panel(
-        canvas,
-        opt_btn,
-        opt_btn.height / 2,
-        if opt_hov { AQUA_SOFT } else { WHITE },
-        245,
-        AQUA_CORE,
-        220,
-    );
-    let ow = text_width("Arka Plani Dengele", &cap_st);
-    draw_text_color(
-        canvas,
-        "Arka Plani Dengele",
-        opt_btn.x + (opt_btn.width - ow) / 2,
-        opt_btn.y + (opt_btn.height - cap_st.cap_height) / 2,
-        &cap_st,
-        INK_DARK,
-    );
-
-    let kill_hov = state.hover == Target::TaskMgrKill;
-    draw_panel(
-        canvas,
-        kill_btn,
-        kill_btn.height / 2,
-        if kill_hov { CLOSE_HOVER } else { DANGER_CORAL },
-        250,
-        CLOSE_HOVER,
-        255,
-    );
-    let kw = text_width("Gorevi Sonlandir", &cap_st);
-    draw_text_color(
-        canvas,
-        "Gorevi Sonlandir",
-        kill_btn.x + (kill_btn.width - kw) / 2,
-        kill_btn.y + (kill_btn.height - cap_st.cap_height) / 2,
-        &cap_st,
-        WHITE,
-    );
 }
 
-pub fn draw_floating_dock(
-    canvas: &mut Canvas<'_>,
-    state: &DesktopState,
-    width: i32,
-    height: i32,
-    unit: i32,
-) {
-    let dock_items = state.dock_indices();
-    if state.dock_reveal < 16 {
-        let strip = dock_sensor_strip(width, height, unit);
-        draw_panel(canvas, strip, 2, AQUA_SOFT, 165, WHITE, 190);
+fn draw_tooltip(canvas: &mut Canvas<'_>, text: &str, cx: i32, anchor_top: i32, width: i32, unit: i32) {
+    let style = text_style(text_h(unit, 46), 15);
+    let tw = text_width(text, &style);
+    let w = tw + unit * 3 / 2;
+    let h = style.cap_height + unit * 3 / 4 + 2;
+    let x = (cx - w / 2).clamp(unit / 2, (width - w - unit / 2).max(unit / 2));
+    let y = anchor_top - h - unit / 4;
+    let r = Rect::new(x, y, w, h);
+    shadow_rr(canvas, r, h / 2, 3, unit / 2, rgb(8, 14, 40), 90);
+    fill_rr(canvas, r, h / 2, SNOW, 232);
+    stroke_rr(canvas, r, h / 2, 1, WHITE, 200);
+    draw_text_color(canvas, text, x + (w - tw) / 2, y + (h - style.cap_height) / 2, &style, INK);
+}
+
+pub fn draw_dock(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, height: i32, unit: i32) {
+    let items = state.dock_indices();
+    let dl = state.dock_layout(width, height, unit);
+    if state.dock_reveal < ONE / 12 {
+        if state.settings.dock_auto_hide {
+            let hint = dock_hint_rect(width, height, unit);
+            fill_rr(canvas, hint, hint.height / 2, WHITE, 170);
+        }
         return;
     }
+    let reveal = ease_out_cubic(state.dock_reveal);
+    let (blur, passes) = state.blur_params(unit);
+    let full_e = crate::motion::ease_in_out_cubic(state.dock_full_t());
+    let radius = lerp(tile_radius(dl.tile) + dock_pad(unit), 0, full_e);
+    glass_surface(canvas, dl.dock, radius, &dock_glass(blur, passes), reveal);
 
-    let dock = dock_rect(width, height, unit, dock_items.len(), state.dock_reveal);
-    let radius = dock.height / 2;
-    draw_aero_glass_surface(canvas, dock, radius, state.blur_radius(10), 224, 54);
+    let sep_h = dl.tile * 6 / 10;
+    let sep_y = dl.dock.y + (dl.dock.height - sep_h) / 2;
+    let sep_a = scale_u32(110, reveal);
+    fill_rr(canvas, Rect::new(dl.sep_a, sep_y, 2, sep_h), 1, WHITE, sep_a);
+    fill_rr(canvas, Rect::new(dl.sep_b, sep_y, 2, sep_h), 1, WHITE, sep_a);
 
-    let start_orb = dock_start_orb(dock, unit);
+    let accent = state.settings.accent_color();
     let start_active = state.start_open || state.hover == Target::StartButton;
-    let orb_fill = if start_active { AQUA_CORE } else { AZURE_CORE };
-    draw_panel(
-        canvas,
-        start_orb,
-        start_orb.height / 2,
-        orb_fill,
-        250,
-        WHITE,
-        180,
-    );
-    draw_grid(
-        canvas,
-        start_orb.x + unit + unit / 4,
-        start_orb.y + start_orb.height / 2,
-        unit,
-        WHITE,
-    );
-
-    let label_style = text_style((unit * 56 / 100).max(10), 16);
-    let small_style = text_style((unit * 46 / 100).max(9), 15);
-    draw_text_color(
-        canvas,
-        "Baslat",
-        start_orb.x + unit * 2 + unit / 5,
-        start_orb.y + (start_orb.height - label_style.cap_height) / 2,
-        &label_style,
-        WHITE,
-    );
+    let start_top = lighten(accent, if start_active { 110 } else { 70 });
+    let start_bot = if start_active { accent } else { crate::theme::darken(accent, 20) };
+    let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, _col: u32| draw_start_logo(c, x, y, s);
+    let start_rect = if start_active {
+        let g = dl.start.width / 14;
+        Rect::new(dl.start.x - g, dl.start.y - g * 2, dl.start.width + g * 2, dl.start.height + g * 2)
+    } else {
+        dl.start
+    };
+    draw_tile(canvas, start_rect, start_top, start_bot, reveal, 0, &glyph, 66);
 
     let focused = state.focused();
-    for (slot_pos, &app_idx) in dock_items.iter().enumerate() {
-        let pill = dock_app_pill(dock, slot_pos, unit);
+    let mut hover_label: Option<(i32, i32, &str)> = None;
+    for (pos, &app_idx) in items.iter().enumerate() {
         let slot = &state.apps[app_idx];
-        let is_focus = focused == Some(app_idx);
-        let is_hov = state.hover == Target::DockApp(app_idx);
-
-        if is_focus {
-            draw_panel(
-                canvas,
-                pill,
-                pill.height / 2,
-                AZURE_CORE,
-                56,
-                AZURE_CORE,
-                210,
-            );
-        } else if is_hov {
-            draw_panel(
-                canvas,
-                pill,
-                pill.height / 2,
-                AQUA_SOFT,
-                95,
-                AQUA_CORE,
-                190,
-            );
-        } else {
-            draw_panel(
-                canvas,
-                pill,
-                pill.height / 2,
-                WHITE,
-                150,
-                GLASS_BORDER,
-                180,
-            );
-        }
-
-        let icon_col = if is_focus {
-            AZURE_DEEP
-        } else if slot.window.open {
-            INK_DARK
-        } else {
-            INK_BODY
+        let info = slot.app.info();
+        let mut rect = dl.tiles[pos];
+        let bounce = state.bounce_offset(app_idx, unit);
+        rect.y -= bounce;
+        let (top, bottom) = tile_colors(hash_str(&info.id));
+        let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, col: u32| {
+            draw_icon(c, info.icon, x, y, s, col)
         };
-        draw_icon(
-            canvas,
-            slot.app.info().icon,
-            pill.x + pill.width / 2,
-            pill.y + pill.height / 2 - 1,
-            unit * 4 / 3,
-            icon_col,
-        );
+        draw_tile(canvas, rect, top, bottom, reveal, 0, &glyph, 56);
 
-        if slot.window.open || slot.window.launch_delay > 0 {
-            let dot_col = if slot.window.launch_delay > 0 {
-                WARN_AMBER
-            } else if is_focus {
-                AQUA_CORE
-            } else {
-                AZURE_CORE
-            };
-            draw_dot(
-                canvas,
-                pill.x + pill.width / 2,
-                pill.y + pill.height - 3,
-                3,
-                dot_col,
-                255,
-            );
+        if slot.window.open {
+            let is_focus = focused == Some(app_idx);
+            let cy = dl.dock.y + dl.dock.height - dock_pad(unit) / 2;
+            let cx = dl.tiles[pos].x + dl.tiles[pos].width / 2;
+            let w = if is_focus { (unit * 2 / 3).max(8) } else { (unit / 5).max(4) };
+            let hh = (unit / 8).max(3);
+            let col = if is_focus { accent } else { WHITE };
+            fill_rr(canvas, Rect::new(cx - w / 2, cy - hh / 2, w, hh), hh / 2, col, scale_u32(240, reveal));
+        }
+        if state.hover == Target::DockApp(app_idx) {
+            let name: &str = &info.name;
+            hover_label = Some((rect.x + rect.width / 2, rect.y, name));
         }
     }
+    if state.hover == Target::StartButton {
+        hover_label = Some((
+            dl.start.x + dl.start.width / 2,
+            start_rect.y,
+            "Baslat",
+        ));
+    }
 
-    let seconds = state.uptime_ms / 1000;
-    let mut tray = Line::new();
-    let net_tag = if state.settings.wifi_enabled {
-        "Wi-Fi"
-    } else {
-        "ETH"
-    };
-    tray.text(net_tag)
-        .text("  |  CPU %")
-        .number(state.total_cpu_percent(), 1)
-        .text("  |  ")
-        .number(seconds / 60 % 60, 2)
-        .text(":")
-        .number(seconds % 60, 2);
-    let tray_w = text_width(tray.as_str(), &small_style);
-    let tray_x = dock.x + dock.width - tray_w - unit;
-    let tray_y = dock.y + (dock.height - small_style.cap_height) / 2;
-    draw_text_color(canvas, tray.as_str(), tray_x, tray_y, &small_style, INK_BODY);
-}
+    let st = dl.status;
+    fill_rr(canvas, st, st.height / 3, WHITE, scale_u32(40, reveal));
+    stroke_rr(canvas, st, st.height / 3, 1, WHITE, scale_u32(90, reveal));
+    let style = text_style(text_h(unit, 48), 15);
+    let secs = state.uptime_ms / 1000;
+    let mut clock = Line::new();
+    clock.number(secs / 60 % 60, 2).text(":").number(secs % 60, 2);
+    let tw = text_width(clock.as_str(), &style);
+    let ty = st.y + (st.height - style.cap_height) / 2;
+    let wide = st.width >= unit * 6;
+    let tx = if wide { st.x + st.width - tw - unit * 3 / 4 } else { st.x + (st.width - tw) / 2 };
+    if wide {
+        let gh = unit * 6 / 5;
+        draw_wifi(
+            canvas,
+            st.x + unit * 3 / 4,
+            st.y + st.height / 2 + gh / 2,
+            gh,
+            WHITE,
+            state.settings.wifi_enabled,
+        );
+    }
+    shadowed(canvas, clock.as_str(), tx, ty, &style, WHITE, rgb(10, 20, 50));
 
-fn draw_energy_tube(canvas: &mut Canvas<'_>, a: Rect, b: Rect) {
-    let ax = a.x + a.width / 2;
-    let ay = a.y + a.height / 2;
-    let bx = b.x + b.width / 2;
-    let by = b.y + b.height / 2;
-    let steps = ((bx - ax).abs().max((by - ay).abs()) / 3).max(1);
-    for s in 0..=steps {
-        let px = ax + (bx - ax) * s / steps;
-        let py = ay + (by - ay) * s / steps;
-        let t = (s * 255 / steps) as u32;
-        let col = lerp_color(AZURE_CORE, AQUA_CORE, t);
-        draw_dot(canvas, px, py, 4, col, 175);
-        draw_dot(canvas, px, py, 2, WHITE, 210);
+    if let Some((cx, top, text)) = hover_label {
+        if state.dock_reveal >= ONE * 3 / 4 {
+            draw_tooltip(canvas, text, cx, top, width, unit);
+        }
     }
 }
 
-fn draw_power_symbol(canvas: &mut Canvas<'_>, cx: i32, cy: i32, r: i32, col: u32) {
-    draw_dot(canvas, cx, cy, r, col, 255);
-    draw_dot(canvas, cx, cy, (r - 2).max(1), WHITE, 255);
-    canvas.fill_rect(cx - 1, cy - r - 1, 3, r + 1, col);
-}
-
-fn draw_reboot_symbol(canvas: &mut Canvas<'_>, cx: i32, cy: i32, r: i32, col: u32) {
-    draw_dot(canvas, cx, cy, r, col, 255);
-    draw_dot(canvas, cx, cy, (r - 2).max(1), WHITE, 255);
-    canvas.fill_rect(cx + 1, cy - r, r, 3, col);
-}
-
-pub fn draw_serpentine_start_menu(
-    canvas: &mut Canvas<'_>,
-    state: &DesktopState,
-    width: i32,
-    height: i32,
-    unit: i32,
-) {
-    if state.start_anim == 0 {
+pub fn draw_start_menu(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, height: i32, unit: i32) {
+    let t = state.start_anim;
+    if t <= 0 {
         return;
     }
-    let dock_items = state.dock_indices();
-    let dock = dock_rect(
-        width,
-        height,
-        unit,
-        dock_items.len(),
-        state.dock_reveal.max(220),
-    );
-    let snake_apps = state.start_indices();
-    let count = snake_apps.len();
-    let blur_r = state.blur_radius(8);
-
-    let start_orb = dock_start_orb(dock, unit);
-    if count > 0 {
-        let first_node = snake_node_rect(0, dock, unit, state.start_anim);
-        draw_energy_tube(canvas, start_orb, first_node);
+    let e = ease_out_cubic(t);
+    let apps = state.start_indices();
+    let count = apps.len();
+    let dock_top = height - dock_bottom_gap(unit) - dock_height(unit);
+    let sl = start_layout(width, height, unit, dock_top, count);
+    let scale = lerp(ONE * 93 / 100, ONE, e);
+    let ax = sl.panel.x + sl.panel.width / 2;
+    let ay = sl.panel.y + sl.panel.height + unit;
+    let xf = |r: Rect| -> Rect {
+        let (x, y, w, h) = scale_rect_about(r.x, r.y, r.width, r.height, scale, ax, ay);
+        Rect::new(x, y, w, h)
+    };
+    let (blur, passes) = state.blur_params(unit);
+    glass_surface(canvas, xf(sl.panel), unit * 6 / 5, &start_glass(blur, passes), e);
+    if e < ONE / 2 {
+        return;
     }
+    let content = clamp01((e - ONE / 2) * 2);
+    let accent = state.settings.accent_color();
+    let shadow = rgb(10, 20, 50);
 
-    for seq in 0..count {
-        if seq + 1 < count {
-            let cur_r = snake_node_rect(seq, dock, unit, state.start_anim);
-            let nxt_r = snake_node_rect(seq + 1, dock, unit, state.start_anim);
-            draw_energy_tube(canvas, cur_r, nxt_r);
+    let title_style = text_style(text_h(unit, 72), 16);
+    let sub_style = text_style(text_h(unit, 42), 15);
+    let logo = xf(Rect::new(sl.panel.x + sl.pad, sl.panel.y + sl.pad - unit / 4, unit * 5 / 2, unit * 5 / 2));
+    let logo_glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, _col: u32| draw_start_logo(c, x, y, s);
+    draw_tile(canvas, logo, lighten(accent, 70), accent, content, 0, &logo_glyph, 66);
+    let tx = logo.x + logo.width + unit * 2 / 3;
+    let ty = logo.y + unit / 8;
+    let c1 = fade_text_color(canvas, tx, ty, WHITE, content);
+    let s1 = fade_text_color(canvas, tx, ty, shadow, content);
+    shadowed(canvas, "NetizenCore", tx, ty, &title_style, c1, s1);
+    let ty2 = ty + title_style.cap_height + unit / 4;
+    let c2 = fade_text_color(canvas, tx, ty2, rgb(232, 242, 255), content);
+    shadowed(canvas, "Uygulamalar", tx, ty2, &sub_style, c2, s1);
+
+    for (rect, is_power) in [(sl.reboot, false), (sl.shut, true)] {
+        let r = xf(rect);
+        let hot = state.hover == if is_power { Target::PowerShutdown } else { Target::PowerReboot };
+        if hot {
+            let (a, b) = if is_power { (CLOSE_RED_TOP, CLOSE_RED) } else { (lighten(WARN, 60), WARN) };
+            fill_rr_vgrad(canvas, r, r.width / 2, a, b, scale_u32(245, content));
+        } else {
+            fill_rr(canvas, r, r.width / 2, WHITE, scale_u32(56, content));
+        }
+        stroke_rr(canvas, r, r.width / 2, 1, WHITE, scale_u32(150, content));
+        let cx = r.x + r.width / 2;
+        let cy = r.y + r.height / 2;
+        let gr = (unit * 3 / 8).max(4);
+        let ga = scale_u32(255, content);
+        if is_power {
+            draw_power_glyph(canvas, cx, cy, gr, WHITE, ga);
+        } else {
+            draw_reboot_glyph(canvas, cx, cy, gr, WHITE, ga);
         }
     }
 
-    let head_pod = snake_head_pod_rect(count, dock, unit, state.start_anim);
-    if count > 0 {
-        let last_node = snake_node_rect(count - 1, dock, unit, state.start_anim);
-        draw_energy_tube(canvas, last_node, head_pod);
-    } else {
-        draw_energy_tube(canvas, start_orb, head_pod);
-    }
-
-    let label_style = text_style((unit * 54 / 100).max(10), 15);
-    let sub_style = text_style((unit * 44 / 100).max(8), 15);
-
-    for (seq, &app_idx) in snake_apps.iter().enumerate() {
-        let node = snake_node_rect(seq, dock, unit, state.start_anim);
-        let is_hov = state.hover == Target::StartNode(app_idx);
-        let info = state.apps[app_idx].app.info();
-
-        draw_aero_glass_surface(
-            canvas,
-            node,
-            node.height / 2,
-            blur_r,
-            if is_hov { 248 } else { 222 },
-            36,
+    let page = state.start_page.min(sl.pages - 1);
+    let first = page * sl.per_page;
+    let last = (first + sl.per_page).min(count);
+    let label_style = text_style(text_h(unit, 46), 15);
+    let n = last.saturating_sub(first).max(1);
+    for local_idx in 0..(last - first) {
+        let app_idx = apps[first + local_idx];
+        let cell_raw = start_cell(&sl, local_idx);
+        let cell = xf(cell_raw);
+        let local = staggered(e, local_idx, n, ONE * 35 / 100);
+        if local <= 0 {
+            continue;
+        }
+        let hot = state.hover == Target::StartNode(app_idx);
+        if hot {
+            let plate = Rect::new(cell.x + 2, cell.y + 2, cell.width - 4, cell.height - 4);
+            fill_rr(canvas, plate, unit / 2, WHITE, scale_u32(54, local));
+            stroke_rr(canvas, plate, unit / 2, 1, WHITE, scale_u32(130, local));
+        }
+        let tile_raw = xf(start_tile(cell_raw, unit));
+        let target_scale = if hot { ONE * 106 / 100 } else { ONE };
+        let sc = lerp(ONE * 78 / 100, target_scale, ease_out_back(local));
+        let (nx, ny, nw, nh) = scale_rect_about(
+            tile_raw.x,
+            tile_raw.y,
+            tile_raw.width,
+            tile_raw.height,
+            sc,
+            tile_raw.x + tile_raw.width / 2,
+            tile_raw.y + tile_raw.height / 2,
         );
-        if is_hov {
-            draw_panel(
-                canvas,
-                node,
-                node.height / 2,
-                AQUA_SOFT,
-                85,
-                AZURE_CORE,
-                240,
-            );
-        }
+        let tile = Rect::new(nx, ny, nw, nh);
+        let info = state.apps[app_idx].app.info();
+        let (top, bottom) = tile_colors(hash_str(&info.id));
+        let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, col: u32| {
+            draw_icon(c, info.icon, x, y, s, col)
+        };
+        draw_tile(canvas, tile, top, bottom, local, 0, &glyph, 56);
 
-        let badge_r = (node.height - unit * 2 / 3) / 2;
-        let badge_cx = node.x + badge_r + unit / 3;
-        let badge_cy = node.y + node.height / 2;
-        let orb_col = if seq % 2 == 0 { AZURE_CORE } else { AQUA_CORE };
-        draw_dot(canvas, badge_cx, badge_cy, badge_r, orb_col, 255);
-        draw_icon(canvas, info.icon, badge_cx, badge_cy, unit, WHITE);
-
-        let text_x = badge_cx + badge_r + unit / 3;
-        let text_y = node.y + (node.height - label_style.cap_height) / 2;
-        draw_text_color(canvas, &info.name, text_x, text_y, &label_style, INK_DARK);
+        let name: &str = &info.name;
+        let text = fit_text(name, cell.width - unit / 2, &|s| text_width(s, &label_style));
+        let w = text_width(&text, &label_style);
+        let lx = cell.x + (cell.width - w) / 2;
+        let ly = tile_raw.y + tile_raw.height + unit / 3;
+        let col = fade_text_color(canvas, lx, ly, WHITE, local);
+        let sh = fade_text_color(canvas, lx, ly, shadow, local);
+        shadowed(canvas, &text, lx, ly, &label_style, col, sh);
     }
 
-    draw_aero_glass_surface(canvas, head_pod, head_pod.height / 2, blur_r, 232, 44);
-    draw_dot(
-        canvas,
-        head_pod.x + unit * 3 / 4,
-        head_pod.y + head_pod.height / 2,
-        4,
-        AQUA_CORE,
-        255,
-    );
-    draw_text_color(
-        canvas,
-        "NetizenCore",
-        head_pod.x + unit * 3 / 2,
-        head_pod.y + (head_pod.height - sub_style.cap_height) / 2,
-        &sub_style,
-        INK_DARK,
-    );
-
-    let (reb_btn, shut_btn) = snake_power_buttons(head_pod, unit);
-    let reb_hov = state.hover == Target::PowerReboot;
-    let shut_hov = state.hover == Target::PowerShutdown;
-
-    draw_panel(
-        canvas,
-        reb_btn,
-        reb_btn.height / 2,
-        if reb_hov { WARN_AMBER } else { WHITE },
-        245,
-        WARN_AMBER,
-        220,
-    );
-    draw_reboot_symbol(
-        canvas,
-        reb_btn.x + reb_btn.width / 2,
-        reb_btn.y + reb_btn.height / 2,
-        (unit / 3).max(4),
-        if reb_hov { INK_DARK } else { WARN_AMBER },
-    );
-
-    draw_panel(
-        canvas,
-        shut_btn,
-        shut_btn.height / 2,
-        if shut_hov { DANGER_CORAL } else { WHITE },
-        245,
-        DANGER_CORAL,
-        220,
-    );
-    draw_power_symbol(
-        canvas,
-        shut_btn.x + shut_btn.width / 2,
-        shut_btn.y + shut_btn.height / 2,
-        (unit / 3).max(4),
-        if shut_hov { INK_DARK } else { DANGER_CORAL },
-    );
+    if sl.pages > 1 {
+        for p in 0..sl.pages {
+            let d = xf(start_dot_rect(&sl, p, unit));
+            let r = if p == page { (unit / 5).max(3) } else { (unit / 8).max(2) };
+            let cx = d.x + d.width / 2;
+            let cy = d.y + d.height / 2;
+            let a = if p == page { 240 } else { 120 };
+            fill_rr(canvas, Rect::new(cx - r, cy - r, r * 2, r * 2), r, WHITE, scale_u32(a, content));
+        }
+    }
 }
 
 pub fn draw_context_menu(
@@ -938,274 +380,418 @@ pub fn draw_context_menu(
     height: i32,
     unit: i32,
 ) {
-    let item_count = state.context_menu_item_count(kind);
-    let menu = context_menu_rect(pos.0, pos.1, item_count, width, height, unit);
-    draw_aero_glass_surface(canvas, menu, unit * 2 / 3, state.blur_radius(12), 236, 56);
-
-    let cap_style = text_style((unit * 46 / 100).max(9), 18);
-    let item_style = text_style((unit * 54 / 100).max(10), 15);
-
-    let header_title = match kind {
-        ContextMenuKind::DesktopSurface => "MASAUSTU VE SISTEM MENUSU",
-        ContextMenuKind::AppItem(idx) => {
-            if idx < state.apps.len() {
-                &state.apps[idx].app.info().name
-            } else {
-                "UYGULAMA MENUSU"
-            }
-        }
-        ContextMenuKind::FsItem(idx) => {
-            if idx < state.fs_items.len() {
-                &state.fs_items[idx].name
-            } else {
-                "DOSYA MENUSU"
-            }
-        }
+    let t = state.ctx_anim;
+    if t <= 0 {
+        return;
+    }
+    let e = ease_out_cubic(t);
+    let count = state.context_menu_item_count(kind);
+    let menu = context_menu_rect(pos.0, pos.1, count, width, height, unit);
+    let ax = pos.0.clamp(menu.x, menu.x + menu.width);
+    let ay = pos.1.clamp(menu.y, menu.y + menu.height);
+    let scale = lerp(ONE * 90 / 100, ONE, e);
+    let xf = |r: Rect| -> Rect {
+        let (x, y, w, h) = scale_rect_about(r.x, r.y, r.width, r.height, scale, ax, ay);
+        Rect::new(x, y, w, h)
     };
+    let (blur, passes) = state.blur_params(unit);
+    glass_surface(canvas, xf(menu), unit * 2 / 3, &menu_glass(blur, passes), e);
+    if e < ONE / 2 {
+        return;
+    }
+    let content = clamp01((e - ONE / 2) * 2);
+    let accent = state.settings.accent_color();
+    let style = text_style(text_h(unit, 50), 15);
+    let chip_style = text_style(text_h(unit, 38), 16);
 
-    draw_dot(canvas, menu.x + unit, menu.y + unit, 4, AQUA_CORE, 255);
-    draw_text_color(
-        canvas,
-        header_title,
-        menu.x + unit * 7 / 4,
-        menu.y + unit * 2 / 3,
-        &cap_style,
-        AZURE_DEEP,
-    );
-    canvas.fill_rect(
-        menu.x + unit / 2,
-        menu.y + unit * 7 / 4,
-        menu.width - unit,
-        1,
-        GLASS_BORDER,
-    );
-
-    for idx in 0..item_count {
-        let item_r = context_item_rect(menu, idx, unit);
-        let is_hov = state.hover == Target::ContextItem(idx);
-        let (label, badge, dot_color) = state.context_menu_entry(kind, idx);
-
-        if is_hov {
-            draw_panel(
-                canvas,
-                item_r,
-                unit / 3,
-                AQUA_SOFT,
-                125,
-                AZURE_CORE,
-                210,
-            );
+    for idx in 0..count {
+        let item = xf(context_item_rect(menu, idx, unit));
+        let hot = state.hover == Target::ContextItem(idx);
+        let (label, badge, dot) = state.context_menu_entry(kind, idx);
+        if hot {
+            fill_rr_vgrad(canvas, item, unit / 3, lighten(accent, 60), accent, scale_u32(235, content));
         }
-
-        draw_dot(
-            canvas,
-            item_r.x + unit * 2 / 3,
-            item_r.y + item_r.height / 2,
-            4,
-            dot_color,
-            255,
-        );
-        let ty = item_r.y + (item_r.height - item_style.cap_height) / 2;
-        draw_text_color(
-            canvas,
-            label,
-            item_r.x + unit * 3 / 2,
-            ty,
-            &item_style,
-            INK_DARK,
-        );
-
-        if !badge.is_empty() {
-            let bw = text_width(badge, &cap_style);
-            draw_text_color(
-                canvas,
-                badge,
-                item_r.x + item_r.width - bw - unit / 2,
-                item_r.y + (item_r.height - cap_style.cap_height) / 2,
-                &cap_style,
-                INK_MUTED,
-            );
+        let chip = (unit * 11 / 10).min(item.height - 6);
+        let cr = Rect::new(item.x + unit / 3, item.y + (item.height - chip) / 2, chip, chip);
+        fill_rr_vgrad(canvas, cr, chip / 4, lighten(dot, 70), dot, scale_u32(255, content));
+        if let Some(letter) = badge.chars().next() {
+            let mut buf = [0u8; 4];
+            let s: &str = letter.encode_utf8(&mut buf);
+            let lw = text_width(s, &chip_style);
+            let lx = cr.x + (chip - lw) / 2;
+            let ly = cr.y + (chip - chip_style.cap_height) / 2;
+            let col = fade_text_color(canvas, lx, ly, WHITE, content);
+            draw_text_color(canvas, s, lx, ly, &chip_style, col);
+        } else {
+            let d = chip / 3;
+            fill_rr(canvas, Rect::new(cr.x + (chip - d) / 2, cr.y + (chip - d) / 2, d, d), d / 2, WHITE, scale_u32(235, content));
         }
+        let tx = cr.x + chip + unit / 2;
+        let ty = item.y + (item.height - style.cap_height) / 2;
+        let base = if hot { WHITE } else { INK };
+        let col = fade_text_color(canvas, tx, ty, base, content);
+        draw_text_color(canvas, label, tx, ty, &style, col);
     }
 }
 
-pub fn draw_desktop_modal(
-    canvas: &mut Canvas<'_>,
-    state: &DesktopState,
-    width: i32,
-    height: i32,
-    unit: i32,
-) {
+pub fn draw_task_manager(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, height: i32, unit: i32) {
+    if !state.task_mgr.open {
+        return;
+    }
+    let tm = task_manager_rect(state.task_mgr.x, state.task_mgr.y, width, height, unit);
+    let (blur, passes) = state.blur_params(unit);
+    glass_surface(canvas, tm, unit * 3 / 4, &modal_glass(blur, passes), ONE);
+    let accent = state.settings.accent_color();
+
+    let title_h = title_height(unit);
+    let title_st = text_style(text_h(unit, 58), 16);
+    let label_st = text_style(text_h(unit, 50), 15);
+    let cap_st = text_style(text_h(unit, 44), 16);
+
+    fill_rr(canvas, Rect::new(tm.x + unit, tm.y + title_h / 2 - 4, 8, 8), 4, accent, 255);
+    draw_text_color(
+        canvas,
+        "Gorev Yoneticisi ve Arka Plan Islemleri",
+        tm.x + unit * 5 / 2,
+        tm.y + (title_h - title_st.cap_height) / 2,
+        &title_st,
+        INK,
+    );
+
+    let close_r = task_manager_close_rect(tm, unit);
+    let close_hot = state.hover == Target::TaskMgrClose;
+    if close_hot {
+        fill_rr_vgrad(canvas, close_r, close_r.height / 2, CLOSE_RED_TOP, CLOSE_RED, 255);
+    } else {
+        fill_rr(canvas, close_r, close_r.height / 2, WHITE, 120);
+    }
+    crate::icons::draw_win_glyph_close(
+        canvas,
+        close_r.x + close_r.width / 2,
+        close_r.y + close_r.height / 2,
+        (unit * 3 / 10).max(3),
+        if close_hot { WHITE } else { INK_SOFT },
+    );
+
+    let graph_card = Rect::new(tm.x + unit, tm.y + title_h + unit / 4, tm.width - unit * 2, unit * 11 / 2);
+    fill_rr(canvas, graph_card, unit / 3, WHITE, 190);
+    stroke_rr(canvas, graph_card, unit / 3, 1, WHITE, 230);
+
+    let mut m_line = Line::new();
+    m_line
+        .text("Toplam CPU Yuku: %")
+        .number(state.total_cpu_percent(), 1)
+        .text("    |    Bellek Kullanimi: ")
+        .number(state.used_ram_mb(), 1)
+        .text(" / ")
+        .number(state.total_memory_mb, 1)
+        .text(" MB");
+    draw_text_color(canvas, m_line.as_str(), graph_card.x + unit * 3 / 4, graph_card.y + unit / 2, &label_st, INK_SOFT);
+
+    let bars_x = graph_card.x + unit * 3 / 4;
+    let bars_y = graph_card.y + unit * 2;
+    let bars_w = graph_card.width - unit * 3 / 2;
+    let bars_h = unit * 3;
+    fill_rr(canvas, Rect::new(bars_x, bars_y, bars_w, bars_h), unit / 4, FROST, 255);
+    let step_w = (bars_w / 32).max(2);
+    for i in 0..32usize {
+        let hist_idx = (state.task_mgr.hist_cursor + i) % 32;
+        let val = state.task_mgr.cpu_history[hist_idx].min(100) as i32;
+        let bh = (bars_h * val / 100).max(3);
+        let bx = bars_x + (i as i32) * step_w;
+        let by = bars_y + bars_h - bh;
+        let (a, b) = if val > 70 { (lighten(WARN, 60), WARN) } else { (lighten(accent, 80), accent) };
+        fill_rr_vgrad(canvas, Rect::new(bx + 1, by, (step_w - 2).max(1), bh), (step_w / 3).max(1), a, b, 255);
+    }
+
+    let hdr_y = tm.y + unit * 8 + unit / 5;
+    draw_text_color(canvas, "Islem Adi", tm.x + unit * 3 / 2, hdr_y, &cap_st, INK_MUTED);
+    draw_text_color(canvas, "PID", tm.x + unit * 15, hdr_y, &cap_st, INK_MUTED);
+    draw_text_color(canvas, "Durum", tm.x + unit * 19, hdr_y, &cap_st, INK_MUTED);
+    draw_text_color(canvas, "CPU", tm.x + unit * 26, hdr_y, &cap_st, INK_MUTED);
+    draw_text_color(canvas, "Bellek", tm.x + unit * 29, hdr_y, &cap_st, INK_MUTED);
+
+    let rows = state.collect_task_rows();
+    for (idx, row) in rows.iter().take(7).enumerate() {
+        let rr = task_manager_row_rect(tm, idx, unit);
+        let sel = state.task_mgr.selected_row == idx;
+        let hov = state.hover == Target::TaskMgrRow(idx);
+        if sel {
+            fill_rr(canvas, rr, unit / 4, accent, 60);
+            stroke_rr(canvas, rr, unit / 4, 1, accent, 200);
+        } else if hov {
+            fill_rr(canvas, rr, unit / 4, WHITE, 150);
+        } else {
+            fill_rr(canvas, rr, unit / 4, WHITE, 90);
+        }
+        let dot_c = if row.is_app { accent } else { rgb(40, 190, 150) };
+        fill_rr(canvas, Rect::new(rr.x + unit / 2 - 3, rr.y + rr.height / 2 - 3, 6, 6), 3, dot_c, 255);
+        let ty = rr.y + (rr.height - cap_st.cap_height) / 2;
+        draw_text_color(canvas, row.name, rr.x + unit, ty, &cap_st, INK);
+        let mut pid = Line::new();
+        pid.number(row.pid, 1);
+        draw_text_color(canvas, pid.as_str(), tm.x + unit * 15, ty, &cap_st, INK_SOFT);
+        draw_text_color(canvas, row.status, tm.x + unit * 19, ty, &cap_st, dot_c);
+        let mut cpu = Line::new();
+        cpu.text("%").number(row.cpu_pct as u32, 1);
+        draw_text_color(canvas, cpu.as_str(), tm.x + unit * 26, ty, &cap_st, INK);
+        let mut mem = Line::new();
+        mem.number(row.mem_mb as u32, 1).text(" MB");
+        draw_text_color(canvas, mem.as_str(), tm.x + unit * 29, ty, &cap_st, INK_SOFT);
+    }
+
+    let opt = task_manager_action_btn(tm, false, unit);
+    let kill = task_manager_action_btn(tm, true, unit);
+    let opt_hot = state.hover == Target::TaskMgrOptimize;
+    fill_rr(canvas, opt, opt.height / 2, WHITE, if opt_hot { 255 } else { 190 });
+    stroke_rr(canvas, opt, opt.height / 2, 1, accent, 200);
+    let ow = text_width("Arka Plani Dengele", &cap_st);
+    draw_text_color(
+        canvas,
+        "Arka Plani Dengele",
+        opt.x + (opt.width - ow) / 2,
+        opt.y + (opt.height - cap_st.cap_height) / 2,
+        &cap_st,
+        INK,
+    );
+    let kill_hot = state.hover == Target::TaskMgrKill;
+    fill_rr_vgrad(
+        canvas,
+        kill,
+        kill.height / 2,
+        if kill_hot { CLOSE_RED_TOP } else { lighten(DANGER, 50) },
+        if kill_hot { CLOSE_RED } else { DANGER },
+        255,
+    );
+    stroke_rr(canvas, kill, kill.height / 2, 1, WHITE, 120);
+    let kw = text_width("Gorevi Sonlandir", &cap_st);
+    draw_text_color(
+        canvas,
+        "Gorevi Sonlandir",
+        kill.x + (kill.width - kw) / 2,
+        kill.y + (kill.height - cap_st.cap_height) / 2,
+        &cap_st,
+        WHITE,
+    );
+}
+
+pub fn draw_desktop_modal(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, height: i32, unit: i32) {
     let (title, subtitle, text_val, tall) = match state.modal {
         DesktopModal::None => return,
         DesktopModal::CreateFolder { ref name_buf } => (
             "Masaustunde Yeni Klasor Olustur",
-            "Konum: /data/desktop (Klavye ile yazip Enter veya Kaydet'e basin)",
+            "Klasor adini yazip Enter veya Kaydet'e basin",
             name_buf.as_str(),
             false,
         ),
         DesktopModal::CreateTextFile { ref name_buf } => (
             "Masaustunde Yeni Metin Belgesi",
-            "Konum: /data/desktop (Ornek: notlarim.txt)",
+            "Dosya adini yazin (Ornek: notlarim.txt)",
             name_buf.as_str(),
             false,
         ),
-        DesktopModal::RenameItem {
-            ref old_name,
-            ref new_buf,
-            ..
-        } => (
+        DesktopModal::RenameItem { ref old_name, ref new_buf, .. } => (
             "Masaustu Ogesini Yeniden Adlandir",
             old_name.as_str(),
             new_buf.as_str(),
             false,
         ),
-        DesktopModal::EditTextFile {
-            ref name,
-            ref content,
-        } => (
+        DesktopModal::EditTextFile { ref name, ref content } => (
             "Masaustu Hizli Not Duzenleyici",
             name.as_str(),
             content.as_str(),
             true,
         ),
     };
-
+    let t = state.modal_anim;
+    if t <= 0 {
+        return;
+    }
+    let e = ease_out_cubic(t);
     let m_rect = desktop_modal_rect(width, height, unit, tall);
-    draw_aero_glass_surface(canvas, m_rect, unit * 3 / 4, state.blur_radius(12), 240, 64);
+    let scale = lerp(ONE * 94 / 100, ONE, e);
+    let cx = m_rect.x + m_rect.width / 2;
+    let cy = m_rect.y + m_rect.height / 2;
+    let (sx, sy, sw, sh) = scale_rect_about(m_rect.x, m_rect.y, m_rect.width, m_rect.height, scale, cx, cy);
+    let (blur, passes) = state.blur_params(unit);
+    glass_surface(canvas, Rect::new(sx, sy, sw, sh), unit * 3 / 4, &modal_glass(blur, passes), e);
+    if e < ONE * 6 / 10 {
+        return;
+    }
+    let content = clamp01((e - ONE * 6 / 10) * 5 / 2);
+    let accent = state.settings.accent_color();
 
-    let title_st = text_style((unit * 72 / 100).max(11), 16);
-    let sub_st = text_style((unit * 48 / 100).max(9), 15);
-    let body_st = text_style((unit * 56 / 100).max(10), 15);
+    let title_st = text_style(text_h(unit, 68), 14);
+    let sub_st = text_style(text_h(unit, 46), 14);
+    let body_st = text_style(text_h(unit, 52), 14);
 
-    draw_dot(
-        canvas,
-        m_rect.x + unit * 5 / 4,
-        m_rect.y + unit * 3 / 2,
-        5,
-        AQUA_CORE,
-        255,
-    );
-    draw_text_color(
-        canvas,
-        title,
-        m_rect.x + unit * 2,
-        m_rect.y + unit,
-        &title_st,
-        INK_DARK,
-    );
-    draw_text_color(
-        canvas,
-        subtitle,
-        m_rect.x + unit * 2,
-        m_rect.y + unit * 5 / 2,
-        &sub_st,
-        AZURE_DEEP,
-    );
+    let tx = m_rect.x + unit * 2;
+    let c_title = fade_text_color(canvas, tx, m_rect.y + unit, INK, content);
+    draw_text_color(canvas, title, tx, m_rect.y + unit, &title_st, c_title);
+    let c_sub = fade_text_color(canvas, tx, m_rect.y + unit * 5 / 2, accent, content);
+    draw_text_color(canvas, subtitle, tx, m_rect.y + unit * 5 / 2, &sub_st, c_sub);
 
-    let box_h = if tall {
-        m_rect.height - unit * 8
-    } else {
-        unit * 5 / 2
-    };
-    let input_r = Rect::new(
-        m_rect.x + unit * 3 / 2,
-        m_rect.y + unit * 4,
-        m_rect.width - unit * 3,
-        box_h,
-    );
-    draw_panel(canvas, input_r, unit / 3, WHITE, 252, AZURE_CORE, 240);
+    let box_h = if tall { m_rect.height - unit * 8 } else { unit * 5 / 2 };
+    let input_r = Rect::new(m_rect.x + unit * 3 / 2, m_rect.y + unit * 4, m_rect.width - unit * 3, box_h);
+    fill_rr(canvas, input_r, unit / 3, WHITE, scale_u32(255, content));
+    stroke_rr(canvas, input_r, unit / 3, 2, accent, scale_u32(220, content));
+
+    let prev_clip = canvas.clip_rect();
+    let inner_clip = Rect::new(input_r.x + 6, input_r.y + 4, (input_r.width - 12).max(1), (input_r.height - 8).max(1));
+    canvas.set_clip(inner_clip);
+    let max_line_w = (input_r.width - 20).max(20);
+    let caret_on = (state.uptime_ms / 500) % 2 == 0;
 
     if tall {
         let step_y = (body_st.cap_height + 6).max(14);
         let max_lines = ((input_r.height - 12) / step_y).max(1) as usize;
-        let total = text_val.lines().count().max(1);
-        let skip = total.saturating_sub(max_lines);
-        for (i, line) in text_val.lines().skip(skip).take(max_lines).enumerate() {
-            let ly = input_r.y + 8 + (i as i32) * step_y;
-            draw_text_color(canvas, line, input_r.x + 10, ly, &body_st, INK_DARK);
-            if skip + i + 1 == total {
-                let lw = text_width(line, &body_st);
-                canvas.fill_rect(
-                    input_r.x + 12 + lw,
-                    ly - 1,
-                    2,
-                    body_st.cap_height + 2,
-                    AQUA_CORE,
-                );
+        let mut wrapped: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        for raw_line in text_val.split('\n') {
+            if raw_line.is_empty() {
+                wrapped.push("");
+                continue;
+            }
+            let mut start = 0usize;
+            while start < raw_line.len() {
+                let rest = &raw_line[start..];
+                if text_width(rest, &body_st) <= max_line_w {
+                    wrapped.push(rest);
+                    break;
+                }
+                let mut split_at = 0usize;
+                for (idx, ch) in rest.char_indices() {
+                    let next_idx = idx + ch.len_utf8();
+                    if text_width(&rest[..next_idx], &body_st) > max_line_w {
+                        break;
+                    }
+                    split_at = next_idx;
+                }
+                if split_at == 0 {
+                    split_at = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                }
+                wrapped.push(&rest[..split_at]);
+                start += split_at;
             }
         }
-        if text_val.is_empty() {
-            canvas.fill_rect(
-                input_r.x + 10,
-                input_r.y + 8,
-                2,
-                body_st.cap_height + 2,
-                AQUA_CORE,
-            );
+        if wrapped.is_empty() {
+            wrapped.push("");
+        }
+        let total = wrapped.len();
+        let skip = total.saturating_sub(max_lines);
+        for (i, line) in wrapped.iter().skip(skip).take(max_lines).enumerate() {
+            let ly = input_r.y + 8 + (i as i32) * step_y;
+            draw_text_color(canvas, line, input_r.x + 10, ly, &body_st, INK);
+            if skip + i + 1 == total && caret_on {
+                let lw = text_width(line, &body_st).min(max_line_w);
+                fill_rr(canvas, Rect::new(input_r.x + 12 + lw, ly - 1, 2, body_st.cap_height + 2), 1, accent, 255);
+            }
         }
     } else {
         let ty = input_r.y + (input_r.height - body_st.cap_height) / 2;
-        draw_text_color(canvas, text_val, input_r.x + 12, ty, &body_st, INK_DARK);
         let tw = text_width(text_val, &body_st);
-        canvas.fill_rect(
-            input_r.x + 14 + tw,
-            ty - 1,
-            2,
-            body_st.cap_height + 2,
-            AQUA_CORE,
-        );
+        let draw_x = if tw > max_line_w { input_r.x + 10 - (tw - max_line_w) } else { input_r.x + 10 };
+        draw_text_color(canvas, text_val, draw_x, ty, &body_st, INK);
+        if caret_on {
+            let cur_x = (draw_x + tw + 2).min(input_r.x + input_r.width - 8);
+            fill_rr(canvas, Rect::new(cur_x, ty - 1, 2, body_st.cap_height + 2), 1, accent, 255);
+        }
     }
+    canvas.set_clip(prev_clip);
 
-    let btn_w = unit * 7;
-    let btn_h = unit * 2;
-    let btn_y = m_rect.y + m_rect.height - btn_h - unit;
-    let ok_r = Rect::new(
-        m_rect.x + m_rect.width - btn_w - unit * 3 / 2,
-        btn_y,
-        btn_w,
-        btn_h,
-    );
-    let cancel_r = Rect::new(ok_r.x - btn_w - unit / 2, btn_y, btn_w, btn_h);
-
-    let cancel_hov = state.hover == Target::ModalCancel;
-    let ok_hov = state.hover == Target::ModalConfirm;
-
-    draw_panel(
-        canvas,
-        cancel_r,
-        cancel_r.height / 2,
-        if cancel_hov { AQUA_SOFT } else { WHITE },
-        245,
-        GLASS_BORDER,
-        220,
-    );
-    let c_tw = text_width("Vazgec", &body_st);
+    let (ok_r, cancel_r) = modal_buttons(m_rect, unit);
+    let cancel_hot = state.hover == Target::ModalCancel;
+    let ok_hot = state.hover == Target::ModalConfirm;
+    fill_rr(canvas, cancel_r, cancel_r.height / 2, WHITE, if cancel_hot { 255 } else { 190 });
+    stroke_rr(canvas, cancel_r, cancel_r.height / 2, 1, INK_MUTED, 90);
+    let cw = text_width("Vazgec", &body_st);
     draw_text_color(
         canvas,
         "Vazgec",
-        cancel_r.x + (cancel_r.width - c_tw) / 2,
+        cancel_r.x + (cancel_r.width - cw) / 2,
         cancel_r.y + (cancel_r.height - body_st.cap_height) / 2,
         &body_st,
-        INK_DARK,
+        INK,
     );
-
-    draw_panel(
+    fill_rr_vgrad(
         canvas,
         ok_r,
         ok_r.height / 2,
-        if ok_hov { AQUA_DEEP } else { AZURE_CORE },
-        255,
-        AZURE_DEEP,
+        lighten(accent, if ok_hot { 90 } else { 60 }),
+        accent,
         255,
     );
-    let ok_tw = text_width("Kaydet", &body_st);
+    stroke_rr(canvas, ok_r, ok_r.height / 2, 1, WHITE, 130);
+    let kw = text_width("Kaydet", &body_st);
     draw_text_color(
         canvas,
         "Kaydet",
-        ok_r.x + (ok_r.width - ok_tw) / 2,
+        ok_r.x + (ok_r.width - kw) / 2,
         ok_r.y + (ok_r.height - body_st.cap_height) / 2,
         &body_st,
         WHITE,
     );
+}
+
+pub fn draw_volume_osd(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, height: i32, unit: i32) {
+    if state.vol_osd_anim <= 0 {
+        return;
+    }
+    let e = ease_out_cubic(state.vol_osd_anim);
+    let raw = volume_osd_rect(width, height, unit, state.vol_osd_anim);
+    let sc = lerp(ONE * 92 / 100, ONE, e);
+    let (x, y, w, h) = scale_rect_about(raw.x, raw.y, raw.width, raw.height, sc, raw.x + raw.width / 2, raw.y + raw.height / 2);
+    let r = Rect::new(x, y, w, h);
+
+    let (blur, passes) = state.blur_params(unit);
+    glass_surface(canvas, r, h / 2, &dock_glass(blur, passes), e);
+
+    let accent = state.settings.accent_color();
+    let vol = if state.muted { 0 } else { state.volume as i32 };
+    let disp_v = (state.vol_disp * 100 / ONE).clamp(0, 100);
+
+    // Sol hoparlör rozeti
+    let badge_s = h - unit * 4 / 5;
+    let bx = r.x + unit * 2 / 5;
+    let by = r.y + (r.height - badge_s) / 2;
+    let (b_top, b_bot) = if vol == 0 { (CLOSE_RED_TOP, CLOSE_RED) } else { (lighten(accent, 70), accent) };
+    fill_rr_vgrad(canvas, Rect::new(bx, by, badge_s, badge_s), badge_s / 2, b_top, b_bot, scale_u32(245, e));
+
+    let st = text_style(text_h(unit, 46), 16);
+    let icon_txt = if vol == 0 { "X" } else if vol < 50 { ")" } else { "))" };
+    let iw = text_width(icon_txt, &st);
+    let badge_text_col = fade_text_color(canvas, bx, by, WHITE, e);
+    draw_text_color(canvas, icon_txt, bx + (badge_s - iw) / 2, by + (badge_s - st.cap_height) / 2, &st, badge_text_col);
+
+    // Sağ yüzde metni (%75 veya SESSIZ)
+    let mut pct_line = Line::new();
+    if vol == 0 {
+        pct_line.text("SESSIZ");
+    } else {
+        pct_line.text("%").number(vol as u32, 1);
+    }
+    let pw = text_width(pct_line.as_str(), &st);
+    let px = r.x + r.width - pw - unit * 3 / 4;
+    let py = r.y + (r.height - st.cap_height) / 2;
+    let text_col = fade_text_color(canvas, px, py, WHITE, e);
+    let shadow_col = fade_text_color(canvas, px, py, BLACK, e);
+    shadowed(canvas, pct_line.as_str(), px, py, &st, text_col, shadow_col);
+
+    // Ortadaki akıcı ses çubuğu
+    let bar_x = bx + badge_s + unit * 3 / 5;
+    let bar_w = (px - bar_x - unit * 3 / 5).max(unit * 2);
+    let bar_h = (unit / 3).max(6);
+    let bar_y = r.y + (r.height - bar_h) / 2;
+    fill_rr(canvas, Rect::new(bar_x, bar_y, bar_w, bar_h), bar_h / 2, WHITE, scale_u32(65, e));
+
+    let fill_w = (bar_w * disp_v / 100).max(if disp_v > 0 { bar_h } else { 0 });
+    if fill_w > 0 {
+        fill_rr_vgrad(
+            canvas,
+            Rect::new(bar_x, bar_y, fill_w, bar_h),
+            bar_h / 2,
+            lighten(accent, 80),
+            accent,
+            scale_u32(250, e),
+        );
+    }
 }

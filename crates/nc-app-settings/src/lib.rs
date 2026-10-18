@@ -1,9 +1,11 @@
+// crates/nc-app-settings/src/lib.rs
 #![no_std]
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
-use nc_app::text::Line;
+use nc_app::locale::{tr, KeyboardLayout, Language, TextId};
+use nc_app::text::{draw_text_clipped, Line};
 use nc_app::theme::{ACCENTS, ACCENT_COUNT, WALLPAPERS, WALLPAPER_COUNT};
 use nc_app::{App, AppInfo, Context, Icon, Input, KeyCode, Update};
 use nc_arch::{inl, outl};
@@ -19,14 +21,6 @@ use nc_net::DhcpState;
 use nc_ui::{draw_dot, draw_panel, draw_text_color, text_style, WHITE};
 
 const PAGE_COUNT: usize = 6;
-const PAGES: [(&str, &str); PAGE_COUNT] = [
-    ("Gorunum", "Duvar kagidi, renk ve cam"),
-    ("Ethernet ve Ag", "PCI NIC, IP ve paketler"),
-    ("Kablosuz (Wi-Fi)", "Gercek 802.11 ag tarayicisi"),
-    ("Bluetooth", "Gercek HCI denetleyici ve cihazlar"),
-    ("Aygitlar (.efra)", "Surucu yoneticisi ve derleyici"),
-    ("Sistem ve Hiz", "Animasyon ve arka plan"),
-];
 
 const PORCELAIN_BG: u32 = rgb(244, 249, 253);
 const CARD_WHITE: u32 = rgb(253, 254, 255);
@@ -82,6 +76,8 @@ enum HoverTarget {
     DrvModalBuild,
     DrvModalCancel,
     LaunchSpeed(u8),
+    LangBtn(Language),
+    KbdBtn(KeyboardLayout),
     ResetDefaultsBtn,
 }
 
@@ -133,7 +129,7 @@ fn probe_pci_hardware() -> PciNicProbe {
                     (0x10EC, 0x8139) => "Realtek RTL8139 Fast Ethernet",
                     (0x10EC, 0x8168) => "Realtek RTL8111/8168 Gigabit Ethernet",
                     (0x1022, 0x2000) => "AMD PCnet-PCI II (Am79C970A)",
-                    _ => "PCI Ethernet Denetleyicisi",
+                    _ => "PCI Ethernet Controller",
                 };
                 return PciNicProbe {
                     found: true,
@@ -150,7 +146,28 @@ fn probe_pci_hardware() -> PciNicProbe {
         bus: 0,
         dev: 0,
         irq: 0,
-        model_name: "Fiziksel PCI Ethernet Algilanmadi",
+        model_name: "PCI Ethernet Not Detected",
+    }
+}
+
+fn page_titles(lang: Language, index: usize) -> (&'static str, &'static str) {
+    match index {
+        0 => (tr(lang, TextId::PageAppearance), tr(lang, TextId::PageAppearanceSub)),
+        1 => (tr(lang, TextId::PageEthernet), tr(lang, TextId::PageEthernetSub)),
+        2 => (tr(lang, TextId::PageWifi), tr(lang, TextId::PageWifiSub)),
+        3 => (tr(lang, TextId::PageBluetooth), tr(lang, TextId::PageBluetoothSub)),
+        4 => (tr(lang, TextId::PageDrivers), tr(lang, TextId::PageDriversSub)),
+        _ => (tr(lang, TextId::PageSystem), tr(lang, TextId::PageSystemSub)),
+    }
+}
+
+pub fn save_locale_config(lang: Language, kbd: KeyboardLayout) {
+    let mut vfs = VfsManager::new();
+    let _ = vfs.create_dir_path("/data/system");
+    let content = alloc::format!("lang={}\nkbd={}\n", lang as u8, kbd as u8);
+    if vfs.write_file_path("/data/system/locale.cfg", content.as_bytes()).is_err() {
+        let _ = vfs.create_dir_path("/ram/system");
+        let _ = vfs.write_file_path("/ram/system/locale.cfg", content.as_bytes());
     }
 }
 
@@ -159,7 +176,7 @@ impl SettingsApp {
         let _ = wireless::global();
         let _ = nc_driver::global();
         SettingsApp {
-            info: AppInfo::new("nc.settings", "Ayarlar", "2.7.0", Icon::Sliders, 46, 30),
+            info: AppInfo::new("nc.settings", "Ayarlar", "2.8.0", Icon::Sliders, 48, 31),
             page: 0,
             hover: HoverTarget::None,
             pci_nic: probe_pci_hardware(),
@@ -179,7 +196,7 @@ impl SettingsApp {
         let raw = pkg.serialize();
         if vfs.write_file_path(&full_path, &raw).is_ok() {
             self.efra_status_note = alloc::format!(
-                "'{}' ({} bayt) derlendi ve /data/drivers altina kalici kaydedildi.",
+                "'{}' ({} B) -> /data/drivers",
                 pkg.manifest.file_name,
                 raw.len()
             );
@@ -188,7 +205,7 @@ impl SettingsApp {
             let ram_path = alloc::format!("/ram/drivers/{}", pkg.manifest.file_name);
             let _ = vfs.write_file_path(&ram_path, &raw);
             self.efra_status_note = alloc::format!(
-                "'{}' derlendi ve /ram/drivers bellekte etkinlestirildi.",
+                "'{}' -> /ram/drivers",
                 pkg.manifest.file_name
             );
         }
@@ -213,7 +230,7 @@ impl SettingsApp {
         }
         reg.optimize_and_scan();
         self.efra_status_note = alloc::format!(
-            "PCI/ISA tarandi: {} donanim birimi ve {} disk .efra paketi eslestirildi.",
+            "PCI/ISA: {} donanim, {} .efra paketi eslestirildi.",
             reg.devices.len(),
             count
         );
@@ -223,16 +240,18 @@ impl SettingsApp {
         Rect::new(
             area.x + unit / 2,
             area.y + unit / 2,
-            unit * 12,
+            unit * 13,
             area.height - unit,
         )
     }
 
     fn sidebar_item(area: Rect, index: usize, unit: i32) -> Rect {
         let side = Self::sidebar_rect(area, unit);
-        let step = unit * 3 + unit / 6;
-        let y = side.y + unit * 2 + (index as i32) * step;
-        Rect::new(side.x + unit / 2, y, side.width - unit, unit * 2 + unit * 3 / 4)
+        let top_offset = unit * 2;
+        let avail_h = side.height - top_offset - unit / 2;
+        let step = (avail_h / PAGE_COUNT as i32).max(unit * 3);
+        let y = side.y + top_offset + (index as i32) * step;
+        Rect::new(side.x + unit / 2, y, side.width - unit, (step - unit / 4).max(unit * 2))
     }
 
     fn main_pane(area: Rect, unit: i32) -> Rect {
@@ -245,44 +264,51 @@ impl SettingsApp {
         )
     }
 
+    // Sayfa 0 (Görünüm) - 27.5 unit yüksekliğe tam sığan yerleşim
     fn swatch_rect(pane: Rect, index: usize, unit: i32) -> Rect {
         let col = (index % 3) as i32;
         let row = (index / 3) as i32;
-        let w = (pane.width - unit * 4) / 3;
-        let h = unit * 4;
+        let gap = unit * 2 / 3;
+        let w = (pane.width - unit * 2 - gap * 2) / 3;
+        let h = unit * 3 + unit / 2;
         Rect::new(
-            pane.x + unit + col * (w + unit),
-            pane.y + unit * 4 + row * (h + unit),
+            pane.x + unit + col * (w + gap),
+            pane.y + unit * 7 / 2 + row * (h + unit / 2),
             w,
             h,
         )
     }
 
     fn anim_toggle_rect(pane: Rect, unit: i32) -> Rect {
-        Rect::new(pane.x + unit, pane.y + unit * 15, pane.width - unit * 2, unit * 3)
+        Rect::new(
+            pane.x + unit,
+            pane.y + unit * 12,
+            pane.width - unit * 2,
+            unit * 5 / 2,
+        )
     }
 
     fn speed_pill_rect(pane: Rect, idx: u8, unit: i32) -> Rect {
-        let base_y = pane.y + unit * 15 + unit / 2;
+        let base_y = pane.y + unit * 12 + unit / 3;
         let right = pane.x + pane.width - unit * 3 / 2;
-        let w = unit * 4 + unit / 2;
-        Rect::new(right - (3 - idx as i32) * (w + unit / 3), base_y, w, unit * 2)
+        let w = unit * 4;
+        Rect::new(right - (3 - idx as i32) * (w + unit / 4), base_y, w, unit * 11 / 6)
     }
 
     fn accent_dot_rect(pane: Rect, index: usize, unit: i32) -> Rect {
         Rect::new(
             pane.x + unit * 9 + (index as i32) * (unit * 5 / 2),
-            pane.y + unit * 19,
+            pane.y + unit * 15 + unit / 3,
             unit * 2,
             unit * 2,
         )
     }
 
     fn blur_pill_rect(pane: Rect, idx: u8, unit: i32) -> Rect {
-        let w = unit * 4 + unit / 2;
+        let w = unit * 4 + unit / 4;
         Rect::new(
-            pane.x + unit * 10 + (idx as i32) * (w + unit / 3),
-            pane.y + unit * 22,
+            pane.x + unit * 9 + (idx as i32) * (w + unit / 3),
+            pane.y + unit * 18 + unit / 3,
             w,
             unit * 2,
         )
@@ -291,7 +317,7 @@ impl SettingsApp {
     fn dock_toggle_rect(pane: Rect, unit: i32) -> Rect {
         Rect::new(
             pane.x + unit,
-            pane.y + unit * 25,
+            pane.y + unit * 21 + unit / 3,
             pane.width - unit * 2,
             unit * 5 / 2,
         )
@@ -301,7 +327,7 @@ impl SettingsApp {
         let w = (pane.width - unit * 3) / 2;
         Rect::new(
             pane.x + unit + (idx as i32) * (w + unit),
-            pane.y + pane.height - unit * 4,
+            pane.y + pane.height - unit * 7 / 2,
             w,
             unit * 5 / 2,
         )
@@ -310,36 +336,36 @@ impl SettingsApp {
     fn wifi_toggle_rect(pane: Rect, unit: i32) -> Rect {
         Rect::new(
             pane.x + unit,
-            pane.y + unit * 4,
+            pane.y + unit * 7 / 2,
             pane.width - unit * 10,
-            unit * 3,
+            unit * 5 / 2,
         )
     }
 
     fn wifi_scan_rect(pane: Rect, unit: i32) -> Rect {
         Rect::new(
             pane.x + pane.width - unit * 8 - unit / 2,
-            pane.y + unit * 4,
+            pane.y + unit * 7 / 2,
             unit * 7 + unit / 2,
-            unit * 3,
+            unit * 5 / 2,
         )
     }
 
     fn wifi_row_rect(pane: Rect, idx: usize, unit: i32) -> Rect {
         Rect::new(
             pane.x + unit,
-            pane.y + unit * 8 + (idx as i32) * (unit * 3 + unit / 3),
+            pane.y + unit * 7 + (idx as i32) * (unit * 3),
             pane.width - unit * 2,
-            unit * 3,
+            unit * 8 / 3,
         )
     }
 
     fn drv_row_rect(pane: Rect, idx: usize, unit: i32) -> Rect {
         Rect::new(
             pane.x + unit,
-            pane.y + unit * 6 + (idx as i32) * (unit * 3 + unit / 5),
+            pane.y + unit * 6 + (idx as i32) * (unit * 3),
             pane.width - unit * 2,
-            unit * 3,
+            unit * 8 / 3,
         )
     }
 
@@ -347,7 +373,7 @@ impl SettingsApp {
         let w = (pane.width - unit * 4) / 3;
         Rect::new(
             pane.x + unit + (idx as i32) * (w + unit),
-            pane.y + pane.height - unit * 4,
+            pane.y + pane.height - unit * 7 / 2,
             w,
             unit * 5 / 2,
         )
@@ -356,26 +382,47 @@ impl SettingsApp {
     fn pass_modal_rect(pane: Rect, unit: i32) -> Rect {
         Rect::new(
             pane.x + unit * 2,
-            pane.y + unit * 7,
+            pane.y + unit * 6,
             pane.width - unit * 4,
             unit * 12,
         )
     }
 
+    // Sayfa 5 (Sistem ve Dil) yerleşimi
     fn launch_speed_rect(pane: Rect, idx: u8, unit: i32) -> Rect {
         let w = (pane.width - unit * 4) / 3;
         Rect::new(
             pane.x + unit + (idx as i32) * (w + unit),
-            pane.y + unit * 6,
+            pane.y + unit * 5,
             w,
-            unit * 4,
+            unit * 3 + unit / 3,
+        )
+    }
+
+    fn lang_btn_rect(pane: Rect, idx: usize, unit: i32) -> Rect {
+        let w = unit * 8;
+        Rect::new(
+            pane.x + unit * 9 + (idx as i32) * (w + unit / 2),
+            pane.y + unit * 9 + unit / 2,
+            w,
+            unit * 2 + unit / 4,
+        )
+    }
+
+    fn kbd_btn_rect(pane: Rect, idx: usize, unit: i32) -> Rect {
+        let w = unit * 8;
+        Rect::new(
+            pane.x + unit * 9 + (idx as i32) * (w + unit / 2),
+            pane.y + unit * 12 + unit / 2,
+            w,
+            unit * 2 + unit / 4,
         )
     }
 
     fn reset_btn_rect(pane: Rect, unit: i32) -> Rect {
         Rect::new(
             pane.x + unit,
-            pane.y + pane.height - unit * 4,
+            pane.y + pane.height - unit * 7 / 2,
             unit * 12,
             unit * 5 / 2,
         )
@@ -510,12 +557,23 @@ impl SettingsApp {
                         return HoverTarget::LaunchSpeed(s);
                     }
                 }
+                if inside(Self::lang_btn_rect(pane, 0, unit), x, y) {
+                    return HoverTarget::LangBtn(Language::Turkish);
+                }
+                if inside(Self::lang_btn_rect(pane, 1, unit), x, y) {
+                    return HoverTarget::LangBtn(Language::English);
+                }
+                if inside(Self::kbd_btn_rect(pane, 0, unit), x, y) {
+                    return HoverTarget::KbdBtn(KeyboardLayout::TurkishQ);
+                }
+                if inside(Self::kbd_btn_rect(pane, 1, unit), x, y) {
+                    return HoverTarget::KbdBtn(KeyboardLayout::UsQwerty);
+                }
                 if inside(Self::reset_btn_rect(pane, unit), x, y) {
                     return HoverTarget::ResetDefaultsBtn;
                 }
             }
         }
-
         HoverTarget::None
     }
 }
@@ -542,6 +600,7 @@ impl App for SettingsApp {
         let prev_b_cnt = wl.bt_devices.len();
         let prev_w_scan = wl.wifi_scanning;
         let prev_b_scan = wl.bt_scanning;
+
         wl.poll();
 
         let mut redraw = wl.wifi_networks.len() != prev_w_cnt
@@ -597,8 +656,8 @@ impl App for SettingsApp {
                         let custom_id = alloc::format!("efra.custom.u{}", self.compiled_counter);
                         let pkg = EfraCompiler::compile_in_os(
                             &custom_id,
-                            "NetizenCore Sistem Ici Derlenmis .efra",
-                            "3.0.0-efra",
+                            "NetizenCore Custom .efra",
+                            "3.0.0",
                             &fname,
                             EfraClass::Generic,
                             0xFFFF,
@@ -664,8 +723,8 @@ impl App for SettingsApp {
                             let custom_id = alloc::format!("efra.custom.u{}", self.compiled_counter);
                             let pkg = EfraCompiler::compile_in_os(
                                 &custom_id,
-                                "NetizenCore Sistem Ici Derlenmis .efra",
-                                "3.0.0-efra",
+                                "NetizenCore Custom .efra",
+                                "3.0.0",
                                 &fname,
                                 EfraClass::Generic,
                                 0xFFFF,
@@ -718,19 +777,15 @@ impl App for SettingsApp {
                                 let _ = drv.send_packet(&pkt);
                                 net.tx_packets += 1;
                             }
-                            self.eth_status_note = String::from(
-                                "DHCP Discover cercevesi PCI e1000 uzerinden gonderildi.",
-                            );
+                            self.eth_status_note = String::from("DHCP Discover -> PCI e1000");
                         } else {
-                            self.eth_status_note =
-                                String::from("Fiziksel Ethernet baglantisi yok.");
+                            self.eth_status_note = String::from("No physical Ethernet link.");
                         }
                     }
                     HoverTarget::EthArpBtn => {
                         let net = nc_net::global();
                         net.resolve_gateway_mac();
-                        self.eth_status_note =
-                            String::from("ARP Ag Gecidi MAC cozumu istegi yayinlandi.");
+                        self.eth_status_note = String::from("ARP Gateway MAC request sent.");
                     }
                     HoverTarget::WifiToggle => {
                         let next_state = !wl.wifi_enabled;
@@ -780,8 +835,17 @@ impl App for SettingsApp {
                     HoverTarget::LaunchSpeed(s) => {
                         ctx.settings.launch_anim_speed = s;
                     }
+                    HoverTarget::LangBtn(lang) => {
+                        ctx.settings.language = lang;
+                        save_locale_config(ctx.settings.language, ctx.settings.keyboard);
+                    }
+                    HoverTarget::KbdBtn(kbd) => {
+                        ctx.settings.keyboard = kbd;
+                        save_locale_config(ctx.settings.language, ctx.settings.keyboard);
+                    }
                     HoverTarget::ResetDefaultsBtn => {
                         ctx.settings = nc_app::Settings::new();
+                        save_locale_config(ctx.settings.language, ctx.settings.keyboard);
                     }
                     HoverTarget::None => {}
                 }
@@ -798,28 +862,23 @@ impl App for SettingsApp {
 
     fn draw(&self, canvas: &mut Canvas<'_>, area: Rect, ctx: &Context) {
         let unit = ctx.unit;
+        let lang = ctx.settings.language;
         canvas.fill_rect(area.x, area.y, area.width, area.height, PORCELAIN_BG);
 
         let side = Self::sidebar_rect(area, unit);
         draw_panel(canvas, side, unit / 2, CARD_ALT, 255, BORDER_LIGHT, 255);
 
-        let title_st = text_style((unit * 82 / 100).max(11), 16);
-        let label_st = text_style((unit * 56 / 100).max(10), 15);
-        let sub_st = text_style((unit * 46 / 100).max(8), 15);
+        let title_st = text_style((unit * 76 / 100).max(11), 15);
+        let label_st = text_style((unit * 52 / 100).max(9), 14);
+        let sub_st = text_style((unit * 42 / 100).max(8), 14);
 
-        draw_dot(
+        draw_dot(canvas, side.x + unit, side.y + unit, 5, AQUA_MINT, 255);
+        draw_text_clipped(
             canvas,
-            side.x + unit,
-            side.y + unit,
-            5,
-            AQUA_MINT,
-            255,
-        );
-        draw_text_color(
-            canvas,
-            "Sistem Ayarlari",
+            tr(lang, TextId::SettingsTitle),
             side.x + unit * 7 / 4,
             side.y + unit * 3 / 5,
+            side.width - unit * 2,
             &label_st,
             INK_DARK,
         );
@@ -839,19 +898,24 @@ impl App for SettingsApp {
 
             let fg_main = if selected { WHITE } else { INK_DARK };
             let fg_sub = if selected { AQUA_SOFT } else { INK_MUTED };
-            draw_text_color(
+            let (p_title, p_sub) = page_titles(lang, i);
+            let max_tw = item.width - unit * 5 / 4;
+
+            draw_text_clipped(
                 canvas,
-                PAGES[i].0,
-                item.x + unit * 3 / 4,
-                item.y + unit / 3,
+                p_title,
+                item.x + unit * 2 / 3,
+                item.y + unit / 4,
+                max_tw,
                 &label_st,
                 fg_main,
             );
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
-                PAGES[i].1,
-                item.x + unit * 3 / 4,
-                item.y + unit * 3 / 2,
+                p_sub,
+                item.x + unit * 2 / 3,
+                item.y + unit * 4 / 3,
+                max_tw,
                 &sub_st,
                 fg_sub,
             );
@@ -860,19 +924,22 @@ impl App for SettingsApp {
         let pane = Self::main_pane(area, unit);
         draw_panel(canvas, pane, unit / 2, CARD_WHITE, 255, BORDER_LIGHT, 255);
 
-        draw_text_color(
+        let (cur_title, cur_sub) = page_titles(lang, self.page);
+        draw_text_clipped(
             canvas,
-            PAGES[self.page].0,
+            cur_title,
             pane.x + unit,
-            pane.y + unit,
+            pane.y + unit * 3 / 4,
+            pane.width - unit * 2,
             &title_st,
             INK_DARK,
         );
-        draw_text_color(
+        draw_text_clipped(
             canvas,
-            PAGES[self.page].1,
+            cur_sub,
             pane.x + unit,
-            pane.y + unit * 11 / 5,
+            pane.y + unit * 2,
+            pane.width - unit * 2,
             &sub_st,
             INK_MUTED,
         );
@@ -898,6 +965,7 @@ impl SettingsApp {
         sub_st: &Style,
     ) {
         let unit = ctx.unit;
+        let lang = ctx.settings.language;
         let accent = ctx.settings.accent_color();
 
         for i in 0..WALLPAPER_COUNT {
@@ -934,19 +1002,21 @@ impl SettingsApp {
                 let outer = Rect::new(cell.x - 2, cell.y - 2, cell.width + 4, cell.height + 4);
                 draw_panel(canvas, outer, unit / 3 + 1, WHITE, 0, accent, 255);
             }
+
             let name_pill = Rect::new(
                 cell.x + 4,
-                cell.y + cell.height - unit * 4 / 3,
+                cell.y + cell.height - unit * 6 / 5,
                 cell.width - 8,
                 unit,
             );
             draw_panel(canvas, name_pill, 4, CARD_WHITE, 215, BORDER_LIGHT, 0);
-            let nw = text_width(wp.name, sub_st);
-            draw_text_color(
+            let nw = text_width(wp.name, sub_st).min(name_pill.width - 6);
+            draw_text_clipped(
                 canvas,
                 wp.name,
                 name_pill.x + (name_pill.width - nw) / 2,
                 name_pill.y + (name_pill.height - sub_st.cap_height) / 2,
+                name_pill.width - 6,
                 sub_st,
                 INK_DARK,
             );
@@ -960,16 +1030,24 @@ impl SettingsApp {
             anim_row.y + (anim_row.height - 18) / 2,
             ctx.settings.wallpaper_animated,
         );
-        draw_text_color(
+
+        let first_pill_x = Self::speed_pill_rect(pane, 1, unit).x;
+        let max_anim_tw = (first_pill_x - (anim_row.x + unit * 5 / 2) - unit / 2).max(40);
+        draw_text_clipped(
             canvas,
-            "Hareketli Kureler ve Canli Duvar Kagidi",
-            anim_row.x + unit * 3,
+            tr(lang, TextId::LiveWallpaperToggle),
+            anim_row.x + unit * 5 / 2,
             anim_row.y + (anim_row.height - label_st.cap_height) / 2,
+            max_anim_tw,
             label_st,
             INK_DARK,
         );
 
-        let speeds = [(1u8, "Yavas"), (2u8, "Dengeli"), (3u8, "Akici")];
+        let speeds = [
+            (1u8, tr(lang, TextId::SpeedSlow)),
+            (2u8, tr(lang, TextId::SpeedBalanced)),
+            (3u8, tr(lang, TextId::SpeedFluid)),
+        ];
         for (s_val, s_lbl) in speeds {
             let pr = Self::speed_pill_rect(pane, s_val, unit);
             let sel = ctx.settings.wallpaper_animated && ctx.settings.wallpaper_speed == s_val;
@@ -977,11 +1055,13 @@ impl SettingsApp {
             draw_pill_btn(canvas, pr, s_lbl, sel, hov, sub_st);
         }
 
-        draw_text_color(
+        let acc_y = pane.y + unit * 15 + unit / 3;
+        draw_text_clipped(
             canvas,
-            "Vurgu Rengi:",
+            tr(lang, TextId::AccentColorLabel),
             pane.x + unit,
-            pane.y + unit * 19 + unit / 2,
+            acc_y + (unit * 2 - label_st.cap_height) / 2,
+            unit * 8,
             label_st,
             INK_DARK,
         );
@@ -996,19 +1076,21 @@ impl SettingsApp {
             draw_dot(canvas, cx, cy, unit * 3 / 4, ACCENTS[i], 255);
         }
 
-        draw_text_color(
+        let blur_y = pane.y + unit * 18 + unit / 3;
+        draw_text_clipped(
             canvas,
-            "Buzlu Cam (Blur):",
+            tr(lang, TextId::BlurLabel),
             pane.x + unit,
-            pane.y + unit * 22 + unit / 2,
+            blur_y + (unit * 2 - label_st.cap_height) / 2,
+            unit * 8,
             label_st,
             INK_DARK,
         );
         let blurs = [
-            (0u8, "Kapali"),
-            (1u8, "Hafif"),
-            (2u8, "Standart"),
-            (3u8, "Derin"),
+            (0u8, tr(lang, TextId::BlurOff)),
+            (1u8, tr(lang, TextId::BlurLight)),
+            (2u8, tr(lang, TextId::BlurStandard)),
+            (3u8, tr(lang, TextId::BlurDeep)),
         ];
         for (b_val, b_lbl) in blurs {
             let br = Self::blur_pill_rect(pane, b_val, unit);
@@ -1026,15 +1108,16 @@ impl SettingsApp {
             ctx.settings.dock_auto_hide,
         );
         let dock_txt = if ctx.settings.dock_auto_hide {
-            "Ana Bar: Sadece Imlec Alta Gidince Yukselir (Otomatik Gizle)"
+            tr(lang, TextId::DockAutoHideOn)
         } else {
-            "Ana Bar: Ekranin Altinda Her Zaman Sabit Gorunur"
+            tr(lang, TextId::DockAutoHideOff)
         };
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             dock_txt,
-            dock_row.x + unit * 3,
+            dock_row.x + unit * 5 / 2,
             dock_row.y + (dock_row.height - label_st.cap_height) / 2,
+            dock_row.width - unit * 3,
             label_st,
             INK_DARK,
         );
@@ -1049,20 +1132,21 @@ impl SettingsApp {
         sub_st: &Style,
     ) {
         let unit = ctx.unit;
+        let lang = ctx.settings.language;
         let net = nc_net::global();
 
         let hw_card = Rect::new(
             pane.x + unit,
-            pane.y + unit * 4,
+            pane.y + unit * 7 / 2,
             pane.width - unit * 2,
-            unit * 8,
+            unit * 7 + unit / 2,
         );
         draw_panel(canvas, hw_card, unit / 2, CARD_ALT, 255, BORDER_LIGHT, 255);
 
         draw_dot(
             canvas,
             hw_card.x + unit,
-            hw_card.y + unit * 5 / 4,
+            hw_card.y + unit,
             5,
             if self.pci_nic.found {
                 AQUA_MINT
@@ -1071,37 +1155,39 @@ impl SettingsApp {
             },
             255,
         );
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             self.pci_nic.model_name,
             hw_card.x + unit * 2,
-            hw_card.y + unit * 4 / 5,
+            hw_card.y + unit * 2 / 3,
+            hw_card.width - unit * 3,
             label_st,
             INK_DARK,
         );
 
         let mut pci_line = Line::new();
         pci_line
-            .text("Surucu Profili: ")
+            .text("Platform: ")
             .text(ctx.platform)
-            .text("   |   PCI Hat: ")
+            .text("  |  PCI ")
             .number(self.pci_nic.bus as u32, 1)
             .text(":")
             .number(self.pci_nic.dev as u32, 1)
-            .text("   |   IRQ: ")
+            .text("  |  IRQ ")
             .number(self.pci_nic.irq as u32, 1);
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             pci_line.as_str(),
             hw_card.x + unit * 2,
-            hw_card.y + unit * 5 / 2,
+            hw_card.y + unit * 9 / 4,
+            hw_card.width - unit * 3,
             sub_st,
             INK_BODY,
         );
 
         let mut mac_line = Line::new();
         mac_line
-            .text("Donanim MAC: ")
+            .text("MAC: ")
             .number(net.mac_addr[0] as u32, 2)
             .text(":")
             .number(net.mac_addr[1] as u32, 2)
@@ -1113,35 +1199,37 @@ impl SettingsApp {
             .number(net.mac_addr[4] as u32, 2)
             .text(":")
             .number(net.mac_addr[5] as u32, 2);
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             mac_line.as_str(),
             hw_card.x + unit * 2,
-            hw_card.y + unit * 9 / 2,
+            hw_card.y + unit * 4,
+            hw_card.width - unit * 3,
             sub_st,
             AZURE_DEEP,
         );
 
         let dhcp_str = match net.dhcp.state {
-            DhcpState::Bound => "DHCP Durumu: Bagli ve IP Atandi",
-            DhcpState::RequestSent => "DHCP Durumu: Sunucu Yaniti Bekleniyor",
-            DhcpState::DiscoverSent => "DHCP Durumu: Agda DHCP Sunucusu Araniyor",
-            DhcpState::Init => "DHCP Durumu: Baslatiliyor",
+            DhcpState::Bound => "DHCP: Bound (IP Assigned)",
+            DhcpState::RequestSent => "DHCP: Waiting Server ACK",
+            DhcpState::DiscoverSent => "DHCP: Searching Server",
+            DhcpState::Init => "DHCP: Initializing",
         };
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             dhcp_str,
             hw_card.x + unit * 2,
-            hw_card.y + unit * 6,
+            hw_card.y + unit * 11 / 2,
+            hw_card.width - unit * 3,
             sub_st,
             AQUA_DEEP,
         );
 
         let ip_card = Rect::new(
             pane.x + unit,
-            pane.y + unit * 13,
+            pane.y + unit * 12,
             pane.width - unit * 2,
-            unit * 9,
+            unit * 8 + unit / 2,
         );
         draw_panel(
             canvas,
@@ -1154,7 +1242,7 @@ impl SettingsApp {
         );
 
         let mut ip_l = Line::new();
-        ip_l.text("IPv4 Adresi :  ")
+        ip_l.text("IPv4 :  ")
             .number(net.ip_addr[0] as u32, 1)
             .text(".")
             .number(net.ip_addr[1] as u32, 1)
@@ -1166,13 +1254,13 @@ impl SettingsApp {
             canvas,
             ip_l.as_str(),
             ip_card.x + unit,
-            ip_card.y + unit,
+            ip_card.y + unit * 3 / 4,
             label_st,
             INK_DARK,
         );
 
         let mut gw_l = Line::new();
-        gw_l.text("Ag Gecidi   :  ")
+        gw_l.text("GW   :  ")
             .number(net.gateway_ip[0] as u32, 1)
             .text(".")
             .number(net.gateway_ip[1] as u32, 1)
@@ -1184,14 +1272,14 @@ impl SettingsApp {
             canvas,
             gw_l.as_str(),
             ip_card.x + unit,
-            ip_card.y + unit * 3,
+            ip_card.y + unit * 5 / 2,
             label_st,
             INK_BODY,
         );
 
         let mut dns_l = Line::new();
         dns_l
-            .text("DNS Sunucu  :  ")
+            .text("DNS  :  ")
             .number(net.dns_ip[0] as u32, 1)
             .text(".")
             .number(net.dns_ip[1] as u32, 1)
@@ -1203,32 +1291,32 @@ impl SettingsApp {
             canvas,
             dns_l.as_str(),
             ip_card.x + unit,
-            ip_card.y + unit * 5,
+            ip_card.y + unit * 17 / 4,
             label_st,
             INK_BODY,
         );
 
         let mut pkt_l = Line::new();
         pkt_l
-            .text("Gonderilen (TX): ")
+            .text("TX: ")
             .number(net.tx_packets as u32, 1)
-            .text(" paket   |   Alinan (RX): ")
-            .number(net.rx_packets as u32, 1)
-            .text(" paket");
+            .text("   |   RX: ")
+            .number(net.rx_packets as u32, 1);
         draw_text_color(
             canvas,
             pkt_l.as_str(),
             ip_card.x + unit,
-            ip_card.y + unit * 7,
+            ip_card.y + unit * 6,
             sub_st,
             AZURE_BRIGHT,
         );
 
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             &self.eth_status_note,
             pane.x + unit,
-            pane.y + unit * 23,
+            pane.y + pane.height - unit * 5,
+            pane.width - unit * 2,
             sub_st,
             INK_MUTED,
         );
@@ -1238,7 +1326,7 @@ impl SettingsApp {
         draw_pill_btn(
             canvas,
             btn0,
-            "DHCP IP Yenile",
+            tr(lang, TextId::EthRenewDhcp),
             true,
             self.hover == HoverTarget::EthDhcpBtn,
             label_st,
@@ -1246,7 +1334,7 @@ impl SettingsApp {
         draw_pill_btn(
             canvas,
             btn1,
-            "Ag Gecidi ARP Testi",
+            tr(lang, TextId::EthArpTest),
             false,
             self.hover == HoverTarget::EthArpBtn,
             label_st,
@@ -1262,6 +1350,7 @@ impl SettingsApp {
         sub_st: &Style,
     ) {
         let unit = ctx.unit;
+        let lang = ctx.settings.language;
         let wl = wireless::global();
 
         let top_bar = Self::wifi_toggle_rect(pane, unit);
@@ -1272,20 +1361,21 @@ impl SettingsApp {
             top_bar.y + (top_bar.height - 18) / 2,
             wl.wifi_enabled,
         );
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             &wl.wifi_adapter_name,
-            top_bar.x + unit * 3,
+            top_bar.x + unit * 5 / 2,
             top_bar.y + (top_bar.height - label_st.cap_height) / 2,
+            top_bar.width - unit * 3,
             label_st,
             INK_DARK,
         );
 
         let scan_btn = Self::wifi_scan_rect(pane, unit);
         let scan_lbl = if wl.wifi_scanning {
-            "Taraniyor..."
+            tr(lang, TextId::WifiScanning)
         } else {
-            "Aglari Tara"
+            tr(lang, TextId::WifiScanBtn)
         };
         draw_pill_btn(
             canvas,
@@ -1299,131 +1389,102 @@ impl SettingsApp {
         if !wl.wifi_enabled {
             draw_text_color(
                 canvas,
-                "802.11 kablosuz radyo su anda kapali.",
+                tr(lang, TextId::WifiRadioOff),
                 pane.x + unit,
-                pane.y + unit * 10,
+                pane.y + unit * 9,
                 label_st,
                 INK_MUTED,
             );
             return;
         }
 
-        if wl.wifi_networks.is_empty() {
-            let empty_card = Rect::new(
-                pane.x + unit,
-                pane.y + unit * 9,
-                pane.width - unit * 2,
-                unit * 7,
-            );
-            draw_panel(
-                canvas,
-                empty_card,
-                unit / 2,
-                CARD_ALT,
-                255,
-                BORDER_LIGHT,
-                255,
-            );
-            draw_text_color(
-                canvas,
-                if wl.wifi_scanning {
-                    "Donanim uzerinden gercek 802.11 frekanslari taraniyor..."
-                } else {
-                    "Gercek kablosuz ag bulunamadi (Sifir sahte ag kurali aktif)."
-                },
-                empty_card.x + unit,
-                empty_card.y + unit * 3 / 2,
-                label_st,
-                INK_DARK,
-            );
-            draw_text_color(
-                canvas,
-                &wl.status_message,
-                empty_card.x + unit,
-                empty_card.y + unit * 4,
-                sub_st,
-                AZURE_DEEP,
-            );
-        } else {
-            for (idx, net) in wl.wifi_networks.iter().take(5).enumerate() {
-                let row = Self::wifi_row_rect(pane, idx, unit);
-                let hov = self.hover == HoverTarget::WifiRow(idx);
-                let fill = if net.connected {
-                    CARD_SELECT
-                } else if hov {
-                    CARD_HOVER
-                } else {
-                    CARD_WHITE
-                };
-                let brd = if net.connected {
-                    AQUA_MINT
-                } else if hov {
-                    AZURE_BRIGHT
+        for (idx, net) in wl.wifi_networks.iter().take(5).enumerate() {
+            let row = Self::wifi_row_rect(pane, idx, unit);
+            let hov = self.hover == HoverTarget::WifiRow(idx);
+            let fill = if net.connected {
+                CARD_SELECT
+            } else if hov {
+                CARD_HOVER
+            } else {
+                CARD_WHITE
+            };
+            let brd = if net.connected {
+                AQUA_MINT
+            } else if hov {
+                AZURE_BRIGHT
+            } else {
+                BORDER_LIGHT
+            };
+            draw_panel(canvas, row, unit / 3, fill, 255, brd, 255);
+
+            let bars = net.bars();
+            for b in 0..4u8 {
+                let bh = 4 + (b as i32) * 3;
+                let bx = row.x + unit * 2 / 3 + (b as i32) * 5;
+                let by = row.y + row.height / 2 + 6 - bh;
+                let b_col = if b < bars {
+                    if net.connected {
+                        AQUA_DEEP
+                    } else {
+                        AZURE_BRIGHT
+                    }
                 } else {
                     BORDER_LIGHT
                 };
-                draw_panel(canvas, row, unit / 3, fill, 255, brd, 255);
-
-                let bars = net.bars();
-                for b in 0..4u8 {
-                    let bh = 4 + (b as i32) * 3;
-                    let bx = row.x + unit * 2 / 3 + (b as i32) * 5;
-                    let by = row.y + row.height / 2 + 6 - bh;
-                    let b_col = if b < bars {
-                        if net.connected {
-                            AQUA_DEEP
-                        } else {
-                            AZURE_BRIGHT
-                        }
-                    } else {
-                        BORDER_LIGHT
-                    };
-                    canvas.fill_rect(bx, by, 3, bh, b_col);
-                }
-
-                draw_text_color(
-                    canvas,
-                    &net.ssid,
-                    row.x + unit * 5 / 2,
-                    row.y + unit / 3,
-                    label_st,
-                    INK_DARK,
-                );
-
-                let mut detail = Line::new();
-                detail
-                    .text(&net.freq_label)
-                    .text("  |  Kanal ")
-                    .number(net.channel as u32, 1)
-                    .text("  |  Sinyal %")
-                    .number(net.signal_pct as u32, 1)
-                    .text("  |  ")
-                    .text(&net.security);
-                draw_text_color(
-                    canvas,
-                    detail.as_str(),
-                    row.x + unit * 5 / 2,
-                    row.y + unit * 5 / 3,
-                    sub_st,
-                    INK_MUTED,
-                );
-
-                let badge = Rect::new(
-                    row.x + row.width - unit * 7,
-                    row.y + unit / 3,
-                    unit * 6 + unit / 2,
-                    row.height - unit * 2 / 3,
-                );
-                let status_txt = if net.connected { "Bagli (Kes)" } else { "Baglan" };
-                draw_pill_btn(canvas, badge, status_txt, net.connected, hov, sub_st);
+                canvas.fill_rect(bx, by, 3, bh, b_col);
             }
+
+            let badge = Rect::new(
+                row.x + row.width - unit * 6 - unit / 2,
+                row.y + unit / 4,
+                unit * 6,
+                row.height - unit / 2,
+            );
+            let text_max = (badge.x - (row.x + unit * 5 / 2) - unit / 2).max(40);
+
+            draw_text_clipped(
+                canvas,
+                &net.ssid,
+                row.x + unit * 5 / 2,
+                row.y + unit / 4,
+                text_max,
+                label_st,
+                INK_DARK,
+            );
+
+            let mut detail = Line::new();
+            detail
+                .text(&net.freq_label)
+                .text(" | Ch ")
+                .number(net.channel as u32, 1)
+                .text(" | %")
+                .number(net.signal_pct as u32, 1)
+                .text(" | ")
+                .text(&net.security);
+            draw_text_clipped(
+                canvas,
+                detail.as_str(),
+                row.x + unit * 5 / 2,
+                row.y + unit * 7 / 5,
+                text_max,
+                sub_st,
+                INK_MUTED,
+            );
+
+            let status_txt = if net.connected {
+                tr(lang, TextId::WifiConnectedBtn)
+            } else {
+                tr(lang, TextId::WifiConnectBtn)
+            };
+            draw_pill_btn(canvas, badge, status_txt, net.connected, hov, sub_st);
         }
 
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             &wl.status_message,
             pane.x + unit,
             pane.y + pane.height - unit * 2,
+            pane.width - unit * 2,
             sub_st,
             AQUA_DEEP,
         );
@@ -1433,29 +1494,22 @@ impl SettingsApp {
             draw_panel(canvas, m, unit / 2, CARD_WHITE, 252, AZURE_BRIGHT, 255);
 
             let mut t_line = Line::new();
-            t_line.text("Wi-Fi Agina Baglan: ").text(ssid);
-            draw_text_color(
+            t_line.text("Wi-Fi: ").text(ssid);
+            draw_text_clipped(
                 canvas,
                 t_line.as_str(),
                 m.x + unit,
                 m.y + unit,
+                m.width - unit * 2,
                 label_st,
                 INK_DARK,
             );
-            draw_text_color(
-                canvas,
-                "WPA2/WPA3 ag parolasini girin (Kayitli ag ise bos birakip Baglan'a basin):",
-                m.x + unit,
-                m.y + unit * 3,
-                sub_st,
-                INK_MUTED,
-            );
 
-            let inp = Rect::new(m.x + unit, m.y + unit * 5, m.width - unit * 2, unit * 5 / 2);
+            let inp = Rect::new(m.x + unit, m.y + unit * 4, m.width - unit * 2, unit * 5 / 2);
             draw_panel(canvas, inp, unit / 3, CARD_ALT, 255, AZURE_BRIGHT, 255);
             let ty = inp.y + (inp.height - label_st.cap_height) / 2;
-            draw_text_color(canvas, pass_buf, inp.x + 10, ty, label_st, INK_DARK);
-            let pw_w = text_width(pass_buf, label_st);
+            draw_text_clipped(canvas, pass_buf, inp.x + 10, ty, inp.width - 24, label_st, INK_DARK);
+            let pw_w = text_width(pass_buf, label_st).min(inp.width - 24);
             canvas.fill_rect(inp.x + 12 + pw_w, ty - 1, 2, label_st.cap_height + 2, AQUA_MINT);
 
             let bw = unit * 7;
@@ -1463,10 +1517,11 @@ impl SettingsApp {
             let by = m.y + m.height - bh - unit;
             let conn_r = Rect::new(m.x + m.width - bw - unit, by, bw, bh);
             let canc_r = Rect::new(conn_r.x - bw - unit / 2, by, bw, bh);
+
             draw_pill_btn(
                 canvas,
                 canc_r,
-                "Vazgec",
+                tr(lang, TextId::Cancel),
                 false,
                 self.hover == HoverTarget::WifiModalCancel,
                 label_st,
@@ -1474,7 +1529,7 @@ impl SettingsApp {
             draw_pill_btn(
                 canvas,
                 conn_r,
-                "Baglan",
+                tr(lang, TextId::WifiConnectBtn),
                 true,
                 self.hover == HoverTarget::WifiModalConnect,
                 label_st,
@@ -1491,6 +1546,7 @@ impl SettingsApp {
         sub_st: &Style,
     ) {
         let unit = ctx.unit;
+        let lang = ctx.settings.language;
         let wl = wireless::global();
 
         let top_bar = Self::wifi_toggle_rect(pane, unit);
@@ -1501,20 +1557,21 @@ impl SettingsApp {
             top_bar.y + (top_bar.height - 18) / 2,
             wl.bt_enabled,
         );
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             &wl.bt_adapter_name,
-            top_bar.x + unit * 3,
+            top_bar.x + unit * 5 / 2,
             top_bar.y + (top_bar.height - label_st.cap_height) / 2,
+            top_bar.width - unit * 3,
             label_st,
             INK_DARK,
         );
 
         let scan_btn = Self::wifi_scan_rect(pane, unit);
         let scan_lbl = if wl.bt_scanning {
-            "Araniyor..."
+            tr(lang, TextId::BtSearching)
         } else {
-            "Cihaz Ara"
+            tr(lang, TextId::BtScanBtn)
         };
         draw_pill_btn(
             canvas,
@@ -1528,135 +1585,87 @@ impl SettingsApp {
         if !wl.bt_enabled {
             draw_text_color(
                 canvas,
-                "Bluetooth HCI denetleyicisi devredisi.",
+                tr(lang, TextId::BtRadioOff),
                 pane.x + unit,
-                pane.y + unit * 10,
+                pane.y + unit * 9,
                 label_st,
                 INK_MUTED,
             );
             return;
         }
 
-        if wl.bt_devices.is_empty() {
-            let empty_card = Rect::new(
-                pane.x + unit,
-                pane.y + unit * 9,
-                pane.width - unit * 2,
-                unit * 7,
-            );
-            draw_panel(
+        for (idx, dev) in wl.bt_devices.iter().take(5).enumerate() {
+            let row = Self::wifi_row_rect(pane, idx, unit);
+            let hov = self.hover == HoverTarget::BtRow(idx);
+            let fill = if dev.connected {
+                CARD_SELECT
+            } else if hov {
+                CARD_HOVER
+            } else {
+                CARD_WHITE
+            };
+            let brd = if dev.connected {
+                AZURE_BRIGHT
+            } else if hov {
+                AQUA_MINT
+            } else {
+                BORDER_LIGHT
+            };
+            draw_panel(canvas, row, unit / 3, fill, 255, brd, 255);
+
+            draw_dot(
                 canvas,
-                empty_card,
-                unit / 2,
-                CARD_ALT,
-                255,
-                BORDER_LIGHT,
+                row.x + unit,
+                row.y + row.height / 2,
+                5,
+                if dev.connected { AZURE_BRIGHT } else { INK_MUTED },
                 255,
             );
-            draw_text_color(
+
+            let badge = Rect::new(
+                row.x + row.width - unit * 6 - unit / 2,
+                row.y + unit / 4,
+                unit * 6,
+                row.height - unit / 2,
+            );
+            let text_max = (badge.x - (row.x + unit * 2) - unit / 2).max(40);
+
+            draw_text_clipped(
                 canvas,
-                if wl.bt_scanning {
-                    "HCI denetleyicisi uzerinden gercek Bluetooth cihazlari araniyor..."
-                } else {
-                    "Eslestirilmis veya gorunur Bluetooth cihazi bulunamadi."
-                },
-                empty_card.x + unit,
-                empty_card.y + unit * 3 / 2,
+                &dev.name,
+                row.x + unit * 2,
+                row.y + unit / 4,
+                text_max,
                 label_st,
                 INK_DARK,
             );
-            draw_text_color(
+
+            let mut info_l = Line::new();
+            info_l.text(&dev.kind).text(" | ").text(&dev.mac);
+            draw_text_clipped(
                 canvas,
-                "Cihazinizi eslestirme moduna alip 'Cihaz Ara' dugmesine tiklayin.",
-                empty_card.x + unit,
-                empty_card.y + unit * 4,
+                info_l.as_str(),
+                row.x + unit * 2,
+                row.y + unit * 7 / 5,
+                text_max,
                 sub_st,
                 INK_MUTED,
             );
-        } else {
-            for (idx, dev) in wl.bt_devices.iter().take(5).enumerate() {
-                let row = Self::wifi_row_rect(pane, idx, unit);
-                let hov = self.hover == HoverTarget::BtRow(idx);
-                let fill = if dev.connected {
-                    CARD_SELECT
-                } else if hov {
-                    CARD_HOVER
-                } else {
-                    CARD_WHITE
-                };
-                let brd = if dev.connected {
-                    AZURE_BRIGHT
-                } else if hov {
-                    AQUA_MINT
-                } else {
-                    BORDER_LIGHT
-                };
-                draw_panel(canvas, row, unit / 3, fill, 255, brd, 255);
 
-                draw_dot(
-                    canvas,
-                    row.x + unit,
-                    row.y + row.height / 2,
-                    6,
-                    if dev.connected {
-                        AZURE_BRIGHT
-                    } else {
-                        INK_MUTED
-                    },
-                    255,
-                );
-                draw_dot(
-                    canvas,
-                    row.x + unit,
-                    row.y + row.height / 2,
-                    2,
-                    WHITE,
-                    255,
-                );
-
-                draw_text_color(
-                    canvas,
-                    &dev.name,
-                    row.x + unit * 2,
-                    row.y + unit / 3,
-                    label_st,
-                    INK_DARK,
-                );
-
-                let mut info_l = Line::new();
-                info_l.text(&dev.kind).text("  |  MAC ").text(&dev.mac);
-                if dev.battery > 0 {
-                    info_l.text("  |  Pil %").number(dev.battery as u32, 1);
-                }
-                draw_text_color(
-                    canvas,
-                    info_l.as_str(),
-                    row.x + unit * 2,
-                    row.y + unit * 5 / 3,
-                    sub_st,
-                    INK_MUTED,
-                );
-
-                let badge = Rect::new(
-                    row.x + row.width - unit * 7,
-                    row.y + unit / 3,
-                    unit * 6 + unit / 2,
-                    row.height - unit * 2 / 3,
-                );
-                let act_lbl = if dev.connected {
-                    "Bagli (Ayir)"
-                } else {
-                    "Baglan"
-                };
-                draw_pill_btn(canvas, badge, act_lbl, dev.connected, hov, sub_st);
-            }
+            let act_lbl = if dev.connected {
+                tr(lang, TextId::BtConnectedBtn)
+            } else {
+                tr(lang, TextId::WifiConnectBtn)
+            };
+            draw_pill_btn(canvas, badge, act_lbl, dev.connected, hov, sub_st);
         }
 
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             &wl.status_message,
             pane.x + unit,
             pane.y + pane.height - unit * 2,
+            pane.width - unit * 2,
             sub_st,
             AZURE_DEEP,
         );
@@ -1671,30 +1680,27 @@ impl SettingsApp {
         sub_st: &Style,
     ) {
         let unit = ctx.unit;
+        let lang = ctx.settings.language;
         let drv_reg = nc_driver::global();
 
         let top_card = Rect::new(
             pane.x + unit,
-            pane.y + unit * 3 + unit / 2,
+            pane.y + unit * 7 / 2,
             pane.width - unit * 2,
-            unit * 2 + unit / 5,
+            unit * 2,
         );
         draw_panel(canvas, top_card, unit / 3, CARD_ALT, 255, BORDER_LIGHT, 255);
 
         let mut env_line = Line::new();
         env_line
-            .text("Ortam: ")
             .text(drv_reg.environment.label())
-            .text(if drv_reg.write_combining_active {
-                "  |  PAT Write-Combining: Aktif"
-            } else {
-                "  |  Standart Framebuffer"
-            });
-        draw_text_color(
+            .text("  |  PAT Write-Combining");
+        draw_text_clipped(
             canvas,
             env_line.as_str(),
             top_card.x + unit,
             top_card.y + (top_card.height - label_st.cap_height) / 2,
+            top_card.width - unit * 2,
             label_st,
             INK_DARK,
         );
@@ -1732,11 +1738,20 @@ impl SettingsApp {
                 255,
             );
 
-            draw_text_color(
+            let badge = Rect::new(
+                row.x + row.width - unit * 6 - unit / 2,
+                row.y + unit / 4,
+                unit * 6,
+                row.height - unit / 2,
+            );
+            let max_tw = (badge.x - (row.x + unit * 7 / 4) - unit / 2).max(40);
+
+            draw_text_clipped(
                 canvas,
                 &dev.hw_name,
                 row.x + unit * 7 / 4,
-                row.y + unit / 3,
+                row.y + unit / 4,
+                max_tw,
                 label_st,
                 INK_DARK,
             );
@@ -1746,39 +1761,31 @@ impl SettingsApp {
                 .text("[")
                 .text(&dev.slot_label)
                 .text("] ")
-                .text(&dev.bound_driver_name)
-                .text(" (v")
-                .text(&dev.bound_driver_version)
-                .text(") -> ")
                 .text(&dev.driver_file);
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
                 detail.as_str(),
                 row.x + unit * 7 / 4,
-                row.y + unit * 5 / 3,
+                row.y + unit * 7 / 5,
+                max_tw,
                 sub_st,
                 INK_MUTED,
             );
 
-            let badge = Rect::new(
-                row.x + row.width - unit * 7,
-                row.y + unit / 3,
-                unit * 6 + unit / 2,
-                row.height - unit * 2 / 3,
-            );
             let status_txt = if dev.is_generic_binding {
-                "Generic .efra"
+                "Generic"
             } else {
-                "Optimize .efra"
+                "Optimized"
             };
             draw_pill_btn(canvas, badge, status_txt, !dev.is_generic_binding, hov, sub_st);
         }
 
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             &self.efra_status_note,
             pane.x + unit,
-            pane.y + pane.height - unit * 6,
+            pane.y + pane.height - unit * 5,
+            pane.width - unit * 2,
             sub_st,
             AQUA_DEEP,
         );
@@ -1786,68 +1793,60 @@ impl SettingsApp {
         let b0 = Self::drv_action_rect(pane, 0, unit);
         let b1 = Self::drv_action_rect(pane, 1, unit);
         let b2 = Self::drv_action_rect(pane, 2, unit);
+
         draw_pill_btn(
             canvas,
             b0,
-            "PCI/VFS Tara",
+            tr(lang, TextId::DrvScanBtn),
             false,
             self.hover == HoverTarget::DrvScanBtn,
-            label_st,
+            sub_st,
         );
         draw_pill_btn(
             canvas,
             b1,
-            "Seciliyi Optimize Et",
+            tr(lang, TextId::DrvOptimizeBtn),
             true,
             self.hover == HoverTarget::DrvUpgradeBtn,
-            label_st,
+            sub_st,
         );
         draw_pill_btn(
             canvas,
             b2,
-            "Ozel .efra Derle",
+            tr(lang, TextId::DrvCompileBtn),
             false,
             self.hover == HoverTarget::DrvCompileBtn,
-            label_st,
+            sub_st,
         );
 
         if let Some(ref drv_buf) = self.efra_compile_prompt {
             let m = Self::pass_modal_rect(pane, unit);
             draw_panel(canvas, m, unit / 2, CARD_WHITE, 252, AZURE_BRIGHT, 255);
-
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
-                "Sistem Ici EfraCompiler (.efra Paketi Olustur)",
+                "EfraCompiler (.efra)",
                 m.x + unit,
                 m.y + unit,
+                m.width - unit * 2,
                 label_st,
                 INK_DARK,
             );
-            draw_text_color(
-                canvas,
-                "/data/drivers altina kaydedilecek surucu dosya adini girin:",
-                m.x + unit,
-                m.y + unit * 3,
-                sub_st,
-                INK_MUTED,
-            );
 
-            let inp = Rect::new(m.x + unit, m.y + unit * 5, m.width - unit * 2, unit * 5 / 2);
+            let inp = Rect::new(m.x + unit, m.y + unit * 4, m.width - unit * 2, unit * 5 / 2);
             draw_panel(canvas, inp, unit / 3, CARD_ALT, 255, AZURE_BRIGHT, 255);
             let ty = inp.y + (inp.height - label_st.cap_height) / 2;
-            draw_text_color(canvas, drv_buf, inp.x + 10, ty, label_st, INK_DARK);
-            let tw = text_width(drv_buf, label_st);
-            canvas.fill_rect(inp.x + 12 + tw, ty - 1, 2, label_st.cap_height + 2, AQUA_MINT);
+            draw_text_clipped(canvas, drv_buf, inp.x + 10, ty, inp.width - 24, label_st, INK_DARK);
 
             let bw = unit * 8;
             let bh = unit * 2;
             let by = m.y + m.height - bh - unit;
             let build_r = Rect::new(m.x + m.width - bw - unit, by, bw, bh);
             let canc_r = Rect::new(build_r.x - bw - unit / 2, by, bw, bh);
+
             draw_pill_btn(
                 canvas,
                 canc_r,
-                "Vazgec",
+                tr(lang, TextId::Cancel),
                 false,
                 self.hover == HoverTarget::DrvModalCancel,
                 label_st,
@@ -1855,7 +1854,7 @@ impl SettingsApp {
             draw_pill_btn(
                 canvas,
                 build_r,
-                "Derle ve Kur",
+                tr(lang, TextId::DrvBuildInstallBtn),
                 true,
                 self.hover == HoverTarget::DrvModalBuild,
                 label_st,
@@ -1872,20 +1871,22 @@ impl SettingsApp {
         sub_st: &Style,
     ) {
         let unit = ctx.unit;
+        let lang = ctx.settings.language;
 
-        draw_text_color(
+        draw_text_clipped(
             canvas,
-            "Uygulama Acilis Gecikmesi ve Animasyon Davranisi:",
+            tr(lang, TextId::LaunchSpeedLabel),
             pane.x + unit,
-            pane.y + unit * 4,
+            pane.y + unit * 7 / 2,
+            pane.width - unit * 2,
             label_st,
             INK_DARK,
         );
 
         let modes = [
-            (1u8, "Sinematik", "Arka plan yukune gore yumusak gecis"),
-            (2u8, "Dengeli OS", "Gercekci onbellek hazirligi ve hizli acilis"),
-            (3u8, "Aninda", "Minimum gecikme ile dogrudan pencere"),
+            (1u8, tr(lang, TextId::ModeCinematic), tr(lang, TextId::ModeCinematicSub)),
+            (2u8, tr(lang, TextId::ModeBalanced), tr(lang, TextId::ModeBalancedSub)),
+            (3u8, tr(lang, TextId::ModeInstant), tr(lang, TextId::ModeInstantSub)),
         ];
         for (m_val, m_title, m_desc) in modes {
             let card = Self::launch_speed_rect(pane, m_val - 1, unit);
@@ -1900,88 +1901,135 @@ impl SettingsApp {
             };
             let brd = if sel { AZURE_BRIGHT } else { BORDER_LIGHT };
             draw_panel(canvas, card, unit / 3, fill, 255, brd, 255);
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
                 m_title,
-                card.x + unit * 2 / 3,
-                card.y + unit * 2 / 3,
+                card.x + unit / 2,
+                card.y + unit / 2,
+                card.width - unit,
                 label_st,
                 INK_DARK,
             );
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
                 m_desc,
-                card.x + unit * 2 / 3,
-                card.y + unit * 2,
+                card.x + unit / 2,
+                card.y + unit * 7 / 4,
+                card.width - unit,
                 sub_st,
                 INK_MUTED,
             );
         }
 
+        // Dil Seçimi Satırı
+        let lang_y = pane.y + unit * 9 + unit / 2;
+        draw_text_clipped(
+            canvas,
+            tr(lang, TextId::SystemLanguageLabel),
+            pane.x + unit,
+            lang_y + (unit * 9 / 4 - label_st.cap_height) / 2,
+            unit * 8,
+            label_st,
+            INK_DARK,
+        );
+        let l0 = Self::lang_btn_rect(pane, 0, unit);
+        let l1 = Self::lang_btn_rect(pane, 1, unit);
+        draw_pill_btn(
+            canvas,
+            l0,
+            tr(lang, TextId::LangNameTr),
+            ctx.settings.language == Language::Turkish,
+            self.hover == HoverTarget::LangBtn(Language::Turkish),
+            sub_st,
+        );
+        draw_pill_btn(
+            canvas,
+            l1,
+            tr(lang, TextId::LangNameEn),
+            ctx.settings.language == Language::English,
+            self.hover == HoverTarget::LangBtn(Language::English),
+            sub_st,
+        );
+
+        // Klavye Düzeni Satırı
+        let kbd_y = pane.y + unit * 12 + unit / 2;
+        draw_text_clipped(
+            canvas,
+            tr(lang, TextId::KeyboardLayoutLabel),
+            pane.x + unit,
+            kbd_y + (unit * 9 / 4 - label_st.cap_height) / 2,
+            unit * 8,
+            label_st,
+            INK_DARK,
+        );
+        let k0 = Self::kbd_btn_rect(pane, 0, unit);
+        let k1 = Self::kbd_btn_rect(pane, 1, unit);
+        draw_pill_btn(
+            canvas,
+            k0,
+            tr(lang, TextId::KbdNameTrQ),
+            ctx.settings.keyboard == KeyboardLayout::TurkishQ,
+            self.hover == HoverTarget::KbdBtn(KeyboardLayout::TurkishQ),
+            sub_st,
+        );
+        draw_pill_btn(
+            canvas,
+            k1,
+            tr(lang, TextId::KbdNameUs),
+            ctx.settings.keyboard == KeyboardLayout::UsQwerty,
+            self.hover == HoverTarget::KbdBtn(KeyboardLayout::UsQwerty),
+            sub_st,
+        );
+
         let sys_box = Rect::new(
             pane.x + unit,
-            pane.y + unit * 11,
+            pane.y + unit * 15 + unit * 3 / 4,
             pane.width - unit * 2,
-            unit * 10,
+            unit * 5,
         );
         draw_panel(canvas, sys_box, unit / 2, CARD_ALT, 255, BORDER_LIGHT, 255);
 
         let mut res_l = Line::new();
         res_l
-            .text("Ekran Cozunurlugu :  ")
+            .text("Framebuffer: ")
             .number(ctx.screen_width as u32, 1)
-            .text(" x ")
+            .text("x")
             .number(ctx.screen_height as u32, 1)
-            .text(" (64-bit Burst + PAT WC Framebuffer)");
-        draw_text_color(
+            .text(" (32-bit PAT WC)");
+        draw_text_clipped(
             canvas,
             res_l.as_str(),
             sys_box.x + unit,
-            sys_box.y + unit,
+            sys_box.y + unit * 3 / 4,
+            sys_box.width - unit * 2,
             label_st,
             INK_DARK,
         );
 
         let mut ram_l = Line::new();
         ram_l
-            .text("Fiziksel Bellek   :  ")
+            .text("RAM: ")
             .number(ctx.total_memory_mb, 1)
-            .text(" MB RAM   |   Platform: ")
+            .text(" MB   |   Platform: ")
             .text(ctx.platform);
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             ram_l.as_str(),
             sys_box.x + unit,
-            sys_box.y + unit * 3,
-            label_st,
+            sys_box.y + unit * 5 / 2,
+            sys_box.width - unit * 2,
+            sub_st,
             INK_BODY,
-        );
-
-        draw_text_color(
-            canvas,
-            "Ipucu: Masaustunde herhangi bir yere sag tiklayip 'Gorev Yoneticisini Ac' ile",
-            sys_box.x + unit,
-            sys_box.y + unit * 6,
-            sub_st,
-            AZURE_DEEP,
-        );
-        draw_text_color(
-            canvas,
-            "arka plan islemlerini, CPU/RAM yukunu izleyebilir ve uygulamalari sonlandirabilirsiniz.",
-            sys_box.x + unit,
-            sys_box.y + unit * 15 / 2,
-            sub_st,
-            AZURE_DEEP,
         );
 
         let reset_r = Self::reset_btn_rect(pane, unit);
         draw_pill_btn(
             canvas,
             reset_r,
-            "Varsayilanlara Don",
+            tr(lang, TextId::ResetDefaults),
             false,
             self.hover == HoverTarget::ResetDefaultsBtn,
-            label_st,
+            sub_st,
         );
     }
 }
@@ -2014,12 +2062,14 @@ fn draw_pill_btn(
         (CARD_WHITE, BORDER_LIGHT, INK_BODY)
     };
     draw_panel(canvas, rect, rect.height / 2, fill, 255, brd, 255);
-    let tw = text_width(text, style);
-    draw_text_color(
+    let max_tw = (rect.width - 8).max(8);
+    let tw = text_width(text, style).min(max_tw);
+    draw_text_clipped(
         canvas,
         text,
         rect.x + (rect.width - tw) / 2,
         rect.y + (rect.height - style.cap_height) / 2,
+        max_tw,
         style,
         fg,
     );

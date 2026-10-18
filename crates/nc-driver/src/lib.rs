@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use nc_arch::{inl, outl};
+use nc_arch::{inb, inl, outb, outl, outw};
 
 pub const EFRA_MAGIC: [u8; 4] = *b"EFRA";
 pub const EFRA_VERSION: u32 = 1;
@@ -24,6 +24,7 @@ pub enum EfraClass {
     Input = 4,
     Chipset = 5,
     Wireless = 6,
+    Audio = 7,
     Generic = 255,
 }
 
@@ -36,6 +37,7 @@ impl EfraClass {
             4 => EfraClass::Input,
             5 => EfraClass::Chipset,
             6 => EfraClass::Wireless,
+            7 => EfraClass::Audio,
             _ => EfraClass::Generic,
         }
     }
@@ -48,6 +50,7 @@ impl EfraClass {
             EfraClass::Input => "HID Klavye ve Fare",
             EfraClass::Chipset => "Anakart ve ACPI Yonga Seti",
             EfraClass::Wireless => "802.11 Kablosuz / Bluetooth",
+            EfraClass::Audio => "PCI Ses ve Multimedya (AC97/HDA)",
             EfraClass::Generic => "Evrensel Donanim Tabani",
         }
     }
@@ -461,6 +464,7 @@ fn classify_pci(base_class: u8, sub_class: u8) -> EfraClass {
         (0x01, _) => EfraClass::Storage,
         (0x02, 0x80) => EfraClass::Wireless,
         (0x02, _) => EfraClass::Network,
+        (0x04, _) => EfraClass::Audio,
         (0x09, _) => EfraClass::Input,
         (0x06, _) | (0x0C, _) => EfraClass::Chipset,
         _ => EfraClass::Generic,
@@ -480,6 +484,8 @@ fn describe_pci_device(vendor: u16, device: u16, base_class: u8, sub_class: u8) 
         (0x8086, 0x1237) | (0x8086, 0x29C0) => "Intel 440FX / Q35 Ana Kopru (Host Bridge)",
         (0x1022, 0x2000) => "AMD PCnet-FAST III 10/100 Ethernet",
         (0x10EC, 0x8168) | (0x10EC, 0x8139) => "Realtek RTL8111/8168 PCIe Gigabit Ethernet",
+        (0x8086, 0x2415) => "Intel 82801AA AC'97 PCI Ses Denetleyicisi",
+        (0x8086, 0x2668) | (0x8086, 0x293E) => "Intel High Definition Audio (HDA)",
         _ => match (base_class, sub_class) {
             (0x03, _) => "PCI Uyumlu VGA / GOP Grafik Denetleyicisi",
             (0x01, 0x06) => "Standart AHCI 1.0 Seri ATA Denetleyicisi",
@@ -553,7 +559,7 @@ impl DriverRegistry {
                     let base_class = ((class_reg >> 24) & 0xFF) as u8;
                     let sub_class = ((class_reg >> 16) & 0xFF) as u8;
 
-                    if base_class == 0x01 || base_class == 0x02 || base_class == 0x03 {
+                    if base_class == 0x01 || base_class == 0x02 || base_class == 0x03 || base_class == 0x04 {
                         let cmd = pci_read_32(bus, dev, func, 0x04);
                         pci_write_32(bus, dev, func, 0x04, cmd | 0x07);
                     }
@@ -761,5 +767,123 @@ pub fn global() -> &'static mut DriverRegistry {
             return init();
         }
         slot.as_mut().unwrap()
+    }
+}
+
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+struct Ac97BdlEntry {
+    addr: u32,
+    length: u16,
+    flags: u16,
+}
+
+static mut AC97_BDL: [Ac97BdlEntry; 32] = [Ac97BdlEntry { addr: 0, length: 0, flags: 0 }; 32];
+static mut AC97_PCM_BUF: [i16; 48000] = [0; 48000];
+
+/// PCI uzerinde Intel AC'97 (8086:2415) ses karti varsa gercek 48kHz polifonik sentezleyici calar,
+/// yoksa gercek anakart PIT / PC Speaker uzerinden melodiyi calar.
+pub fn play_hardware_startup_chime() {
+    unsafe {
+        // 1. PCI Bus uzerinde AC'97 Ses Denetleyicisi (Class 0x04, Subclass 0x01) ara
+        for bus in 0..=2u8 {
+            for dev in 0..32u8 {
+                let vd = pci_read_32(bus, dev, 0, 0x00);
+                let vendor = (vd & 0xFFFF) as u16;
+                if vendor == 0xFFFF || vendor == 0x0000 {
+                    continue;
+                }
+                let class_reg = pci_read_32(bus, dev, 0, 0x08);
+                let base_class = ((class_reg >> 24) & 0xFF) as u8;
+                let sub_class = ((class_reg >> 16) & 0xFF) as u8;
+
+                if base_class == 0x04 && sub_class == 0x01 {
+                    // PCI Bus Mastering + I/O Space aktif et
+                    let cmd = pci_read_32(bus, dev, 0, 0x04);
+                    pci_write_32(bus, dev, 0, 0x04, cmd | 0x05);
+
+                    let nam_bar = (pci_read_32(bus, dev, 0, 0x10) & 0xFFFE) as u16; // Mixer
+                    let nabm_bar = (pci_read_32(bus, dev, 0, 0x14) & 0xFFFE) as u16; // Bus Master
+                    if nam_bar != 0 && nabm_bar != 0 {
+                        // AC97 Reset & Ses Seviyesi (Mute kaldir, ses %100)
+                        outw(nam_bar + 0x00, 1);
+                        outl(nabm_bar + 0x2C, 0x02); // Cold Reset
+                        outw(nam_bar + 0x02, 0x0000); // Master Volume
+                        outw(nam_bar + 0x18, 0x0000); // PCM Out Volume
+                        outw(nam_bar + 0x2C, 48000);  // 48 kHz Sample Rate
+
+                        // 0.5 saniyelik harmonik akor (Do5 + Mi5 + Sol5) PCM dalgasi uret (Stereo)
+                        let notes = [523usize, 659, 784, 1046];
+                        for i in 0..24000usize {
+                            let note_idx = (i / 6000).min(3);
+                            let period = 48000 / notes[note_idx];
+                            let env = ((24000 - i) as i32 * 6000) / 24000;
+                            let sample = if (i % period) < (period / 2) { env as i16 } else { -(env as i16) };
+                            AC97_PCM_BUF[i * 2] = sample;     // Sol kanal
+                            AC97_PCM_BUF[i * 2 + 1] = sample; // Sag kanal
+                        }
+
+                        // DMA Buffer Descriptor List (BDL) ayarla
+                        let pcm_phys = core::ptr::addr_of!(AC97_PCM_BUF) as u32;
+                        let bdl_phys = core::ptr::addr_of!(AC97_BDL) as u32;
+                        AC97_BDL[0] = Ac97BdlEntry {
+                            addr: pcm_phys,
+                            length: 48000, // sample sayisi
+                            flags: 0x8000, // IOC
+                        };
+
+                        outb(nabm_bar + 0x1B, 0x02); // PCM Out Reset
+                        outl(nabm_bar + 0x10, bdl_phys); // BDL adresi
+                        outb(nabm_bar + 0x15, 0); // Last Valid Index = 0
+                        outb(nabm_bar + 0x1B, 0x01); // DMA Baslat!
+                        return;
+                    }
+                }
+            }
+        }
+
+        // 2. AC97 yoksa Bare-Metal Anakart PIT (Port 0x42/0x61) Buzzer Melodisi
+        for &(freq, loops) in &[(523u32, 45000u32), (659, 45000), (784, 55000), (1046, 90000)] {
+            let div = 1193182 / freq;
+            outb(0x43, 0xB6);
+            outb(0x42, (div & 0xFF) as u8);
+            outb(0x42, ((div >> 8) & 0xFF) as u8);
+            let tmp = inb(0x61);
+            outb(0x61, tmp | 3);
+            for _ in 0..loops {
+                let _ = inb(0x80); // IO port gecikmesi (~1us)
+            }
+        }
+        outb(0x61, inb(0x61) & 0xFC);
+    }
+}
+
+pub fn set_hardware_volume(percent: u8) {
+    let pct = percent.min(100) as u16;
+    // AC97 attenuation: 0 = %100 ses, 0x1F = en dusuk, 0x8000 = Mute
+    let reg_val: u16 = if pct == 0 {
+        0x8000
+    } else {
+        let att = ((100 - pct) * 31) / 100;
+        (att << 8) | att
+    };
+    unsafe {
+        for bus in 0..=2u8 {
+            for dev in 0..32u8 {
+                let vd = pci_read_32(bus, dev, 0, 0x00);
+                if (vd & 0xFFFF) == 0xFFFF || vd == 0 {
+                    continue;
+                }
+                let class_reg = pci_read_32(bus, dev, 0, 0x08);
+                if ((class_reg >> 24) & 0xFF) == 0x04 && ((class_reg >> 16) & 0xFF) == 0x01 {
+                    let nam_bar = (pci_read_32(bus, dev, 0, 0x10) & 0xFFFE) as u16;
+                    if nam_bar != 0 {
+                        outw(nam_bar + 0x02, reg_val); // Master Volume
+                        outw(nam_bar + 0x18, reg_val); // PCM Out Volume
+                    }
+                    return;
+                }
+            }
+        }
     }
 }
