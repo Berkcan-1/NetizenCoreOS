@@ -117,6 +117,7 @@ pub enum DeviceType {
 
 #[derive(Clone, Copy)]
 pub struct BlockDeviceInfo {
+    pub channel: u8,
     pub model: [u8; 40],
     pub model_len: usize,
     pub block_count: u64,
@@ -126,6 +127,7 @@ pub struct BlockDeviceInfo {
 
 impl BlockDeviceInfo {
     pub const EMPTY: BlockDeviceInfo = BlockDeviceInfo {
+        channel: 0xFF,
         model: [0; 40],
         model_len: 0,
         block_count: 0,
@@ -134,15 +136,20 @@ impl BlockDeviceInfo {
     };
 
     pub fn model_str(&self) -> &str {
-        if let Ok(s) = core::str::from_utf8(&self.model[..self.model_len]) {
+        let len = self.model_len.min(self.model.len());
+        if let Ok(s) = core::str::from_utf8(&self.model[..len]) {
             s
         } else {
             "UNKNOWN DEVICE"
         }
     }
 
+    // M-09: Tasmalara karsi checked aritmetik
     pub fn size_mb(&self) -> u64 {
-        (self.block_count * self.block_size as u64) / (1024 * 1024)
+        self.block_count
+            .checked_mul(self.block_size as u64)
+            .map(|bytes| bytes / (1024 * 1024))
+            .unwrap_or(0)
     }
 
     pub fn type_label(&self) -> &'static str {

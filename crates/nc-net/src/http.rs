@@ -45,6 +45,10 @@ pub struct TcpHttpClient {
     redirects: u8,
     port_counter: u16,
     pending: Option<String>,
+    poll_calls: u32,
+    /// Timeouts and retries advance once every `tick_every` polls.
+    /// Set this high when polling in a tight loop so timers still mean roughly real time.
+    pub tick_every: u32,
 }
 
 impl TcpHttpClient {
@@ -72,6 +76,8 @@ impl TcpHttpClient {
             redirects: 0,
             port_counter: 0,
             pending: None,
+            poll_calls: 0,
+            tick_every: 1,
         }
     }
 
@@ -229,7 +235,10 @@ impl TcpHttpClient {
             }
         }
         if !matches!(self.state, HttpState::Complete | HttpState::Failed) {
-            self.tick(net);
+            self.poll_calls = self.poll_calls.wrapping_add(1);
+            if self.tick_every <= 1 || self.poll_calls % self.tick_every == 0 {
+                self.tick(net);
+            }
         }
     }
 
@@ -295,7 +304,7 @@ impl TcpHttpClient {
     }
 
     fn on_payload(&mut self, payload: &[u8], net: &mut NetworkStack) {
-        const MAX_RESPONSE_BYTES: usize = 512 * 1024;
+        const MAX_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
         if !self.https {
             self.state = HttpState::ReceivingData;
             let space = MAX_RESPONSE_BYTES.saturating_sub(self.response_data.len());

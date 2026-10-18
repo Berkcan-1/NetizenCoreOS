@@ -32,6 +32,26 @@ impl LockedHeap {
         state.init(base, size);
     }
 
+    pub unsafe fn add_region(&self, base: usize, size: usize) {
+        let aligned_base = (base + 15) & !15;
+        let diff = aligned_base.saturating_sub(base);
+        let actual_size = size.saturating_sub(diff) & !15;
+        if actual_size < 64 {
+            return;
+        }
+        self.acquire();
+        let state = &mut *self.state.get();
+        if state.head.is_null() {
+            state.init(aligned_base, actual_size);
+        } else {
+            // Sahte bir tahsisat basligi olusturup dealloc ile sirali listeye birlestir (coalesce)
+            *(aligned_base as *mut usize) = actual_size;
+            *((aligned_base + 8) as *mut usize) = 0;
+            state.dealloc((aligned_base + 16) as *mut u8);
+        }
+        self.release();
+    }
+
     fn acquire(&self) {
         while self
             .lock

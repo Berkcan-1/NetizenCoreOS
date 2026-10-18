@@ -34,25 +34,21 @@ impl BlockDevice for AtaPartition {
     }
 
     fn read_blocks(&mut self, lba: u64, count: u32, buffer: &mut [u8]) -> Result<(), ()> {
-        let end_lba = match lba.checked_add(count as u64) {
-            Some(end) => end,
-            None => return Err(()),
-        };
+        let end_lba = lba.checked_add(count as u64).ok_or(())?;
         if end_lba > self.sector_count {
             return Err(());
         }
-        self.ata.read_blocks(self.start_lba + lba, count, buffer)
+        let phys_lba = self.start_lba.checked_add(lba).ok_or(())?;
+        self.ata.read_blocks(phys_lba, count, buffer)
     }
 
     fn write_blocks(&mut self, lba: u64, count: u32, buffer: &[u8]) -> Result<(), ()> {
-        let end_lba = match lba.checked_add(count as u64) {
-            Some(end) => end,
-            None => return Err(()),
-        };
+        let end_lba = lba.checked_add(count as u64).ok_or(())?;
         if end_lba > self.sector_count {
             return Err(());
         }
-        self.ata.write_blocks(self.start_lba + lba, count, buffer)
+        let phys_lba = self.start_lba.checked_add(lba).ok_or(())?;
+        self.ata.write_blocks(phys_lba, count, buffer)
     }
 }
 

@@ -85,14 +85,22 @@ pub fn build_ethernet_frame(
     frame
 }
 
+pub fn user_agent_for_host(_host: &str) -> &'static str {
+    // Google now refuses text-browser identities for search ("enable JavaScript"),
+    // so every site gets the same modern identity.
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 NetizenCore/1.0"
+}
+
 pub fn build_http_get(host: &str, path: &str) -> Vec<u8> {
     let mut req = Vec::new();
     req.extend_from_slice(b"GET ");
     req.extend_from_slice(path.as_bytes());
     req.extend_from_slice(b" HTTP/1.1\r\nHost: ");
     req.extend_from_slice(host.as_bytes());
+    req.extend_from_slice(b"\r\nUser-Agent: ");
+    req.extend_from_slice(user_agent_for_host(host).as_bytes());
     req.extend_from_slice(
-        b"\r\nUser-Agent: Mozilla/5.0 (X11; NetizenCore x86_64) AppleWebKit/537.36\r\nAccept: text/html,text/css,image/png,image/jpeg,image/*,*/*;q=0.8\r\nAccept-Language: en-US,en;q=0.9\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        b"\r\nAccept: text/html,application/xhtml+xml,text/css,application/json,image/png,image/jpeg,image/bmp,image/svg+xml;q=0.9,*/*;q=0.5\r\nAccept-Language: tr-TR,tr;q=0.9,en;q=0.7\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
     );
     req
 }
