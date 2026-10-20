@@ -5,8 +5,8 @@ use nc_gfx::{Canvas, Rect};
 use nc_ui::{draw_text_color, text_style, WHITE};
 
 use crate::icons::{
-    draw_doc_glyph, draw_folder_glyph, draw_power_glyph, draw_reboot_glyph, draw_start_logo,
-    draw_tile, draw_wifi, tile_radius,
+    draw_doc_glyph, draw_dock_tile, draw_folder_glyph, draw_power_glyph, draw_reboot_glyph,
+    draw_start_logo, draw_tile, draw_wifi, tile_radius,
 };
 use crate::layout::{
     context_item_rect, context_menu_rect, desktop_modal_rect, dock_bottom_gap, dock_height,
@@ -19,7 +19,8 @@ use crate::motion::{
     clamp01, ease_out_back, ease_out_cubic, lerp, scale_rect_about, scale_u32, staggered, ONE,
 };
 use crate::paint::{
-    fade_text_color, fill_rr, fill_rr_vgrad, fit_text, glass_surface, shadow_rr, stroke_rr,
+    draw_line, fade_text_color, fill_rr, fill_rr_vgrad, fit_text, glass_surface, shadow_rr,
+    stroke_rr,
 };
 use crate::theme::{
     dock_glass, hash_str, lighten, menu_glass, modal_glass, start_glass, tile_colors, BLACK,
@@ -147,6 +148,71 @@ fn draw_tooltip(canvas: &mut Canvas<'_>, text: &str, cx: i32, anchor_top: i32, w
     draw_text_color(canvas, text, x + (w - tw) / 2, y + (h - style.cap_height) / 2, &style, INK);
 }
 
+fn draw_dock_chevron(canvas: &mut Canvas<'_>, rect: Rect, right: bool, color: u32, alpha: u32) {
+    let cx = rect.x + rect.width / 2;
+    let cy = rect.y + rect.height / 2;
+    let arm = (rect.width / 5).max(2);
+    let half = (rect.width / 4).max(2);
+    let (x0, x1) = if right { (cx - arm, cx + arm) } else { (cx + arm, cx - arm) };
+    draw_line(canvas, x0, cy - half, x1, cy, 24, color, alpha);
+    draw_line(canvas, x1, cy, x0, cy + half, 24, color, alpha);
+}
+
+fn draw_dock_page_items<'a>(
+    canvas: &mut Canvas<'_>,
+    state: &'a DesktopState,
+    items: &[usize],
+    layout: &crate::layout::DockLayout,
+    unit: i32,
+    offset_x: i32,
+    appear: i32,
+    show_indicators: bool,
+) -> Option<(i32, i32, &'a str)> {
+    if appear <= 0 {
+        return None;
+    }
+    let accent = state.settings.accent_color();
+    let focused = state.focused();
+    let mut hover_label = None;
+    for (pos, base_rect) in layout.tiles.iter().enumerate() {
+        let Some(&app_idx) = items.get(layout.first_index + pos) else {
+            continue;
+        };
+        let slot = &state.apps[app_idx];
+        let info = slot.app.info();
+        let mut rect = *base_rect;
+        rect.x += offset_x;
+        rect.y -= state.bounce_offset(app_idx, unit);
+        let (top, bottom) = tile_colors(hash_str(&info.id));
+        let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, col: u32| {
+            draw_icon(c, info.icon, x, y, s, col)
+        };
+        draw_dock_tile(canvas, rect, top, bottom, appear, 0, &glyph, 56);
+
+        if show_indicators && slot.window.open {
+            let is_focus = focused == Some(app_idx);
+            let cy = layout.dock.y + layout.dock.height - dock_pad(unit) / 2;
+            let cx = rect.x + rect.width / 2;
+            let w = if is_focus { (unit * 2 / 3).max(8) } else { (unit / 5).max(4) };
+            let hh = (unit / 8).max(3);
+            let col = if is_focus { accent } else { WHITE };
+            fill_rr(
+                canvas,
+                Rect::new(cx - w / 2, cy - hh / 2, w, hh),
+                hh / 2,
+                col,
+                scale_u32(240, appear),
+            );
+        }
+
+        if show_indicators && state.hover == Target::DockApp(app_idx) {
+            let name: &str = &info.name;
+            hover_label = Some((rect.x + rect.width / 2, rect.y, name));
+        }
+    }
+    hover_label
+}
+
 pub fn draw_dock(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, height: i32, unit: i32) {
     let items = state.dock_indices();
     let dl = state.dock_layout(width, height, unit);
@@ -165,7 +231,7 @@ pub fn draw_dock(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, heig
 
     let sep_h = dl.tile * 6 / 10;
     let sep_y = dl.dock.y + (dl.dock.height - sep_h) / 2;
-    let sep_a = scale_u32(110, reveal);
+    let sep_a = scale_u32(100, reveal);
     fill_rr(canvas, Rect::new(dl.sep_a, sep_y, 2, sep_h), 1, WHITE, sep_a);
     fill_rr(canvas, Rect::new(dl.sep_b, sep_y, 2, sep_h), 1, WHITE, sep_a);
 
@@ -182,45 +248,56 @@ pub fn draw_dock(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, heig
     };
     draw_tile(canvas, start_rect, start_top, start_bot, reveal, 0, &glyph, 66);
 
-    let focused = state.focused();
-    let mut hover_label: Option<(i32, i32, &str)> = None;
-    for (pos, &app_idx) in items.iter().enumerate() {
-        let slot = &state.apps[app_idx];
-        let info = slot.app.info();
-        let mut rect = dl.tiles[pos];
-        let bounce = state.bounce_offset(app_idx, unit);
-        rect.y -= bounce;
-        let (top, bottom) = tile_colors(hash_str(&info.id));
-        let glyph = |c: &mut Canvas<'_>, x: i32, y: i32, s: i32, col: u32| {
-            draw_icon(c, info.icon, x, y, s, col)
+    let mut hover_label = None;
+    let transitioning = dl.page_count > 1 && state.dock_page_anim < ONE;
+    let clip = Rect::new(dl.app_viewport.x, 0, dl.app_viewport.width.max(1), height);
+    canvas.set_clip(clip);
+    if transitioning {
+        let old_layout = state.dock_layout_for_page(width, height, unit, state.dock_page_from);
+        let t = crate::motion::ease_in_out_cubic(state.dock_page_anim);
+        let shift = (dl.app_viewport.width.max(dl.tile) as i64 * t as i64 / ONE as i64) as i32;
+        let old_offset = if state.dock_page_direction >= 0 { -shift } else { shift };
+        let new_offset = if state.dock_page_direction >= 0 {
+            dl.app_viewport.width.max(dl.tile) - shift
+        } else {
+            -(dl.app_viewport.width.max(dl.tile) - shift)
         };
-        draw_tile(canvas, rect, top, bottom, reveal, 0, &glyph, 56);
+        let _ = draw_dock_page_items(
+            canvas, state, &items, &old_layout, unit, old_offset, ONE - t, false,
+        );
+        hover_label = draw_dock_page_items(
+            canvas, state, &items, &dl, unit, new_offset, t, true,
+        );
+    } else {
+        hover_label = draw_dock_page_items(canvas, state, &items, &dl, unit, 0, reveal, true);
+    }
+    canvas.reset_clip();
 
-        if slot.window.open {
-            let is_focus = focused == Some(app_idx);
-            let cy = dl.dock.y + dl.dock.height - dock_pad(unit) / 2;
-            let cx = dl.tiles[pos].x + dl.tiles[pos].width / 2;
-            let w = if is_focus { (unit * 2 / 3).max(8) } else { (unit / 5).max(4) };
-            let hh = (unit / 8).max(3);
-            let col = if is_focus { accent } else { WHITE };
-            fill_rr(canvas, Rect::new(cx - w / 2, cy - hh / 2, w, hh), hh / 2, col, scale_u32(240, reveal));
-        }
-        if state.hover == Target::DockApp(app_idx) {
-            let name: &str = &info.name;
-            hover_label = Some((rect.x + rect.width / 2, rect.y, name));
+    for (rect, is_right, target) in [
+        (dl.prev, false, Target::DockPrev),
+        (dl.next, true, Target::DockNext),
+    ] {
+        if let Some(r) = rect {
+            let hovered = state.hover == target;
+            fill_rr(
+                canvas,
+                r,
+                r.width / 3,
+                if hovered { WHITE } else { FROST },
+                scale_u32(if hovered { 220 } else { 150 }, reveal),
+            );
+            stroke_rr(canvas, r, r.width / 3, 1, WHITE, scale_u32(210, reveal));
+            draw_dock_chevron(canvas, r, is_right, INK_SOFT, scale_u32(220, reveal));
         }
     }
+
     if state.hover == Target::StartButton {
-        hover_label = Some((
-            dl.start.x + dl.start.width / 2,
-            start_rect.y,
-            "Baslat",
-        ));
+        hover_label = Some((dl.start.x + dl.start.width / 2, start_rect.y, "Baslat"));
     }
 
+    // Keep the status readout inside the dock's main glass surface. A second
+    // capsule here makes the right side look like a separate, mismatched bar.
     let st = dl.status;
-    fill_rr(canvas, st, st.height / 3, WHITE, scale_u32(40, reveal));
-    stroke_rr(canvas, st, st.height / 3, 1, WHITE, scale_u32(90, reveal));
     let style = text_style(text_h(unit, 48), 15);
     let secs = state.uptime_ms / 1000;
     let mut clock = Line::new();
@@ -240,10 +317,10 @@ pub fn draw_dock(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, heig
             state.settings.wifi_enabled,
         );
     }
-    shadowed(canvas, clock.as_str(), tx, ty, &style, WHITE, rgb(10, 20, 50));
+    shadowed(canvas, clock.as_str(), tx, ty, &style, WHITE, rgb(5, 38, 58));
 
     if let Some((cx, top, text)) = hover_label {
-        if state.dock_reveal >= ONE * 3 / 4 {
+        if !transitioning && state.dock_reveal >= ONE * 3 / 4 {
             draw_tooltip(canvas, text, cx, top, width, unit);
         }
     }

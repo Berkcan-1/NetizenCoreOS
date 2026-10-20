@@ -1,29 +1,29 @@
 # nc-desktop/src
 
-Moduller
+## Modüller
 
-- `lib.rs`: Durum makinesi. Pencere yasam dongusu (acilis, kucultme, kapatma, buyutme), hedef bulma (`Target`), tiklama, surukleme, klavye, animasyon zamanlayicilari ve `draw` sirasi burada.
-- `motion.rs`: Animasyon matematigi. Ilerleme degerleri 0..4096 (Q12) tamsayidir. Easing: out-cubic, out-quart, in-out-cubic, out-back. `approach` gecen sureye (ms) gore ilerler, kare hizindan bagimsizdir.
-- `paint.rs`: Cizim ilkelleri. Kenar yumusatmali yuvarlak dikdortgen (dolgu, gradyan, cizgi), yumusak golge, kutu bulanikligi (iki gecis, yuvarlak kose onarimi), `glass_surface` cam yuzey, yumusak kure, cizgi ve halka.
-- `theme.rs`: Renkler, karo renk paleti, cam on ayarlari (dock, baslat, menu, diyalog, pencere).
-- `layout.rs`: Butun geometri. `unit_for(width, height)` ekran oranina gore tek olcu birimi verir; her boyut bu birimin katidir, bu yuzden her cozunurluk ve dikey ekranda uyum saglar.
-- `icons.rs`: Parlak cam karo, klasor ve belge simgeleri, guc/yeniden baslat/wifi simgeleri, baslat logosu.
-- `window.rs`: Cam pencere cercevesi. Baslik seridi bulaniktir, kenar ve baslik cam, icerik alani opak.
-- `wallpaper.rs`: Capraz gradyan, buyuk yumusak kureler, duvar kagidi isiklari ve titresim giderici dither. Canli duvar kagidi icin suzulen kureler.
-- `shell.rs`: Masaustu simgeleri, dock, baslat menusu, sag tik menusu, gorev yoneticisi ve diyalog cizimi.
+- `lib.rs`: Durum makinesi, pencere yaşam döngüsü, hedef bulma, giriş ve animasyon zamanlaması.
+- `motion.rs`: Tamsayı tabanlı easing ve kare hızından bağımsız animasyon ilerlemesi.
+- `paint.rs`: Kenar yumuşatma, gradyan, gölge, bulanıklık ve cam yüzey çizimi.
+- `theme.rs`: Renk sistemi, uygulama karo paleti ve cam yüzey ayarları.
+- `layout.rs`: Ekrana uyumlu geometri, pencere sınırları, masaüstü ızgarası ve dock yerleşimi.
+- `icons.rs`: Uygulama karoları ve sistem simgeleri.
+- `window.rs`: Pencere çerçevesi ve başlık düğmeleri.
+- `wallpaper.rs`: Duvar kâğıdı gradyanları, ışıklar ve hareketli parçalar.
+- `shell.rs`: Masaüstü simgeleri, dock, başlat menüsü, bağlam menüsü, görev yöneticisi ve diyaloglar.
 
-Masaustu izgarasi
+## Yerleşim standardı
 
-`grid_for` hucre boyutunu birimden alir ve ekrana sigan sutun ve satir sayisini bulur. Simgeler hucre (sutun, satir) olarak saklanir. Yeri secilmemis simgeler bos hucreleri sutun sutun doldurur. Surukleme sirasinda en yakin bos hucre hayalet olarak gosterilir, birakinca simge hucreye yumusakca oturur. `Simgeleri Duzenle` menu ogesi tum konumlari sifirlar.
+`unit_for(width, height)` ekran genişliği ve yüksekliğini birlikte değerlendirir. Ölçek birimi 8–44 piksel arasında tutulur; böylece küçük çözünürlüklerde ölçüler makul kalırken 4K ekranlarda arayüz gereksiz yere büyümez. Pencere ölçüleri de kullanılabilir alan içinde sınırlandırılır.
 
-Dock
+## Dock davranışı
 
-Ortada yuzen cam bar: baslat dugmesi, uygulamalar, durum alani (ag cubuklari ve calisma suresi). Imlec yaklastikca simgeler macOS tarzi cosinus egrisiyle buyur, bar genisler. Acilan uygulamanin simgesi ziplar, calisan uygulamanin altinda nokta durur, odaktaki uzun ve renklidir. Sigmayan uygulama sayisinda simgeler kuculur. Otomatik gizleme acikken dock asagi kayar ve alt kenarda ince bir ipucu cizgisi kalir.
+Dock üç bölüme ayrılır: başlat düğmesi, uygulama şeridi ve sistem durumu. Sığan uygulamalar tek sırada gösterilir. Uygulamalar ayrılan alanı doldurduğunda karo boyutları okunabilir alt sınıra iner ve dock'un ortası sayfalı bir karusele dönüşür. Sol/sağ kontrolleri sayfalar arasında döngüsel gezinir. Yeni kurulan ya da dock'ta sabitlenmemiş olup ilk kez açılan uygulama, taşma varsa son sayfaya alınır.
 
-Animasyonlar
+Sayfa geçişleri yaklaşık 230 ms sürer; mevcut ve yeni simgeler yatay yönde hareket eder, uygulama şeridi dışına taşan pikseller kırpılır. Hit-test aynı görünür sayfayı kullandığı için tıklanan simge ile çizilen simge eşleşir.
 
-Pencere acilisi kucuk bir olcek ve yukselme ile solma, icerik gec solar. Kucultme dock simgesine dogru kuculur, geri getirme dock simgesinden buyur. Kapatma kuculup solar. Buyutme ile eski boyut arasi yumusak gecer. Baslat menusu dock'tan buyur, simgeler sirayla belirir. Sag tik menusu ve diyaloglar imlec noktasindan olceklenir. Sureler `launch_anim_speed` ayarina baglidir.
+## Görsel dil
 
-Cam kalitesi
+Renkler daha kontrollü mavi, aqua, deniz yeşili, lavanta ve sıcak nötr tonlara çekildi. Cam yüzeyler belirgin bir üst ışık, ince kenar ve yumuşatılmış gölge taşır; saat ve durum simgelerinde açık cam üzerinde koyu mürekkep rengi kullanılır.
 
-`glass_blur` ayari bulaniklik yaricapini ve gecis sayisini belirler (0 kapali). Yaricap birimle birlikte olceklenir.
+Daha kapsamlı kararlar için `UI_DESIGN_STANDARD.md` dosyasına bakın.

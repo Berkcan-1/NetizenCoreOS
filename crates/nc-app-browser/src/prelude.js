@@ -40,6 +40,7 @@ __section('events', function () {
       super(type, init);
       this.detail = init && init.detail !== undefined ? init.detail : null;
     }
+    initCustomEvent(type, bubbles, cancelable, detail) { this.initEvent(type, bubbles, cancelable); this.detail = detail === undefined ? null : detail; }
   }
   class UIEvent extends Event {}
   class MouseEvent extends UIEvent {
@@ -458,6 +459,28 @@ __section('dom', function () {
     scrollTo() {}
     animate() { return { cancel: function () {}, finished: Promise.resolve() }; }
     attachShadow() { return this; }
+    getContext(kind) {
+      if (kind !== '2d') { return null; }
+      var self3 = this;
+      var fns = {
+        measureText: function (t) { return { width: String(t).length * 6 }; },
+        createLinearGradient: function () { return { addColorStop: function () {} }; },
+        createRadialGradient: function () { return { addColorStop: function () {} }; },
+        createPattern: function () { return {}; },
+        getImageData: function (x, y, w, h) { return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }; },
+        createImageData: function (w, h) { return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }; }
+      };
+      return new Proxy({ canvas: self3 }, {
+        get: function (t, k) {
+          if (k in t) { return t[k]; }
+          if (typeof k === 'string' && fns[k]) { return fns[k]; }
+          return function () {};
+        },
+        set: function (t, k, v) { t[k] = v; return true; }
+      });
+    }
+    toDataURL() { return 'data:,'; }
+    toBlob(cb) { if (typeof cb === 'function') { setTimeout(function () { cb(null); }, 0); } }
     getBoundingClientRect() { return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
     getClientRects() { return []; }
     get offsetWidth() { return 0; }
@@ -492,14 +515,9 @@ __section('dom', function () {
       t.textContent = String(v);
     }
     get readyState() { return this['@@rs'] || 'loading'; }
-    get cookie() { return this['@@cookie'] || ''; }
-    set cookie(v) {
-      var s = String(v).split(';')[0];
-      var name = s.split('=')[0].trim();
-      var cur = (this['@@cookie'] || '').split('; ').filter(function (x) { return x && x.split('=')[0] !== name; });
-      cur.push(s);
-      this['@@cookie'] = cur.join('; ');
-    }
+    get cookie() { return __host.getCookie(); }
+    set cookie(v) { __host.setCookie(String(v)); }
+    get fonts() { return { ready: Promise.resolve(), load: function () { return Promise.resolve([]); }, check: function () { return true; }, addEventListener: function () {}, removeEventListener: function () {}, forEach: function () {}, size: 0 }; }
     get URL() { return location.href; }
     get documentURI() { return location.href; }
     get baseURI() { return location.href; }
@@ -521,7 +539,13 @@ __section('dom', function () {
     createTextNode(s) { return wrap(D.text(String(s))); }
     createComment() { return wrap(D.text('')); }
     createDocumentFragment() { return wrap(D.create('#fragment')); }
-    createEvent(t) { return new Event(''); }
+    createEvent(t) {
+      var n = String(t).toLowerCase();
+      if (n.indexOf('custom') === 0) { return new CustomEvent(''); }
+      if (n.indexOf('mouse') === 0) { return new MouseEvent(''); }
+      if (n.indexOf('key') === 0) { return new KeyboardEvent(''); }
+      return new Event('');
+    }
     createRange() { return { setStart: function () {}, setEnd: function () {}, selectNodeContents: function () {}, collapse: function () {}, getBoundingClientRect: function () { return { top: 0, left: 0, width: 0, height: 0 }; } }; }
     createTreeWalker() { return { nextNode: function () { return null; } }; }
     getElementById(i) { var n = D.byId(String(i)); return n < 0 ? null : wrap(n); }
@@ -554,6 +578,33 @@ __section('dom', function () {
   globalThis.DOMTokenList = DOMTokenList;
   ['HTMLElement', 'HTMLDivElement', 'HTMLSpanElement', 'HTMLInputElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLAnchorElement', 'HTMLImageElement', 'HTMLScriptElement', 'HTMLStyleElement', 'HTMLLinkElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLCanvasElement', 'HTMLBodyElement', 'HTMLHtmlElement', 'SVGElement', 'HTMLIFrameElement', 'HTMLVideoElement', 'HTMLAudioElement'].forEach(function (n) { globalThis[n] = Element; });
   globalThis.__wrap = wrap;
+  Node.ELEMENT_NODE = 1;
+  Node.ATTRIBUTE_NODE = 2;
+  Node.TEXT_NODE = 3;
+  Node.COMMENT_NODE = 8;
+  Node.DOCUMENT_NODE = 9;
+  Node.DOCUMENT_FRAGMENT_NODE = 11;
+  globalThis.NodeFilter = { SHOW_ALL: 4294967295, SHOW_ELEMENT: 1, SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3 };
+  globalThis.Image = function Image() { return documentObj.createElement('img'); };
+  globalThis.Audio = function Audio() { return documentObj.createElement('audio'); };
+  globalThis.Option = function Option(text, value) {
+    var o = documentObj.createElement('option');
+    if (text !== undefined) { o.textContent = String(text); }
+    if (value !== undefined) { o.setAttribute('value', String(value)); }
+    return o;
+  };
+  globalThis.DOMParser = class DOMParser {
+    parseFromString(str) {
+      var div = documentObj.createElement('div');
+      div.innerHTML = String(str);
+      return {
+        body: div, documentElement: div, head: div,
+        querySelector: function (q) { return div.querySelector(q); },
+        querySelectorAll: function (q) { return div.querySelectorAll(q); },
+        getElementById: function (i) { return div.querySelector('#' + i); }
+      };
+    }
+  };
   globalThis.__fire_load = function (id, ok) {
     var el = wrap(id);
     if (!el) { return; }
@@ -837,7 +888,30 @@ __section('bom', function () {
     return setTimeout(function () { fn({ didTimeout: false, timeRemaining: function () { return 10; } }); }, 1);
   };
   globalThis.cancelIdleCallback = function (id) { clearTimeout(id); };
-  globalThis.CSS = { supports: function () { return false; }, escape: function (s) { return String(s); } };
+  globalThis.CSS = { supports: function () { return true; }, escape: function (s) { return String(s); } };
+  globalThis.visualViewport = { width: 1280, height: 720, scale: 1, offsetLeft: 0, offsetTop: 0, pageLeft: 0, pageTop: 0, addEventListener: function () {}, removeEventListener: function () {} };
+  globalThis.Notification = { permission: 'denied', requestPermission: function () { return Promise.resolve('denied'); } };
+  globalThis.WebSocket = class WebSocket extends EventTarget {
+    constructor(url) {
+      super();
+      this.url = String(url);
+      this.readyState = 0;
+      this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
+      var me = this;
+      setTimeout(function () {
+        me.readyState = 3;
+        var e = new Event('error'); e.target = me; me.dispatchEvent(e);
+        var c = new Event('close'); c.target = me; me.dispatchEvent(c);
+      }, 0);
+    }
+    send() {}
+    close() { this.readyState = 3; }
+  };
+  globalThis.WebSocket.CONNECTING = 0; globalThis.WebSocket.OPEN = 1; globalThis.WebSocket.CLOSING = 2; globalThis.WebSocket.CLOSED = 3;
+  globalThis.EventSource = class EventSource extends EventTarget {
+    constructor(url) { super(); this.url = String(url); this.readyState = 2; }
+    close() {}
+  };
   globalThis.customElements = { define: function () {}, get: function () { return undefined; }, whenDefined: function () { return Promise.resolve(); } };
   var Stub = function () {
     return class {
@@ -953,29 +1027,45 @@ __section('reflect', function () {
 __section('net', function () {
   var H = __host;
   var pending = new Map();
-  globalThis.__net_done = function (id, ok, status, body, url) {
+  function parseHeaderText(t) {
+    var h = {};
+    var lines = String(t || '').split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var idx = lines[i].indexOf(':');
+      if (idx > 0) { h[lines[i].slice(0, idx).trim().toLowerCase()] = lines[i].slice(idx + 1).trim(); }
+    }
+    return h;
+  }
+  globalThis.__net_done = function (id, ok, status, body, url, headerText) {
     var p = pending.get(id);
     if (!p) { return; }
     pending.delete(id);
     if (!ok) { p.reject(new TypeError('Failed to fetch')); return; }
-    p.resolve({ status: status, body: body, url: url });
+    p.resolve({ status: status, body: body, url: url, headers: parseHeaderText(headerText) });
   };
-  function rawFetch(url) {
+  function rawFetch(url, method, headers, body) {
     return new Promise(function (resolve, reject) {
       var full;
       try { full = __resolve_url(url, location.href); } catch (e) { reject(new TypeError('Invalid URL')); return; }
-      var id = H.net(full);
+      var lines = '';
+      for (var k in headers) { lines += k + ': ' + headers[k] + '\n'; }
+      var id = H.net(full, method || 'GET', lines, body === undefined || body === null ? '' : String(body));
       pending.set(id, { resolve: resolve, reject: reject });
     });
   }
   class Headers {
-    constructor(init) { this.m = {}; if (init && typeof init === 'object') { for (var k in init) { this.m[String(k).toLowerCase()] = String(init[k]); } } }
+    constructor(init) {
+      this.m = {};
+      if (init instanceof Headers) { init.forEach(function (v, k) { this.m[k] = v; }, this); }
+      else if (Array.isArray(init)) { for (var i = 0; i < init.length; i++) { this.m[String(init[i][0]).toLowerCase()] = String(init[i][1]); } }
+      else if (init && typeof init === 'object') { for (var k in init) { this.m[String(k).toLowerCase()] = String(init[k]); } }
+    }
     get(k) { var v = this.m[String(k).toLowerCase()]; return v === undefined ? null : v; }
     set(k, v) { this.m[String(k).toLowerCase()] = String(v); }
     has(k) { return this.m[String(k).toLowerCase()] !== undefined; }
     append(k, v) { this.set(k, v); }
     delete(k) { delete this.m[String(k).toLowerCase()]; }
-    forEach(fn) { for (var k in this.m) { fn(this.m[k], k, this); } }
+    forEach(fn, thisArg) { for (var k in this.m) { fn.call(thisArg, this.m[k], k, this); } }
   }
   class Response {
     constructor(body, init) {
@@ -991,12 +1081,34 @@ __section('net', function () {
     }
     text() { return Promise.resolve(this.body_); }
     json() { try { return Promise.resolve(JSON.parse(this.body_)); } catch (e) { return Promise.reject(e); } }
-    clone() { return new Response(this.body_, { status: this.status, url: this.url }); }
+    clone() { return new Response(this.body_, { status: this.status, url: this.url, headers: this.headers }); }
     arrayBuffer() { return Promise.reject(new Error('arrayBuffer is not supported')); }
-    blob() { return Promise.reject(new Error('blob is not supported')); }
+    blob() { return Promise.resolve(new Blob([this.body_])); }
   }
   class Request {
-    constructor(input, init) { this.url = typeof input === 'string' ? input : input.url; this.method = (init && init.method) || 'GET'; this.headers = new Headers(init && init.headers); }
+    constructor(input, init) {
+      this.url = typeof input === 'string' ? input : input.url;
+      this.method = (init && init.method) || (input && input.method) || 'GET';
+      this.headers = new Headers((init && init.headers) || (input && input.headers));
+      this.body = init && init.body;
+    }
+  }
+  function prepare(method, headersIn, bodyIn) {
+    var h = {};
+    new Headers(headersIn).forEach(function (v, k) { h[k] = v; });
+    var body = '';
+    if (bodyIn !== undefined && bodyIn !== null) {
+      body = String(bodyIn);
+      if (!h['content-type']) {
+        if (bodyIn instanceof URLSearchParams || bodyIn instanceof FormData) { h['content-type'] = 'application/x-www-form-urlencoded;charset=UTF-8'; }
+        else if (typeof bodyIn === 'string') { h['content-type'] = 'text/plain;charset=UTF-8'; }
+      }
+    }
+    if (method !== 'GET' && method !== 'HEAD') {
+      if (!h['origin']) { h['origin'] = location.origin; }
+      if (!h['referer']) { h['referer'] = location.href; }
+    }
+    return { headers: h, body: body };
   }
   globalThis.Headers = Headers;
   globalThis.Response = Response;
@@ -1004,8 +1116,10 @@ __section('net', function () {
   globalThis.fetch = function (input, init) {
     var url = typeof input === 'string' ? input : (input && input.url) || String(input);
     var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-    if (method !== 'GET' && method !== 'HEAD') { return Promise.reject(new TypeError('Only GET requests are supported by this browser yet')); }
-    return rawFetch(url).then(function (r) { return new Response(r.body, { status: r.status, url: r.url }); });
+    var p = prepare(method, (init && init.headers) || (input && input.headers), (init && init.body !== undefined) ? init.body : (input && input.body));
+    return rawFetch(url, method, p.headers, p.body).then(function (r) {
+      return new Response(r.body, { status: r.status, url: r.url, headers: r.headers });
+    });
   };
   class XMLHttpRequest extends EventTarget {
     constructor() {
@@ -1023,11 +1137,13 @@ __section('net', function () {
       this.onload = null;
       this.onerror = null;
       this.upload = new EventTarget();
+      this.reqHeaders_ = {};
+      this.resHeaders_ = {};
     }
     open(method, url) { this.method_ = String(method).toUpperCase(); this.url_ = String(url); this.readyState = 1; }
-    setRequestHeader() {}
-    getResponseHeader() { return null; }
-    getAllResponseHeaders() { return ''; }
+    setRequestHeader(k, v) { this.reqHeaders_[String(k).toLowerCase()] = String(v); }
+    getResponseHeader(k) { var v = this.resHeaders_[String(k).toLowerCase()]; return v === undefined ? null : v; }
+    getAllResponseHeaders() { var o = ''; for (var k in this.resHeaders_) { o += k + ': ' + this.resHeaders_[k] + '\r\n'; } return o; }
     overrideMimeType() {}
     abort() { this.aborted_ = true; }
     fire(type) {
@@ -1035,19 +1151,19 @@ __section('net', function () {
       e.target = this;
       this.dispatchEvent(e);
     }
-    send() {
+    send(body) {
       var self2 = this;
-      if (this.method_ !== 'GET' && this.method_ !== 'HEAD') {
-        setTimeout(function () { self2.readyState = 4; self2.status = 0; self2.fire('readystatechange'); self2.fire('error'); self2.fire('loadend'); }, 0);
-        return;
-      }
-      rawFetch(this.url_).then(function (r) {
+      var p = prepare(this.method_, this.reqHeaders_, body);
+      rawFetch(this.url_, this.method_, p.headers, p.body).then(function (r) {
         if (self2.aborted_) { return; }
         self2.status = r.status;
         self2.statusText = r.status === 200 ? 'OK' : '';
         self2.responseText = r.body;
         self2.responseURL = r.url;
-        self2.response = self2.responseType === 'json' ? JSON.parse(r.body) : r.body;
+        self2.resHeaders_ = r.headers || {};
+        var parsed = r.body;
+        if (self2.responseType === 'json') { try { parsed = JSON.parse(r.body); } catch (x) { parsed = null; } }
+        self2.response = parsed;
         self2.readyState = 4;
         self2.fire('readystatechange');
         self2.fire('load');
@@ -1067,4 +1183,178 @@ __section('net', function () {
   XMLHttpRequest.LOADING = 3;
   XMLHttpRequest.DONE = 4;
   globalThis.XMLHttpRequest = XMLHttpRequest;
+});
+
+__section('typed', function () {
+  class ArrayBuffer {
+    constructor(n) { this.byteLength = n | 0; }
+    slice(a, b) { return new ArrayBuffer(Math.max(0, (b === undefined ? this.byteLength : b) - (a || 0))); }
+    static isView(v) { return !!(v && v['@@a'] !== undefined); }
+  }
+  globalThis.ArrayBuffer = ArrayBuffer;
+  globalThis.SharedArrayBuffer = ArrayBuffer;
+
+  function isIndex(k) {
+    if (typeof k !== 'string' || k.length === 0) { return false; }
+    var c = k.charCodeAt(0);
+    return c >= 48 && c <= 57;
+  }
+
+  function makeTyped(name, bytes, coerce) {
+    var C = class {
+      constructor(a, off, len) {
+        var arr = [];
+        var i;
+        if (a === undefined || a === null) { a = 0; }
+        if (typeof a === 'number') {
+          for (i = 0; i < a; i++) { arr.push(0); }
+        } else if (a instanceof ArrayBuffer) {
+          var n = len !== undefined ? len : Math.floor((a.byteLength - (off || 0)) / bytes);
+          for (i = 0; i < n; i++) { arr.push(0); }
+        } else {
+          var src = Array.from(a);
+          for (i = 0; i < src.length; i++) { arr.push(coerce(src[i])); }
+        }
+        this['@@a'] = arr;
+        this['@@c'] = coerce;
+        this['@@n'] = name;
+        this.BYTES_PER_ELEMENT = bytes;
+        this.byteLength = arr.length * bytes;
+        this.byteOffset = off || 0;
+        this.buffer = a instanceof ArrayBuffer ? a : new ArrayBuffer(arr.length * bytes);
+        return new Proxy(this, {
+          get: function (t, k) {
+            if (isIndex(k)) { return t['@@a'][+k]; }
+            if (k === 'length') { return t['@@a'].length; }
+            return t[k];
+          },
+          set: function (t, k, v) {
+            if (isIndex(k)) { var ix = +k; if (ix < t['@@a'].length) { t['@@a'][ix] = coerce(v); } return true; }
+            t[k] = v;
+            return true;
+          },
+          has: function (t, k) { return isIndex(k) ? (+k) < t['@@a'].length : k in t; }
+        });
+      }
+      set(src, offset) {
+        var s2 = Array.from(src);
+        var o = offset || 0;
+        for (var i = 0; i < s2.length; i++) { if (o + i < this['@@a'].length) { this['@@a'][o + i] = this['@@c'](s2[i]); } }
+      }
+      subarray(b, e) { return new C(this['@@a'].slice(b, e)); }
+      slice(b, e) { return new C(this['@@a'].slice(b, e)); }
+      fill(v, b, e) { var c = this['@@c']; var a = this['@@a']; for (var i = b || 0; i < (e === undefined ? a.length : e); i++) { a[i] = c(v); } return this; }
+      map(f) { var self4 = this; return new C(this['@@a'].map(function (x, i) { return f(x, i, self4); })); }
+      filter(f) { return new C(this['@@a'].filter(f)); }
+      forEach(f) { var self4 = this; this['@@a'].forEach(function (x, i) { f(x, i, self4); }); }
+      reduce(f, init) { return arguments.length > 1 ? this['@@a'].reduce(f, init) : this['@@a'].reduce(f); }
+      indexOf(v) { return this['@@a'].indexOf(v); }
+      includes(v) { return this['@@a'].indexOf(v) >= 0; }
+      join(sep) { return this['@@a'].join(sep); }
+      find(f) { return this['@@a'].find(f); }
+      findIndex(f) { return this['@@a'].findIndex(f); }
+      some(f) { return this['@@a'].some(f); }
+      every(f) { return this['@@a'].every(f); }
+      reverse() { this['@@a'].reverse(); return this; }
+      sort(f) { this['@@a'].sort(f || function (a, b) { return a - b; }); return this; }
+      toString() { return this['@@a'].join(','); }
+    }
+    C.prototype['@@iterator'] = function () {
+      var i = 0;
+      var a = this['@@a'];
+      return { next: function () { if (i < a.length) { var v = a[i]; i++; return { value: v, done: false }; } return { value: undefined, done: true }; } };
+    };
+    C.BYTES_PER_ELEMENT = bytes;
+    C.from = function (src, f) { var arr = Array.from(src); return new C(f ? arr.map(f) : arr); };
+    C.of = function () { return new C(Array.prototype.slice.call(arguments)); };
+    globalThis[name] = C;
+  }
+  makeTyped('Uint8Array', 1, function (v) { return (v | 0) & 255; });
+  makeTyped('Int8Array', 1, function (v) { return ((v | 0) << 24) >> 24; });
+  makeTyped('Uint8ClampedArray', 1, function (v) { v = Number(v); return v !== v ? 0 : v < 0 ? 0 : v > 255 ? 255 : Math.round(v); });
+  makeTyped('Uint16Array', 2, function (v) { return (v | 0) & 65535; });
+  makeTyped('Int16Array', 2, function (v) { return ((v | 0) << 16) >> 16; });
+  makeTyped('Uint32Array', 4, function (v) { return v >>> 0; });
+  makeTyped('Int32Array', 4, function (v) { return v | 0; });
+  makeTyped('Float32Array', 4, function (v) { return +v; });
+  makeTyped('Float64Array', 8, function (v) { return +v; });
+
+  class DataView {
+    constructor(buf) { this.buffer = buf; this.bytes = []; for (var i = 0; i < buf.byteLength; i++) { this.bytes.push(0); } this.byteLength = buf.byteLength; }
+    getUint8(i) { return this.bytes[i] || 0; }
+    setUint8(i, v) { this.bytes[i] = v & 255; }
+    getInt8(i) { return (this.getUint8(i) << 24) >> 24; }
+    getUint16(i, le) { var a = this.getUint8(i), b = this.getUint8(i + 1); return le ? (b << 8) | a : (a << 8) | b; }
+    setUint16(i, v, le) { if (le) { this.setUint8(i, v); this.setUint8(i + 1, v >> 8); } else { this.setUint8(i, v >> 8); this.setUint8(i + 1, v); } }
+    getUint32(i, le) { var a = this.getUint16(i, le), b = this.getUint16(i + 2, le); return (le ? (b * 65536 + a) : (a * 65536 + b)) >>> 0; }
+    setUint32(i, v, le) { if (le) { this.setUint16(i, v & 65535, true); this.setUint16(i + 2, v >>> 16, true); } else { this.setUint16(i, v >>> 16, false); this.setUint16(i + 2, v & 65535, false); } }
+    getInt32(i, le) { return this.getUint32(i, le) | 0; }
+  }
+  globalThis.DataView = DataView;
+
+  globalThis.TextEncoder = class TextEncoder {
+    get encoding() { return 'utf-8'; }
+    encode(str) {
+      var e = encodeURIComponent(String(str === undefined ? '' : str));
+      var out = [];
+      for (var i = 0; i < e.length; i++) {
+        if (e.charAt(i) === '%') { out.push(parseInt(e.substr(i + 1, 2), 16)); i += 2; } else { out.push(e.charCodeAt(i)); }
+      }
+      return new Uint8Array(out);
+    }
+  };
+  globalThis.TextDecoder = class TextDecoder {
+    get encoding() { return 'utf-8'; }
+    decode(buf) {
+      if (!buf) { return ''; }
+      var a = Array.from(buf);
+      var s2 = '';
+      for (var i = 0; i < a.length; i++) { s2 += '%' + (a[i] < 16 ? '0' : '') + a[i].toString(16); }
+      try { return decodeURIComponent(s2); } catch (e) { return String.fromCharCode.apply(null, a); }
+    }
+  };
+  globalThis.crypto = {
+    getRandomValues: function (arr) {
+      var big = arr.BYTES_PER_ELEMENT >= 4;
+      for (var i = 0; i < arr.length; i++) { arr[i] = Math.floor(Math.random() * (big ? 4294967296 : 256)); }
+      return arr;
+    },
+    randomUUID: function () {
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        var r = Math.floor(Math.random() * 16);
+        return (c === 'x' ? r : (r & 3) | 8).toString(16);
+      });
+    },
+    subtle: undefined
+  };
+  globalThis.Blob = class Blob {
+    constructor(parts, opts) {
+      this.parts = parts || [];
+      this.type = (opts && opts.type) || '';
+      var n = 0;
+      for (var i = 0; i < this.parts.length; i++) { n += String(this.parts[i]).length; }
+      this.size = n;
+    }
+    text() { return Promise.resolve(this.parts.map(String).join('')); }
+    slice() { return this; }
+  };
+  globalThis.File = class File extends Blob {
+    constructor(parts, name, opts) { super(parts, opts); this.name = String(name); this.lastModified = 0; }
+  };
+  globalThis.FileReader = class FileReader extends EventTarget {
+    readAsText(b) {
+      var me = this;
+      b.text().then(function (t) { me.result = t; var e = new Event('load'); e.target = me; me.dispatchEvent(e); if (typeof me.onload === 'function') { me.onload(e); } });
+    }
+  };
+  globalThis.FormData = class FormData {
+    constructor() { this.list = []; }
+    append(k, v) { this.list.push([String(k), String(v)]); }
+    set(k, v) { this.delete(k); this.append(k, v); }
+    delete(k) { this.list = this.list.filter(function (p) { return p[0] !== k; }); }
+    get(k) { for (var i = 0; i < this.list.length; i++) { if (this.list[i][0] === k) { return this.list[i][1]; } } return null; }
+    has(k) { return this.get(k) !== null; }
+    forEach(fn) { for (var i = 0; i < this.list.length; i++) { fn(this.list[i][1], this.list[i][0], this); } }
+    toString() { return new URLSearchParams(this.list.reduce(function (o, p) { o[p[0]] = p[1]; return o; }, {})).toString(); }
+  };
 });

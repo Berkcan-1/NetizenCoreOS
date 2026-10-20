@@ -5,7 +5,10 @@ use nc_math::smoothstep256;
 use crate::motion::{ease_out_cubic, lerp};
 
 pub fn unit_for(width: i32, height: i32) -> i32 {
-    (height / 36).min(width / 44).max(10)
+    let width = width.max(1);
+    let height = height.max(1);
+    let raw = (height / 36).min(width / 44);
+    raw.clamp(8, 44)
 }
 
 pub fn inside(area: Rect, x: i32, y: i32) -> bool {
@@ -37,7 +40,7 @@ pub fn dock_area(unit: i32) -> i32 {
 }
 
 pub fn dock_hint_rect(width: i32, height: i32, unit: i32) -> Rect {
-    let w = (unit * 6).min(width / 3).max(40);
+    let w = (unit * 6).min((width - unit).max(1)).max(1);
     let h = (unit / 5).max(4);
     let x = (width - w) / 2;
     let y = height - h - (unit / 4).max(2);
@@ -46,7 +49,7 @@ pub fn dock_hint_rect(width: i32, height: i32, unit: i32) -> Rect {
 
 pub fn usable_rect(width: i32, height: i32, unit: i32, auto_hide: bool) -> Rect {
     let reserve = if auto_hide { 0 } else { dock_height(unit) };
-    Rect::new(0, 0, width, (height - reserve).max(unit * 10))
+    Rect::new(0, 0, width.max(1), (height - reserve).clamp(1, height.max(1)))
 }
 
 pub fn status_width(width: i32, unit: i32) -> i32 {
@@ -65,8 +68,14 @@ pub struct DockLayout {
     pub sep_a: i32,
     pub sep_b: i32,
     pub tile: i32,
+    pub first_index: usize,
+    pub visible_count: usize,
+    pub page_index: usize,
+    pub page_count: usize,
+    pub prev: Option<Rect>,
+    pub next: Option<Rect>,
+    pub app_viewport: Rect,
 }
-
 
 pub fn dock_layout(
     width: i32,
@@ -77,81 +86,137 @@ pub fn dock_layout(
     focus_x: i32,
     mag: i32,
     full_t: i32,
+    page: usize,
 ) -> DockLayout {
+    let width = width.max(1);
+    let height = height.max(1);
     let pad = dock_pad(unit);
-    let gap = dock_gap(unit);
-    let sepw = unit * 3 / 4;
-    let sw = status_width(width, unit);
-    let avail = width - unit * 2;
+    let gap = dock_gap(unit).max(1);
+    let sepw = (unit * 3 / 4).max(1);
+    let sw = status_width(width, unit).min((width - unit).max(1));
+    let avail = (width - unit * 2).max(1);
+    let nominal = dock_tile(unit).max(10);
+    let min_tile = (unit * 3 / 2).max(10).min(nominal);
     let n = count as i32;
-    let nominal = dock_tile(unit);
 
-    let fixed = |t: i32| pad * 2 + t + gap + sepw * 2 + sw + n * (t + gap);
-    let mut t = nominal;
-    while t > unit * 3 / 2 && fixed(t) > avail {
-        t -= 1;
+    let fixed = |tile: i32, icons: i32| {
+        pad * 2 + tile + gap + sepw * 2 + sw + icons * (tile + gap)
+    };
+
+    let mut tile = nominal;
+    while tile > min_tile && fixed(tile, n) > avail {
+        tile -= 1;
     }
+    let overflow = count > 0 && fixed(tile, n) > avail;
+    let arrow_w = ((unit * 4 / 3).max(10)).min(tile.max(10));
+    let nav_left = if overflow { arrow_w + gap * 2 } else { 0 };
+    let nav_right = if overflow { arrow_w + gap } else { 0 };
+    let base = pad * 2 + tile + gap + sepw * 2 + sw;
+    let app_room = (avail - base - nav_left - nav_right).max(0);
+    let visible_count = if count == 0 {
+        0
+    } else if overflow {
+        ((app_room / (tile + gap)).max(1) as usize).min(count)
+    } else {
+        count
+    };
+    let page_count = if visible_count == 0 {
+        1
+    } else {
+        ((count + visible_count - 1) / visible_count).max(1)
+    };
+    let page_index = if page == usize::MAX {
+        page_count - 1
+    } else {
+        page.min(page_count - 1)
+    };
+    let first_index = page_index * visible_count;
+    let nav_reserve = if page_count > 1 { nav_left + nav_right } else { 0 };
+    let slot_count = visible_count as i32;
+    let nominal_apps_w = slot_count * (tile + gap);
+    let rest_total = (base + nav_reserve + nominal_apps_w).max(1);
+    let rest_x0 = ((width - rest_total) / 2).max(unit / 2);
+    let nav_lead = if page_count > 1 { nav_left } else { 0 };
+    let apps_rest_x = rest_x0 + pad + tile + gap + sepw + nav_lead;
+    let reach = ((tile + gap) * 5 / 2).max(1);
 
-    // Tam ekran (full_t) arttikca buyutme (magnification) efektini yumusakca bastir
-    let eff_mag = (mag as i64 * (crate::motion::ONE - full_t.clamp(0, crate::motion::ONE)) as i64
+    let full_t = full_t.clamp(0, crate::motion::ONE);
+    let mut eff_mag = (mag as i64 * (crate::motion::ONE - full_t) as i64
         / crate::motion::ONE as i64) as i32;
-
-    let rest_total = fixed(t);
-    let rest_x0 = (width - rest_total) / 2;
-    let apps_rest_x = rest_x0 + pad + t + gap + sepw;
-    let reach = ((t + gap) * 5 / 2).max(1);
-
-    let mut sizes: Vec<i32> = Vec::with_capacity(count);
-    for i in 0..count {
-        let center = apps_rest_x + i as i32 * (t + gap) + t / 2;
-        let d = (center - focus_x).abs();
-        let u = (d * 256 / reach).min(256) as u32;
-        let w256 = 256 - smoothstep256(u) as i32;
-        let extra = w256 * 118 / 256;
-        let sc256 = 256 + (extra as i64 * eff_mag as i64 / crate::motion::ONE as i64) as i32;
-        sizes.push(t * sc256 / 256);
+    if overflow {
+        eff_mag /= 4;
     }
 
-    let apps_w: i32 = sizes.iter().map(|s| s + gap).sum();
-    let float_total = pad * 2 + t + gap + sepw * 2 + sw + apps_w;
-    let float_x0 = ((width - float_total) / 2).max(unit / 2);
+    let sizes_for = |amount: i32| -> Vec<i32> {
+        let mut sizes = Vec::with_capacity(visible_count);
+        for i in 0..visible_count {
+            let center = apps_rest_x + i as i32 * (tile + gap) + tile / 2;
+            let d = (center - focus_x).abs();
+            let u = (d * 256 / reach).min(256) as u32;
+            let weight = 256 - smoothstep256(u) as i32;
+            let extra = weight * 118 / 256;
+            let sc256 = 256 + (extra as i64 * amount as i64
+                / crate::motion::ONE as i64) as i32;
+            sizes.push(tile * sc256 / 256);
+        }
+        sizes
+    };
+    let mut sizes = sizes_for(eff_mag);
+    let mut apps_w: i32 = sizes.iter().map(|size| size + gap).sum();
+    let mut float_total = base + nav_reserve + apps_w;
+    if float_total > avail && eff_mag > 0 {
+        eff_mag = 0;
+        sizes = sizes_for(eff_mag);
+        apps_w = sizes.iter().map(|size| size + gap).sum();
+        float_total = base + nav_reserve + apps_w;
+    }
 
-    // Tam ekran animasyon orani (0..ONE)
+    let float_x0 = ((width - float_total).max(0) / 2).max(unit / 2);
     let expand = crate::motion::ease_in_out_cubic(full_t);
-
-    // Bar x0 -> 0'a, genislik -> tam ekran width'e uzar, alt bosluk -> 0'a iner
     let dock_x = lerp(float_x0, 0, expand);
     let dock_w = lerp(float_total, width, expand);
     let dock_h = dock_height(unit);
     let bot_gap = lerp(dock_bottom_gap(unit), 0, expand);
-
     let full_y = height - bot_gap - dock_h;
     let hidden_y = height + unit;
     let y = lerp(hidden_y, full_y, ease_out_cubic(reveal));
 
-    let tile_top = y + (dock_h - t) / 2;
-    let bottom = tile_top + t;
-
-    // Baslat dugmesi sol kenarla birlikte sola kayar
+    let tile_top = y + (dock_h - tile) / 2;
+    let bottom = tile_top + tile;
     let start_x = dock_x + lerp(pad, unit / 2, expand);
-    let start = Rect::new(start_x, bottom - t, t, t);
-    let sep_a = start.x + t + gap + sepw / 2;
-
-    // Uygulama simgeleri bar uzarken akici sekilde konumlanir
-    let float_apps_x = float_x0 + pad + t + gap + sepw;
-    let full_apps_x = sep_a + sepw / 2 + gap;
+    let start = Rect::new(start_x, bottom - tile, tile, tile);
+    let sep_a = start.x + tile + gap + sepw / 2;
+    let float_apps_x = float_x0 + pad + tile + gap + sepw + nav_lead;
+    let full_apps_gap = if page_count > 1 { 0 } else { gap };
+    let full_apps_x = sep_a + sepw / 2 + nav_lead + full_apps_gap;
     let mut x = lerp(float_apps_x, full_apps_x, expand);
 
-    let mut tiles = Vec::with_capacity(count);
-    for s in sizes.iter() {
-        tiles.push(Rect::new(x, bottom - *s, *s, *s));
-        x += *s + gap;
+    let mut tiles = Vec::with_capacity(visible_count);
+    for size in sizes.iter() {
+        tiles.push(Rect::new(x, bottom - *size, *size, *size));
+        x += *size + gap;
     }
 
-    // Sag durum cubugu (Wi-Fi + Saat) sag kenarla birlikte en saga uzar
+    let mut prev = None;
+    let mut next = None;
+    if page_count > 1 {
+        let nav_y = y + (dock_h - arrow_w) / 2;
+        let app_x = tiles.first().map(|r| r.x).unwrap_or(float_apps_x);
+        prev = Some(Rect::new(app_x - arrow_w - gap, nav_y, arrow_w, arrow_w));
+        next = Some(Rect::new(app_x + apps_w, nav_y, arrow_w, arrow_w));
+    }
+
+    let app_width = (apps_w - gap).max(1);
+    let app_viewport = Rect::new(
+        tiles.first().map(|r| r.x).unwrap_or(float_apps_x),
+        y,
+        app_width,
+        dock_h,
+    );
+
     let status_x = dock_x + dock_w - sw - lerp(pad, unit / 2, expand);
     let sep_b = status_x - sepw / 2;
-    let status = Rect::new(status_x, y + pad, sw, dock_h - pad * 2);
+    let status = Rect::new(status_x, y + pad, sw, (dock_h - pad * 2).max(1));
 
     DockLayout {
         dock: Rect::new(dock_x, y, dock_w, dock_h),
@@ -160,7 +225,14 @@ pub fn dock_layout(
         status,
         sep_a,
         sep_b,
-        tile: t,
+        tile,
+        first_index,
+        visible_count,
+        page_index,
+        page_count,
+        prev,
+        next,
+        app_viewport,
     }
 }
 
@@ -178,12 +250,12 @@ pub fn window_radius(unit: i32) -> i32 {
 
 pub fn window_size(width_units: i32, height_units: i32, unit: i32, usable: Rect) -> (i32, i32) {
     let b = border(unit);
-    let w = (width_units * unit + 2 * b)
-        .min(usable.width - unit * 2)
-        .max(unit * 12);
-    let h = (height_units * unit + b)
-        .min(usable.height - unit * 2)
-        .max(unit * 8);
+    let max_w = (usable.width - unit * 2).max(1);
+    let max_h = (usable.height - unit * 2).max(1);
+    let min_w = (unit * 12).min(max_w);
+    let min_h = (unit * 8).min(max_h);
+    let w = (width_units * unit + 2 * b).clamp(min_w, max_w);
+    let h = (height_units * unit + b).clamp(min_h, max_h);
     (w, h)
 }
 
@@ -390,7 +462,7 @@ pub fn context_menu_rect(
     height: i32,
     unit: i32,
 ) -> Rect {
-    let w = (unit * 15).min(width - unit);
+    let w = (unit * 15).min((width - unit).max(1));
     let pad = unit / 3;
     let h = pad * 2 + item_count as i32 * context_row(unit);
     let cx = x.min(width - w - unit / 2).max(unit / 2);
@@ -413,11 +485,11 @@ pub fn context_item_rect(menu: Rect, index: usize, unit: i32) -> Rect {
 }
 
 pub fn desktop_modal_rect(width: i32, height: i32, unit: i32, tall: bool) -> Rect {
-    let w = (unit * 28).min(width - unit * 2);
+    let w = (unit * 28).min((width - unit * 2).max(1));
     let h = if tall {
-        (unit * 18).min(height - unit * 2)
+        (unit * 18).min((height - unit * 2).max(1))
     } else {
-        (unit * 11).min(height - unit * 2)
+        (unit * 11).min((height - unit * 2).max(1))
     };
     Rect::new((width - w) / 2, (height - h) / 2, w, h)
 }

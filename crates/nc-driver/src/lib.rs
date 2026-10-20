@@ -1,10 +1,14 @@
 #![no_std]
-
 extern crate alloc;
+
+pub mod dma;
+pub mod pci;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use dma::virt_to_phys;
 use nc_arch::{inb, inl, outb, outl, outw};
+use pci::{enumerate_pci_bus, DeviceLifecycleState, PciBar, PciEndpoint};
 
 pub const EFRA_MAGIC: [u8; 4] = *b"EFRA";
 pub const EFRA_VERSION: u32 = 1;
@@ -425,6 +429,8 @@ pub struct HardwareDeviceNode {
     pub device_id: u16,
     pub pci_class: u8,
     pub pci_subclass: u8,
+    pub prog_if: u8,
+    pub revision_id: u8,
     pub class: EfraClass,
     pub bound_driver_id: String,
     pub bound_driver_name: String,
@@ -432,6 +438,8 @@ pub struct HardwareDeviceNode {
     pub driver_file: String,
     pub is_generic_binding: bool,
     pub optimized: bool,
+    pub lifecycle: DeviceLifecycleState,
+    pub bars: [PciBar; 6],
 }
 
 fn pci_read_32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
@@ -509,6 +517,7 @@ pub struct DriverRegistry {
     pub environment: HardwareEnvironment,
     pub drivers: Vec<EfraDriverPackage>,
     pub devices: Vec<HardwareDeviceNode>,
+    pub pci_endpoints: Vec<PciEndpoint>,
     pub write_combining_active: bool,
     pub status_log: String,
 }
@@ -519,8 +528,9 @@ impl DriverRegistry {
             environment: HardwareEnvironment::BareMetalPc,
             drivers: Vec::new(),
             devices: Vec::new(),
+            pci_endpoints: Vec::new(),
             write_combining_active: true,
-            status_log: String::from("Generic .efra surucu tabani hazirlaniyor..."),
+            status_log: String::from("Generic .efra surucu ve PCI/DMA tabani hazirlaniyor..."),
         };
         for pkg in builtin_efra_packages() {
             reg.drivers.push(pkg);
@@ -529,72 +539,84 @@ impl DriverRegistry {
         reg
     }
 
+    /// AHCI (01:06), NVMe (01:08) veya Ethernet (02:00) sürücülerinin PCI cihazlarını bulması için
+    pub fn find_pci_by_class(&self, class_code: u8, subclass: u8) -> Vec<PciEndpoint> {
+        self.pci_endpoints
+            .iter()
+            .copied()
+            .filter(|ep| ep.class_code == class_code && ep.subclass == subclass)
+            .collect()
+    }
+
     pub fn optimize_and_scan(&mut self) {
         self.write_combining_active = true;
         self.devices.clear();
+        self.pci_endpoints = enumerate_pci_bus();
 
         let mut found_vbox = false;
         let mut found_qemu = false;
 
-        for bus in 0..=8u8 {
-            for dev in 0..32u8 {
-                for func in 0..8u8 {
-                    let vd = pci_read_32(bus, dev, func, 0x00);
-                    let vendor = (vd & 0xFFFF) as u16;
-                    let device = ((vd >> 16) & 0xFFFF) as u16;
-                    if vendor == 0xFFFF || vendor == 0x0000 {
-                        if func == 0 {
-                            break;
-                        }
-                        continue;
-                    }
-                    if vendor == 0x80EE {
-                        found_vbox = true;
-                    }
-                    if vendor == 0x1234 || vendor == 0x1AF4 {
-                        found_qemu = true;
-                    }
+        let total_endpoints = self.pci_endpoints.len();
+        for i in 0..total_endpoints {
+            let ep_loc = self.pci_endpoints[i].loc;
+            let vendor_id = self.pci_endpoints[i].vendor_id;
+            let device_id = self.pci_endpoints[i].device_id;
+            let class_code = self.pci_endpoints[i].class_code;
+            let subclass = self.pci_endpoints[i].subclass;
+            let prog_if = self.pci_endpoints[i].prog_if;
+            let revision_id = self.pci_endpoints[i].revision_id;
+            let bars = self.pci_endpoints[i].bars;
 
-                    let class_reg = pci_read_32(bus, dev, func, 0x08);
-                    let base_class = ((class_reg >> 24) & 0xFF) as u8;
-                    let sub_class = ((class_reg >> 16) & 0xFF) as u8;
+            if vendor_id == 0x80EE {
+                found_vbox = true;
+            }
+            if vendor_id == 0x1234 || vendor_id == 0x1AF4 {
+                found_qemu = true;
+            }
 
-                    if base_class == 0x01 || base_class == 0x02 || base_class == 0x03 || base_class == 0x04 {
-                        let cmd = pci_read_32(bus, dev, func, 0x04);
-                        pci_write_32(bus, dev, func, 0x04, cmd | 0x07);
-                    }
+            let efra_class = classify_pci(class_code, subclass);
+            let (drv_id, drv_name, drv_ver, drv_file, is_gen) = self.match_driver(
+                efra_class,
+                vendor_id,
+                device_id,
+                class_code,
+                subclass,
+            );
 
-                    if self.devices.len() < 12 {
-                        let efra_class = classify_pci(base_class, sub_class);
-                        let hw_name = String::from(describe_pci_device(vendor, device, base_class, sub_class));
-                        let slot_label = alloc::format!("PCI {:02X}:{:02X}.{}", bus, dev, func);
-                        let (drv_id, drv_name, drv_ver, drv_file, is_gen) =
-                            self.match_driver(efra_class, vendor, device, base_class, sub_class);
+            self.pci_endpoints[i].state = DeviceLifecycleState::DriverMatched;
 
-                        self.devices.push(HardwareDeviceNode {
-                            slot_label,
-                            hw_name,
-                            vendor_id: vendor,
-                            device_id: device,
-                            pci_class: base_class,
-                            pci_subclass: sub_class,
-                            class: efra_class,
-                            bound_driver_id: drv_id,
-                            bound_driver_name: drv_name,
-                            bound_driver_version: drv_ver,
-                            driver_file: drv_file,
-                            is_generic_binding: is_gen,
-                            optimized: true,
-                        });
-                    }
-
-                    if func == 0 {
-                        let header_type = ((pci_read_32(bus, dev, 0, 0x0C) >> 16) & 0xFF) as u8;
-                        if (header_type & 0x80) == 0 {
-                            break;
-                        }
-                    }
-                }
+            if self.devices.len() < 24 {
+                let hw_name = String::from(describe_pci_device(
+                    vendor_id,
+                    device_id,
+                    class_code,
+                    subclass,
+                ));
+                let slot_label = alloc::format!(
+                    "PCI {:02X}:{:02X}.{}",
+                    ep_loc.bus,
+                    ep_loc.dev,
+                    ep_loc.func
+                );
+                self.devices.push(HardwareDeviceNode {
+                    slot_label,
+                    hw_name,
+                    vendor_id,
+                    device_id,
+                    pci_class: class_code,
+                    pci_subclass: subclass,
+                    prog_if,
+                    revision_id,
+                    class: efra_class,
+                    bound_driver_id: drv_id,
+                    bound_driver_name: drv_name,
+                    bound_driver_version: drv_ver,
+                    driver_file: drv_file,
+                    is_generic_binding: is_gen,
+                    optimized: true,
+                    lifecycle: DeviceLifecycleState::DriverMatched,
+                    bars,
+                });
             }
         }
 
@@ -607,6 +629,8 @@ impl DriverRegistry {
             device_id: 0x0303,
             pci_class: 0x09,
             pci_subclass: 0x00,
+            prog_if: 0x00,
+            revision_id: 0x01,
             class: EfraClass::Input,
             bound_driver_id: in_id,
             bound_driver_name: in_name,
@@ -614,6 +638,8 @@ impl DriverRegistry {
             driver_file: in_file,
             is_generic_binding: in_gen,
             optimized: true,
+            lifecycle: DeviceLifecycleState::Operational,
+            bars: [PciBar::None; 6],
         });
 
         self.environment = if found_vbox {
@@ -625,9 +651,9 @@ impl DriverRegistry {
         };
 
         self.status_log = alloc::format!(
-            "{} algilandi | {} donanim .efra tabanina baglandi (PAT WC aktif).",
+            "{} algilandi | {} PCI fonksiyonu kesfedildi (Guvenli BAR/DMA hazir).",
             self.environment.label(),
-            self.devices.len()
+            self.pci_endpoints.len()
         );
     }
 
@@ -824,14 +850,23 @@ pub fn play_hardware_startup_chime() {
                         }
 
                         // DMA Buffer Descriptor List (BDL) ayarla
-                        let pcm_phys = core::ptr::addr_of!(AC97_PCM_BUF) as u32;
-                        let bdl_phys = core::ptr::addr_of!(AC97_BDL) as u32;
+                        let Some(pcm_phys64) = virt_to_phys(core::ptr::addr_of!(AC97_PCM_BUF) as usize) else {
+                            return;
+                        };
+                        let Some(bdl_phys64) = virt_to_phys(core::ptr::addr_of!(AC97_BDL) as usize) else {
+                            return;
+                        };
+                        if pcm_phys64 > 0xFFFF_FFFF || bdl_phys64 > 0xFFFF_FFFF {
+                            return;
+                        }
+                        let pcm_phys = pcm_phys64 as u32;
+                        let bdl_phys = bdl_phys64 as u32;
+
                         AC97_BDL[0] = Ac97BdlEntry {
                             addr: pcm_phys,
                             length: 48000, // sample sayisi
                             flags: 0x8000, // IOC
                         };
-
                         outb(nabm_bar + 0x1B, 0x02); // PCM Out Reset
                         outl(nabm_bar + 0x10, bdl_phys); // BDL adresi
                         outb(nabm_bar + 0x15, 0); // Last Valid Index = 0

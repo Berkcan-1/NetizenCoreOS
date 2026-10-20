@@ -162,6 +162,7 @@ fn page_titles(lang: Language, index: usize) -> (&'static str, &'static str) {
 }
 
 pub fn save_locale_config(lang: Language, kbd: KeyboardLayout) {
+    nc_fs::set_vfs_caller(nc_fs::CALLER_SETTINGS);
     let mut vfs = VfsManager::new();
     let _ = vfs.create_dir_path("/data/system");
     let content = alloc::format!("lang={}\nkbd={}\n", lang as u8, kbd as u8);
@@ -169,6 +170,7 @@ pub fn save_locale_config(lang: Language, kbd: KeyboardLayout) {
         let _ = vfs.create_dir_path("/ram/system");
         let _ = vfs.write_file_path("/ram/system/locale.cfg", content.as_bytes());
     }
+    nc_fs::set_vfs_caller(nc_fs::CALLER_KERNEL);
 }
 
 impl SettingsApp {
@@ -190,26 +192,28 @@ impl SettingsApp {
     }
 
     fn save_efra_package_to_vfs(&mut self, pkg: &EfraDriverPackage) {
-        let mut vfs = VfsManager::new();
-        let _ = vfs.create_dir_path("/data/drivers");
-        let full_path = alloc::format!("/data/drivers/{}", pkg.manifest.file_name);
-        let raw = pkg.serialize();
-        if vfs.write_file_path(&full_path, &raw).is_ok() {
-            self.efra_status_note = alloc::format!(
-                "'{}' ({} B) -> /data/drivers",
-                pkg.manifest.file_name,
-                raw.len()
-            );
-        } else {
-            let _ = vfs.create_dir_path("/ram/drivers");
-            let ram_path = alloc::format!("/ram/drivers/{}", pkg.manifest.file_name);
-            let _ = vfs.write_file_path(&ram_path, &raw);
-            self.efra_status_note = alloc::format!(
-                "'{}' -> /ram/drivers",
-                pkg.manifest.file_name
-            );
-        }
+    nc_fs::set_vfs_caller(nc_fs::CALLER_SETTINGS);
+    let mut vfs = VfsManager::new();
+    let _ = vfs.create_dir_path("/data/drivers");
+    let full_path = alloc::format!("/data/drivers/{}", pkg.manifest.file_name);
+    let raw = pkg.serialize();
+    if vfs.write_file_path(&full_path, &raw).is_ok() {
+        self.efra_status_note = alloc::format!(
+            "'{}' ({} B) -> /data/drivers [DysonSphere Onayli]",
+            pkg.manifest.file_name,
+            raw.len()
+        );
+    } else {
+        let _ = vfs.create_dir_path("/ram/drivers");
+        let ram_path = alloc::format!("/ram/drivers/{}", pkg.manifest.file_name);
+        let _ = vfs.write_file_path(&ram_path, &raw);
+        self.efra_status_note = alloc::format!(
+            "'{}' -> /ram/drivers [DysonSphere Onayli]",
+            pkg.manifest.file_name
+        );
     }
+    nc_fs::set_vfs_caller(nc_fs::CALLER_KERNEL);
+}
 
     fn sync_efra_from_vfs(&mut self) {
         let mut vfs = VfsManager::new();

@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod cookies;
 mod css;
 mod dom;
 mod html;
@@ -26,9 +27,10 @@ use nc_ui::{
     text_style, ACCENT_BG, PANEL_BORDER, PANEL_FILL, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY, WHITE,
 };
 
+use crate::cookies::CookieJar;
 use crate::css::Stylesheet;
 use crate::dom::{DomTree, NodeType};
-use crate::html::{sanitize_text, HtmlParser};
+use crate::html::{sanitize_text, HtmlParser, MAX_HTML_BYTES};
 use crate::image::DecodedImage;
 use crate::jsdom::{create_runtime, pending_scripts, pump_step, run_js_call, run_script, JsHost};
 use crate::layout::{LayoutBox, LayoutEngine, WidgetKind};
@@ -36,7 +38,6 @@ use crate::url::{build_form_url, normalize_input_url, resolve_url};
 
 const MAX_SUGGESTIONS: usize = 6;
 const SUGGEST_DEBOUNCE_TICKS: u32 = 12;
-const MAX_HTML_BYTES: usize = 3 * 1024 * 1024;
 const MAX_CSS_TRIED: usize = 40;
 const MAX_IMG_TRIED: usize = 60;
 const MAX_SCRIPTS: usize = 80;
@@ -96,6 +97,7 @@ pub struct BrowserApp {
     history: Vec<String>,
     hist_pos: usize,
     tree: Rc<RefCell<DomTree>>,
+    cookies: Rc<RefCell<CookieJar>>,
     stylesheet: Stylesheet,
     css_external: Vec<String>,
     images: Vec<(String, DecodedImage)>,
@@ -353,8 +355,7 @@ impl BrowserApp {
             q.trim(),
         );
         self.active = Active::Suggest;
-        let net = net_global();
-        self.client.navigate(&url, net);
+        self.nav(&url);
     }
 }
 
@@ -371,6 +372,7 @@ impl BrowserApp {
             history: Vec::new(),
             hist_pos: 0,
             tree: Rc::new(RefCell::new(DomTree::new())),
+            cookies: Rc::new(RefCell::new(CookieJar::new())),
             stylesheet: Stylesheet::new(),
             css_external: Vec::new(),
             images: Vec::new(),
@@ -489,6 +491,9 @@ impl BrowserApp {
         ));
         {
             let t = self.tree.borrow();
+            for d in t.diagnostics.iter() {
+                s.push_str(&alloc::format!("<p style=\"color:#b45309\">PARSER: {}</p>", html_escape(d)));
+            }
             let text = t.text_content(t.root);
             let snippet: String = text.split_whitespace().collect::<Vec<&str>>().join(" ").chars().take(260).collect();
             s.push_str(&alloc::format!("<p>page text: {}</p>", html_escape(&snippet)));
@@ -565,8 +570,14 @@ impl BrowserApp {
         self.img_queue.clear();
         self.view_source = view_source;
         self.active = Active::Main;
+        self.nav(&target);
+    }
+
+    /// Starts a GET on the page-load client, attaching matching cookies.
+    fn nav(&mut self, url: &str) {
+        self.client.cookie_header = self.cookies.borrow().header_for(url);
         let net = net_global();
-        self.client.navigate(&target, net);
+        self.client.navigate(url, net);
     }
 
     fn go_back(&mut self) {
@@ -851,7 +862,7 @@ impl BrowserApp {
 
     fn ensure_js(&mut self) {
         if self.js.is_none() {
-            let (it, host) = create_runtime(self.tree.clone(), &self.current_url);
+            let (it, host) = create_runtime(self.tree.clone(), &self.current_url, self.cookies.clone());
             self.js = Some(it);
             self.jshost = Some(host);
         }
@@ -936,8 +947,7 @@ impl BrowserApp {
                     }
                     self.ensure_js();
                     self.active = Active::Script(item.node);
-                    let net = net_global();
-                    self.client.navigate(&full, net);
+                    self.nav(&full);
                     return true;
                 }
             }
@@ -947,8 +957,7 @@ impl BrowserApp {
     fn start_next_fetch(&mut self) {
         if let Some(css_url) = self.css_queue.pop() {
             self.active = Active::Css;
-            let net = net_global();
-            self.client.navigate(&css_url, net);
+            self.nav(&css_url);
             return;
         }
         if self.advance_scripts() {
@@ -957,14 +966,12 @@ impl BrowserApp {
         self.queue_new_resources();
         if let Some(css_url) = self.css_queue.pop() {
             self.active = Active::Css;
-            let net = net_global();
-            self.client.navigate(&css_url, net);
+            self.nav(&css_url);
             return;
         }
         if let Some((key, full)) = self.img_queue.pop() {
             self.active = Active::Img(key);
-            let net = net_global();
-            self.client.navigate(&full, net);
+            self.nav(&full);
             return;
         }
         self.active = Active::None;
@@ -982,6 +989,13 @@ impl BrowserApp {
 
         let done = matches!(self.client.state, HttpState::Complete | HttpState::Failed);
         if done && self.active != Active::None {
+            if !self.client.set_cookies.is_empty() {
+                let jar = self.cookies.clone();
+                for (host_name, c) in self.client.set_cookies.iter() {
+                    jar.borrow_mut().store_from_response(c, host_name);
+                }
+                self.client.set_cookies.clear();
+            }
             let ok = self.client.state == HttpState::Complete;
             let current = self.active.clone();
             match current {
@@ -994,7 +1008,11 @@ impl BrowserApp {
                         }
                     } else {
                         let url = self.url_input.clone();
-                        self.show_error(&url, "NETWORK OR TLS ERROR");
+                        let reason = match self.client.tls_error {
+                            Some(e) => alloc::format!("SECURE CONNECTION REFUSED: {}", e),
+                            None => String::from("NETWORK OR TLS ERROR"),
+                        };
+                        self.show_error(&url, &reason);
                     }
                 }
                 Active::Css => {
@@ -1135,7 +1153,34 @@ impl BrowserApp {
     }
 
 
-    fn ensure_layout(&mut self, viewport_w: i32) -> bool {
+    /// Feeds pointer position and keyboard focus into the DOM so `:hover` / `:focus` / `:focus-within`
+    /// rules can match. Only does work for pages whose stylesheet actually uses those selectors.
+    fn sync_pointer_state(&mut self, input: &Input, viewport: Rect) {
+        if !self.stylesheet.has_state_rules {
+            return;
+        }
+        let mut new_hover: Option<usize> = None;
+        if let Some(pointer) = input.pointer {
+            if inside(viewport, pointer.x, pointer.y) {
+                let rel_x = pointer.x - viewport.x;
+                let rel_y = pointer.y - viewport.y + self.scroll_y;
+                new_hover = self.hits.iter().rev().find(|h| inside(h.rect, rel_x, rel_y)).map(|h| h.node);
+            }
+        }
+        let new_focus = self.focused_input;
+        let changed = {
+            let mut t = self.tree.borrow_mut();
+            let c = t.hover_node != new_hover || t.focus_node != new_focus;
+            t.hover_node = new_hover;
+            t.focus_node = new_focus;
+            c
+        };
+        if changed {
+            self.layout_dirty = true;
+        }
+    }
+
+    fn ensure_layout(&mut self, viewport_w: i32, viewport_h: i32) -> bool {
         let width_changed = self.last_layout_w != viewport_w;
         if !self.layout_dirty && !width_changed && self.layout_built {
             return false;
@@ -1143,6 +1188,8 @@ impl BrowserApp {
         if !width_changed && self.layout_built && self.tick.wrapping_sub(self.last_layout_tick) < LAYOUT_MIN_TICKS {
             return false;
         }
+        // @media rules are evaluated against the real viewport, not a fixed desktop width.
+        self.stylesheet.set_viewport(viewport_w, viewport_h);
         let mut imgs = core::mem::take(&mut self.images);
         self.layout = LayoutEngine::build(&self.tree.borrow(), &self.stylesheet, &mut imgs, viewport_w);
         self.images = imgs;
@@ -1393,6 +1440,7 @@ impl App for BrowserApp {
     fn update(&mut self, ctx: &mut Context, input: &Input) -> Update {
         let unit = ctx.unit;
         self.tick = self.tick.wrapping_add(1);
+        self.cookies.borrow_mut().tick(16.0);
         let mut redraw = self.pump_network();
         if self.js_frame() {
             redraw = true;
@@ -1404,7 +1452,8 @@ impl App for BrowserApp {
         }
 
         let viewport = Self::viewport_rect(input.area, unit);
-        if self.ensure_layout(viewport.width) {
+        self.sync_pointer_state(input, viewport);
+        if self.ensure_layout(viewport.width, viewport.height) {
             redraw = true;
         }
         let max_scroll = self.max_scroll(viewport);
@@ -1532,7 +1581,7 @@ impl App for BrowserApp {
             self.go(&full, true);
             redraw = true;
         }
-        if self.ensure_layout(viewport.width) {
+        if self.ensure_layout(viewport.width, viewport.height) {
             redraw = true;
         }
 
@@ -1588,7 +1637,7 @@ impl App for BrowserApp {
         let badge_w = (unit * 16).min(status_bar.width / 2);
         let badge_h = status_bar.height - unit / 2;
         let title_style = text_style(unit * 50 / 100, 30);
-        let title = fit_head(&self.page_title, &title_style, badge_w - unit);
+        let title = fit_head(&sanitize_text(&self.page_title), &title_style, badge_w - unit);
         draw_badge(
             canvas,
             Rect::new(

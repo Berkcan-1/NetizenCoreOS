@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+use crate::cookies::CookieJar;
 use crate::dom::{DomTree, NodeType};
 use crate::sel;
 use alloc::collections::VecDeque;
@@ -20,10 +21,14 @@ pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36
 pub struct NetReq {
     pub id: u32,
     pub url: String,
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
 }
 
 pub struct JsHost {
     pub tree: Rc<RefCell<DomTree>>,
+    pub cookies: Rc<RefCell<CookieJar>>,
     pub dirty: Cell<bool>,
     pub location: RefCell<String>,
     pub navigate: RefCell<Option<String>>,
@@ -354,10 +359,36 @@ fn h_error(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
 fn h_net(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
     let h = H!(it);
     let url = astr(it, a, 0)?;
+    let method = astr(it, a, 1)?;
+    let header_text = astr(it, a, 2)?;
+    let body = astr(it, a, 3)?;
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for line in header_text.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if headers.len() < 40 {
+                headers.push((String::from(k.trim()), String::from(v.trim())));
+            }
+        }
+    }
     let id = h.next_id.get();
     h.next_id.set(id + 1);
-    h.queue.borrow_mut().push_back(NetReq { id, url });
+    h.queue.borrow_mut().push_back(NetReq { id, url, method, headers, body: body.into_bytes() });
     Ok(Value::Num(id as f64))
+}
+
+fn h_get_cookie(it: &mut Interp, _t: &Value, _a: &[Value]) -> Res<Value> {
+    let h = H!(it);
+    let loc = h.location.borrow().clone();
+    let s = h.cookies.borrow().script_visible(&loc);
+    Ok(Value::string(s))
+}
+
+fn h_set_cookie(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
+    let h = H!(it);
+    let text = astr(it, a, 0)?;
+    let loc = h.location.borrow().clone();
+    h.cookies.borrow_mut().set_from_script(&text, &loc);
+    Ok(Value::Undefined)
 }
 
 fn register(it: &mut Interp, name: &str, fns: &[(&str, NativeFn)]) {
@@ -370,11 +401,12 @@ fn register(it: &mut Interp, name: &str, fns: &[(&str, NativeFn)]) {
 }
 
 /// Creates a fresh JS runtime bound to `tree`, loads the DOM/BOM prelude.
-pub fn create_runtime(tree: Rc<RefCell<DomTree>>, url: &str) -> (Interp, Rc<JsHost>) {
+pub fn create_runtime(tree: Rc<RefCell<DomTree>>, url: &str, cookies: Rc<RefCell<CookieJar>>) -> (Interp, Rc<JsHost>) {
     let mut it = Interp::new();
     it.max_depth = 60;
     let host = Rc::new(JsHost {
         tree,
+        cookies,
         dirty: Cell::new(false),
         location: RefCell::new(String::from(url)),
         navigate: RefCell::new(None),
@@ -429,6 +461,8 @@ pub fn create_runtime(tree: Rc<RefCell<DomTree>>, url: &str) -> (Interp, Rc<JsHo
             ("userAgent", h_user_agent as NativeFn),
             ("error", h_error as NativeFn),
             ("net", h_net as NativeFn),
+            ("getCookie", h_get_cookie as NativeFn),
+            ("setCookie", h_set_cookie as NativeFn),
         ],
     );
     if let Err(e) = it.run(PRELUDE) {
@@ -452,14 +486,16 @@ pub fn pump_step(it: &mut Interp) -> bool {
         Some(h) => h,
         None => return false,
     };
-    let mut finished: Option<(NetReq, bool, u16, String, String)> = None;
+    let mut finished: Option<(NetReq, bool, u16, String, String, String)> = None;
+    let mut new_cookies: Vec<(String, String)> = Vec::new();
     {
         let mut client = h.client.borrow_mut();
         let mut cur = h.current.borrow_mut();
         if cur.is_none() {
             let next = h.queue.borrow_mut().pop_front();
             if let Some(r) = next {
-                client.navigate(&r.url, net_global());
+                client.cookie_header = h.cookies.borrow().header_for(&r.url);
+                client.request(&r.method, &r.url, &r.headers, &r.body, net_global());
                 *cur = Some(r);
             }
         }
@@ -471,15 +507,33 @@ pub fn pump_step(it: &mut Interp) -> bool {
                 let status = client.status_code;
                 let body = if ok { client.html_body.clone() } else { String::new() };
                 let url = client_final_url(&client);
+                new_cookies = client.set_cookies.clone();
+                let mut header_text = String::new();
+                for (k, v) in client.last_headers.iter() {
+                    header_text.push_str(k);
+                    header_text.push_str(": ");
+                    header_text.push_str(v);
+                    header_text.push('\n');
+                }
                 if let Some(r) = cur.take() {
-                    finished = Some((r, ok, status, body, url));
+                    finished = Some((r, ok, status, body, url, header_text));
                 }
             }
         }
     }
-    if let Some((r, ok, status, body, url)) = finished {
+    for (host_name, c) in new_cookies.iter() {
+        h.cookies.borrow_mut().store_from_response(c, host_name);
+    }
+    if let Some((r, ok, status, body, url, header_text)) = finished {
         h.completed.set(h.completed.get().wrapping_add(1));
-        let args = [Value::Num(r.id as f64), Value::Bool(ok), Value::Num(status as f64), Value::string(body), Value::string(url)];
+        let args = [
+            Value::Num(r.id as f64),
+            Value::Bool(ok),
+            Value::Num(status as f64),
+            Value::string(body),
+            Value::string(url),
+            Value::string(header_text),
+        ];
         run_js_call(it, "__net_done", &args);
         h.dirty.set(true);
     }

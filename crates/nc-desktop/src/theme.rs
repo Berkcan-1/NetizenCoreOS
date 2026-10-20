@@ -14,15 +14,15 @@ pub const DANGER: u32 = rgb(240, 70, 80);
 pub const BLACK: u32 = rgb(0, 0, 0);
 
 const TILES: [(u32, u32); 9] = [
-    (rgb(255, 132, 160), rgb(236, 44, 96)),
-    (rgb(255, 196, 128), rgb(248, 108, 72)),
-    (rgb(255, 226, 120), rgb(248, 168, 40)),
-    (rgb(126, 242, 196), rgb(28, 186, 132)),
-    (rgb(116, 236, 244), rgb(22, 168, 204)),
-    (rgb(138, 206, 255), rgb(44, 120, 246)),
-    (rgb(176, 156, 255), rgb(104, 84, 238)),
-    (rgb(244, 148, 252), rgb(192, 72, 222)),
-    (rgb(160, 180, 210), rgb(84, 104, 148)),
+    (rgb(255, 180, 195), rgb(220, 78, 114)),
+    (rgb(255, 216, 168), rgb(226, 133, 66)),
+    (rgb(250, 233, 163), rgb(213, 174, 65)),
+    (rgb(166, 235, 207), rgb(50, 171, 136)),
+    (rgb(157, 228, 237), rgb(44, 166, 185)),
+    (rgb(164, 218, 255), rgb(55, 145, 211)),
+    (rgb(151, 190, 249), rgb(62, 111, 211)),
+    (rgb(198, 184, 255), rgb(123, 98, 210)),
+    (rgb(194, 209, 226), rgb(95, 121, 159)),
 ];
 
 pub fn hash_str(s: &str) -> u32 {
@@ -49,15 +49,15 @@ pub fn darken(c: u32, amount: u32) -> u32 {
 pub fn dock_glass(blur: usize, passes: usize) -> Glass {
     Glass {
         tint: WHITE,
-        alpha_top: 92,
-        alpha_bot: 58,
+        alpha_top: 106,
+        alpha_bot: 76,
         blur,
         passes,
-        shadow: 120,
+        shadow: 112,
         shadow_dy: 6,
-        shadow_blur: 26,
-        gloss: 190,
-        edge: 190,
+        shadow_blur: 30,
+        gloss: 178,
+        edge: 210,
         hole: None,
     }
 }

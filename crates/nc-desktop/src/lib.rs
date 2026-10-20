@@ -68,6 +68,8 @@ pub(crate) enum Target {
     DockBody,
     StartButton,
     DockApp(usize),
+    DockPrev,
+    DockNext,
     DockStatus,
     StartPanel,
     StartNode(usize),
@@ -220,6 +222,11 @@ pub struct DesktopState {
     pub(crate) dock_reveal: i32,
     pub(crate) dock_mag: i32,
     pub(crate) dock_focus_x: i32,
+    pub(crate) dock_page: usize,
+    pub(crate) dock_page_from: usize,
+    pub(crate) dock_page_anim: i32,
+    pub(crate) dock_page_direction: i32,
+    dock_follow_end: bool,
     pub(crate) pointer_x: i32,
     pub(crate) pointer_y: i32,
     pub(crate) context_menu: Option<((i32, i32), ContextMenuKind)>,
@@ -301,6 +308,11 @@ impl DesktopState {
             dock_reveal: ONE,
             dock_mag: 0,
             dock_focus_x: 0,
+            dock_page: 0,
+            dock_page_from: 0,
+            dock_page_anim: ONE,
+            dock_page_direction: 1,
+            dock_follow_end: false,
             pointer_x: 512,
             pointer_y: 384,
             context_menu: None,
@@ -331,6 +343,10 @@ impl DesktopState {
         for app in apps {
             state.install_app(app);
         }
+        state.dock_page = 0;
+        state.dock_page_from = 0;
+        state.dock_page_anim = ONE;
+        state.dock_follow_end = false;
 
         if let Ok(cfg_bytes) = state.vfs.read_file_path("/data/system/locale.cfg") {
             if let Ok(cfg_str) = core::str::from_utf8(&cfg_bytes) {
@@ -722,6 +738,7 @@ impl DesktopState {
             icon_cell: None,
         });
         self.order.push(index);
+        self.dock_follow_end = true;
         self.dirty = true;
     }
 
@@ -776,6 +793,16 @@ impl DesktopState {
     }
 
     pub(crate) fn dock_layout(&self, width: i32, height: i32, unit: i32) -> DockLayout {
+        self.dock_layout_for_page(width, height, unit, self.dock_page)
+    }
+
+    pub(crate) fn dock_layout_for_page(
+        &self,
+        width: i32,
+        height: i32,
+        unit: i32,
+        page: usize,
+    ) -> DockLayout {
         layout::dock_layout(
             width,
             height,
@@ -785,25 +812,54 @@ impl DesktopState {
             self.dock_focus_x,
             self.dock_mag,
             self.dock_full_t(),
+            page,
         )
     }
 
     fn dock_tile_rect(&self, app: usize, width: i32, height: i32, unit: i32) -> Rect {
         let items = self.dock_indices();
-        let dl = layout::dock_layout(
-            width,
-            height,
-            unit,
-            items.len(),
-            ONE,
-            -100000,
-            0,
-            self.dock_full_t(),
+        let tile = layout::dock_tile(unit);
+        let fallback = Rect::new(
+            width / 2 - tile / 2,
+            height - dock_height(unit),
+            tile,
+            tile,
         );
-        match items.iter().position(|&i| i == app) {
-            Some(pos) => dl.tiles[pos],
-            None => Rect::new(width / 2 - dl.tile / 2, dl.dock.y, dl.tile, dl.tile),
+        let Some(pos) = items.iter().position(|&i| i == app) else {
+            return fallback;
+        };
+        let current = self.dock_layout(width, height, unit);
+        let page = if current.visible_count > 0 {
+            pos / current.visible_count
+        } else {
+            0
+        };
+        let dl = if page == current.page_index {
+            current
+        } else {
+            self.dock_layout_for_page(width, height, unit, page)
+        };
+        let local = pos.saturating_sub(dl.first_index);
+        dl.tiles.get(local).copied().unwrap_or(fallback)
+    }
+
+    fn step_dock_page(&mut self, delta: i32, width: i32, height: i32, unit: i32) {
+        let dl = self.dock_layout(width, height, unit);
+        if dl.page_count < 2 {
+            return;
         }
+        let next = if delta >= 0 {
+            (dl.page_index + 1) % dl.page_count
+        } else if dl.page_index == 0 {
+            dl.page_count - 1
+        } else {
+            dl.page_index - 1
+        };
+        self.dock_page_from = dl.page_index;
+        self.dock_page = next;
+        self.dock_page_direction = if delta >= 0 { 1 } else { -1 };
+        self.dock_page_anim = 0;
+        self.dirty = true;
     }
 
     pub(crate) fn bounce_offset(&self, app: usize, unit: i32) -> i32 {
@@ -1065,6 +1121,7 @@ impl DesktopState {
             return;
         }
         if !self.apps[app].window.open {
+            let was_in_dock = self.apps[app].pinned_dock;
             let usable = self.usable(width, height, unit);
             let info = self.apps[app].app.info();
             let (w, h) = window_size(info.width_units, info.height_units, unit, usable);
@@ -1085,6 +1142,9 @@ impl DesktopState {
             self.apps[app].app.opened(&mut ctx);
             self.apply_settings(ctx.settings);
             self.raise(app);
+            if !was_in_dock {
+                self.dock_follow_end = true;
+            }
             self.dirty = true;
             return;
         }
@@ -1294,9 +1354,21 @@ impl DesktopState {
             if inside(dl.start, x, y) {
                 return Target::StartButton;
             }
-            for (pos, &app_idx) in items.iter().enumerate() {
-                if inside(dl.tiles[pos], x, y) {
-                    return Target::DockApp(app_idx);
+            if let Some(prev) = dl.prev {
+                if inside(prev, x, y) {
+                    return Target::DockPrev;
+                }
+            }
+            if let Some(next) = dl.next {
+                if inside(next, x, y) {
+                    return Target::DockNext;
+                }
+            }
+            for (pos, tile) in dl.tiles.iter().enumerate() {
+                if let Some(&app_idx) = items.get(dl.first_index + pos) {
+                    if inside(*tile, x, y) {
+                        return Target::DockApp(app_idx);
+                    }
                 }
             }
             if inside(dl.status, x, y) {
@@ -1427,7 +1499,12 @@ impl DesktopState {
                 }
                 match idx {
                     0 => self.open_app(app_idx, width, height, unit),
-                    1 => self.apps[app_idx].pinned_dock = !self.apps[app_idx].pinned_dock,
+                    1 => {
+                        self.apps[app_idx].pinned_dock = !self.apps[app_idx].pinned_dock;
+                        if self.apps[app_idx].pinned_dock {
+                            self.dock_follow_end = true;
+                        }
+                    }
                     2 => self.apps[app_idx].pinned_start = !self.apps[app_idx].pinned_start,
                     3 => self.open_task_manager(width, height, unit),
                     _ => self.close_app(app_idx, width, height),
@@ -1611,6 +1688,9 @@ impl DesktopState {
             }
             Target::PowerReboot => return DesktopAction::Reboot,
             Target::PowerShutdown => return DesktopAction::Shutdown,
+
+            Target::DockPrev => self.step_dock_page(-1, width, height, unit),
+            Target::DockNext => self.step_dock_page(1, width, height, unit),
 
             Target::DockStatus => {
                 let next = if self.volume >= 100 { 0 } else { self.volume as i32 + 10 };
@@ -1847,6 +1927,10 @@ impl DesktopState {
         let leave_ms = self.leave_ms();
         let leave_step = ((dt as i64 * ONE as i64) / leave_ms.max(1) as i64).max(1) as i32;
         let mut dirty = false;
+        if self.dock_page_anim < ONE {
+            self.dock_page_anim = approach(self.dock_page_anim, ONE, dt, 230);
+            dirty = true;
+        }
         for slot in self.apps.iter_mut() {
             let w = &mut slot.window;
             if w.leave > 0 {
@@ -1980,6 +2064,19 @@ impl DesktopState {
         }
         self.uptime_ms = uptime_ms;
 
+        if self.dock_follow_end {
+            let layout = self.dock_layout(width, height, unit);
+            let last_page = layout.page_count.saturating_sub(1);
+            if last_page != layout.page_index {
+                self.dock_page_from = layout.page_index;
+                self.dock_page = last_page;
+                self.dock_page_direction = if last_page >= layout.page_index { 1 } else { -1 };
+                self.dock_page_anim = 0;
+            }
+            self.dock_follow_end = false;
+            self.dirty = true;
+        }
+
         self.advance_animations(dt, mouse, height, unit);
 
         if !matches!(self.modal, DesktopModal::None) {
@@ -2104,6 +2201,7 @@ impl DesktopState {
                 Target::DockApp(app_idx) | Target::StartNode(app_idx) => {
                     self.open_context((mouse.x, mouse.y), ContextMenuKind::AppItem(app_idx));
                 }
+                Target::DockBody | Target::DockPrev | Target::DockNext => {}
                 Target::FsIcon(fs_idx) => {
                     self.selected_icon = Some(DesktopIconId::Fs(fs_idx));
                     self.open_context((mouse.x, mouse.y), ContextMenuKind::FsItem(fs_idx));

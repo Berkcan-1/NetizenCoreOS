@@ -23,6 +23,12 @@ pub struct DomNode {
 pub struct DomTree {
     pub nodes: Vec<DomNode>,
     pub root: usize,
+    /// Parser notes (size/limit truncation etc.), shown on `about:debug`.
+    pub diagnostics: Vec<String>,
+    /// Element currently under the pointer (for `:hover` / `:focus-within` style matching).
+    pub hover_node: Option<usize>,
+    /// Element that has keyboard focus (for `:focus` / `:focus-within`).
+    pub focus_node: Option<usize>,
 }
 
 impl DomTree {
@@ -39,6 +45,9 @@ impl DomTree {
         DomTree {
             nodes: alloc::vec![root_node],
             root: 0,
+            diagnostics: Vec::new(),
+            hover_node: None,
+            focus_node: None,
         }
     }
 

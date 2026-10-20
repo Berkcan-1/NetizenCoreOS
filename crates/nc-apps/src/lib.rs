@@ -52,6 +52,7 @@ fn scan_directory_for_packages(
 }
 
 pub fn builtin() -> Vec<Box<dyn App>> {
+    nc_pkg::init_dysonsphere();
     let mut apps: Vec<Box<dyn App>> = Vec::new();
     let mut installed_ids: Vec<String> = Vec::new();
     let mut vfs = VfsManager::new();

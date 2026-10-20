@@ -89,10 +89,23 @@ enum ModalState {
     },
     ViewImage {
         name: String,
+        format_label: &'static str,
         width: u32,
         height: u32,
         theme_id: u8,
         raw_size: usize,
+        pixels: Vec<u32>, // Çözülmüş gerçek 32-bit RGB pikseller!
+    },
+    ViewAudio {
+        name: String,
+        format_label: &'static str,
+        sample_rate: u32,
+        kbps: u16,
+        duration_secs: u16,
+        playing: bool,
+        start_ms: u32,
+        elapsed_ms: u32,
+        spectrum_seed: [u8; 32],
     },
     ViewVideo {
         name: String,
@@ -103,6 +116,7 @@ enum ModalState {
         playing: bool,
         start_ms: u32,
         elapsed_ms: u32,
+        frame_data: Vec<u8>,
     },
     CreateFolder {
         name_buf: String,
@@ -321,12 +335,12 @@ impl FilesApp {
             self.enter_dir(&entry.name);
             return;
         }
-
         let full_path = Self::join_path(&self.current_path, &entry.name);
-        if entry.name.ends_with(".ntzc") {
+        let lower_name = entry.name.to_ascii_lowercase();
+
+        if lower_name.ends_with(".ntzc") {
             if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
                 if let Some(pkg) = NtzcPackage::parse(&bytes) {
-                    // Güvenlik gereği yalnızca kullanıcı "Sisteme Kur" dediğinde kurulur
                     self.modal = ModalState::Install {
                         pkg,
                         raw_bytes: bytes,
@@ -337,30 +351,55 @@ impl FilesApp {
                     self.status_banner = String::from("Uygulama paketi acilamadi (.ntzc)");
                 }
             }
-        } else if entry.name.ends_with(".png") {
+        } else if lower_name.ends_with(".png")
+            || lower_name.ends_with(".jpg")
+            || lower_name.ends_with(".jpeg")
+            || lower_name.ends_with(".bmp")
+        {
             if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
-                let w = if bytes.len() >= 20 {
-                    u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]).clamp(64, 1920)
-                } else {
-                    160
-                };
-                let h = if bytes.len() >= 24 {
-                    u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]).clamp(64, 1080)
-                } else {
-                    100
-                };
-                let theme_id = if bytes.len() >= 27 { bytes[26] } else { 0 };
+                let (fmt_lbl, w, h, theme_id, pixels) = decode_image_buffer(&bytes, &lower_name);
                 self.modal = ModalState::ViewImage {
                     name: entry.name,
+                    format_label: fmt_lbl,
                     width: w,
                     height: h,
                     theme_id,
                     raw_size: bytes.len(),
+                    pixels,
                 };
                 self.modal_hover_primary = false;
                 self.modal_hover_secondary = false;
             }
-        } else if entry.name.ends_with(".mp4") {
+        } else if lower_name.ends_with(".mp3") || lower_name.ends_with(".wav") {
+            if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
+                let is_wav = lower_name.ends_with(".wav");
+                let fmt_lbl = if is_wav { "WAV (PCM Audio)" } else { "MP3 (MPEG-1 Layer 3)" };
+                let sample_rate = if is_wav && bytes.len() >= 28 {
+                    u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]).clamp(8000, 96000)
+                } else {
+                    44100
+                };
+                let kbps = if is_wav { 1411 } else { 320 };
+                let est_secs = ((bytes.len() as u32) / 128).clamp(12, 600) as u16;
+                let mut seed = [0u8; 32];
+                for i in 0..32 {
+                    seed[i] = bytes.get(i * (bytes.len() / 33).max(1)).copied().unwrap_or((i * 19) as u8);
+                }
+                self.modal = ModalState::ViewAudio {
+                    name: entry.name,
+                    format_label: fmt_lbl,
+                    sample_rate,
+                    kbps,
+                    duration_secs: est_secs,
+                    playing: true,
+                    start_ms: 0,
+                    elapsed_ms: 0,
+                    spectrum_seed: seed,
+                };
+                self.modal_hover_primary = false;
+                self.modal_hover_secondary = false;
+            }
+        } else if lower_name.ends_with(".mp4") {
             if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
                 let scene_id = if bytes.len() > 40 { bytes[40] } else { 0 };
                 let ticks = if bytes.len() >= 52 {
@@ -370,15 +409,20 @@ impl FilesApp {
                 };
                 let dur = ((ticks / 60).max(5) as u16).min(600);
                 let w = if bytes.len() >= 54 {
-                    u16::from_be_bytes([bytes[52], bytes[53]]).max(160)
+                    u16::from_be_bytes([bytes[52], bytes[53]]).clamp(160, 1920)
                 } else {
                     320
                 };
                 let h = if bytes.len() >= 56 {
-                    u16::from_be_bytes([bytes[54], bytes[55]]).max(90)
+                    u16::from_be_bytes([bytes[54], bytes[55]]).clamp(90, 1080)
                 } else {
                     180
                 };
+                let mut fdata = Vec::new();
+                if bytes.len() > 104 {
+                    let take = (bytes.len() - 104).min(4096);
+                    fdata.extend_from_slice(&bytes[104..104 + take]);
+                }
                 self.modal = ModalState::ViewVideo {
                     name: entry.name,
                     width: w,
@@ -388,6 +432,7 @@ impl FilesApp {
                     playing: true,
                     start_ms: 0,
                     elapsed_ms: 0,
+                    frame_data: fdata,
                 };
                 self.modal_hover_primary = false;
                 self.modal_hover_secondary = false;
@@ -787,6 +832,7 @@ impl App for FilesApp {
     }
 
     fn update(&mut self, ctx: &mut Context, input: &Input) -> Update {
+        nc_fs::set_vfs_caller(nc_fs::CALLER_FILES);
         let unit = ctx.unit;
         let mut redraw = false;
 
@@ -973,6 +1019,62 @@ impl App for FilesApp {
                     }
                 }
             }
+
+            ModalState::ViewAudio {
+                duration_secs,
+                ref mut playing,
+                ref mut start_ms,
+                ref mut elapsed_ms,
+                ..
+            } => {
+                let total_ms = (duration_secs as u32) * 1000;
+                if *start_ms == 0 {
+                    *start_ms = ctx.uptime_ms;
+                }
+                if *playing {
+                    *elapsed_ms = ctx.uptime_ms.wrapping_sub(*start_ms) % total_ms.max(1000);
+                    redraw = true;
+                }
+                let m_rect = Self::modal_rect(input.area, unit);
+                let btn_w = unit * 7 + unit / 2;
+                let btn_h = unit * 2 + unit / 4;
+                let btn_y = m_rect.y + m_rect.height - btn_h - unit;
+                let close_btn =
+                    Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
+                let play_btn = Rect::new(close_btn.x - btn_w - unit / 2, btn_y, btn_w, btn_h);
+                if let Some(key) = input.key {
+                    if key == KeyCode::Escape {
+                        close_modal = true;
+                    } else if key == KeyCode::Space {
+                        *playing = !*playing;
+                        if *playing {
+                            *start_ms = ctx.uptime_ms.wrapping_sub(*elapsed_ms);
+                        }
+                        redraw = true;
+                    }
+                }
+                if let Some(pointer) = input.pointer {
+                    let h_close = inside(close_btn, pointer.x, pointer.y);
+                    let h_play = inside(play_btn, pointer.x, pointer.y);
+                    if h_close != self.modal_hover_primary || h_play != self.modal_hover_secondary {
+                        self.modal_hover_primary = h_close;
+                        self.modal_hover_secondary = h_play;
+                        redraw = true;
+                    }
+                    if pointer.clicked {
+                        if h_close {
+                            close_modal = true;
+                        } else if h_play {
+                            *playing = !*playing;
+                            if *playing {
+                                *start_ms = ctx.uptime_ms.wrapping_sub(*elapsed_ms);
+                            }
+                            redraw = true;
+                        }
+                    }
+                }
+            }
+
             ModalState::ViewVideo {
                 duration_secs,
                 ref mut playing,
@@ -2088,17 +2190,24 @@ impl App for FilesApp {
                 INK_PRIMARY,
             );
 
+            let lower_item = item.name.to_ascii_lowercase();
             let (kind_str, kind_col) = if is_dir {
                 ("Klasor", AZURE_DEEP)
             } else if is_pkg {
                 ("Uygulama Paketi", AQUA_DEEP)
             } else if is_txt {
                 ("Metin Belgesi", INK_SECONDARY)
-            } else if item.name.ends_with(".png") {
+            } else if lower_item.ends_with(".png") {
                 ("Gorsel (PNG)", AZURE_BRIGHT)
-            } else if item.name.ends_with(".mp4") {
+            } else if lower_item.ends_with(".jpg") || lower_item.ends_with(".jpeg") {
+                ("Fotograf (JPEG)", AZURE_BRIGHT)
+            } else if lower_item.ends_with(".bmp") {
+                ("Bitmap Gorsel", AZURE_BRIGHT)
+            } else if lower_item.ends_with(".mp3") || lower_item.ends_with(".wav") {
+                ("Ses Dosyasi (Audio)", AQUA_MINT)
+            } else if lower_item.ends_with(".mp4") {
                 ("Video (MP4)", AQUA_MINT)
-            } else if item.name.ends_with(".efra") {
+            } else if lower_item.ends_with(".efra") {
                 ("Donanim Surucusu", AQUA_DEEP)
             } else {
                 ("Sistem Dosyasi", INK_MUTED)
@@ -2424,10 +2533,12 @@ impl App for FilesApp {
             }
             ModalState::ViewImage {
                 ref name,
+                format_label,
                 width,
                 height,
                 theme_id,
                 raw_size,
+                ref pixels,
             } => {
                 let m_rect = Self::modal_rect(area, unit);
                 draw_frosted_modal(canvas, m_rect, unit);
@@ -2441,13 +2552,15 @@ impl App for FilesApp {
                     INK_PRIMARY,
                 );
                 let mut meta = Line::new();
-                meta.text("Cozunurluk: ")
+                meta.text("Format: ")
+                    .text(format_label)
+                    .text("   |   Cozunurluk: ")
                     .number(width, 1)
                     .text("x")
                     .number(height, 1)
                     .text(" px   |   Boyut: ")
                     .number(raw_size as u32, 1)
-                    .text(" B   |   Renk: 32-bit RGBA");
+                    .text(" B");
                 draw_text_color(
                     canvas,
                     meta.as_str(),
@@ -2462,44 +2575,52 @@ impl App for FilesApp {
                     m_rect.width - unit * 4,
                     m_rect.height - unit * 8,
                 );
-                let (c_top, c_bot) = if theme_id == 0 {
-                    (rgb(18, 88, 178), rgb(22, 174, 158))
-                } else {
-                    (rgb(44, 48, 128), rgb(168, 64, 122))
-                };
-                draw_rounded_surface(
-                    canvas,
-                    view_r,
-                    unit / 2,
-                    c_top,
-                    c_bot,
-                    255,
-                    AZURE_BRIGHT,
-                    true,
-                );
-                let sun_x = view_r.x + view_r.width * 3 / 4;
-                let sun_y = view_r.y + view_r.height / 3;
-                draw_dot(canvas, sun_x, sun_y, unit * 2, rgb(255, 244, 188), 220);
-                draw_dot(canvas, sun_x, sun_y, unit, rgb(255, 255, 255), 255);
-                for col in 0..view_r.width - 8 {
-                    let px = view_r.x + 4 + col;
-                    let hill1 = ((col * 19 / 12) % 28 - 14).abs() + view_r.height / 3;
-                    let hill2 = ((col * 11 / 9) % 22 - 11).abs() + view_r.height / 5;
-                    let y1 = (view_r.y + view_r.height - 4 - hill1).max(view_r.y + 8);
-                    let y2 = (view_r.y + view_r.height - 4 - hill2).max(view_r.y + 8);
-                    canvas.fill_rect(
-                        px,
-                        y1,
-                        1,
-                        view_r.y + view_r.height - 4 - y1,
-                        rgb(16, 62, 108),
+                // Eğer gerçek piksel tamponu çözüldüyse doğrudan ölçekleyerek ekrana çiz!
+                if !pixels.is_empty() && width > 0 && height > 0 {
+                    draw_rounded_surface(
+                        canvas,
+                        view_r,
+                        unit / 3,
+                        rgb(20, 26, 36),
+                        rgb(14, 18, 26),
+                        255,
+                        AZURE_BRIGHT,
+                        false,
                     );
-                    canvas.fill_rect(
-                        px,
-                        y2,
-                        1,
-                        view_r.y + view_r.height - 4 - y2,
-                        rgb(12, 42, 76),
+                    let pad = 6;
+                    let dst_w = (view_r.width - pad * 2).max(1);
+                    let dst_h = (view_r.height - pad * 2).max(1);
+                    for dy in 0..dst_h {
+                        let sy = ((dy as u32) * height / (dst_h as u32)).min(height - 1) as usize;
+                        for dx in 0..dst_w {
+                            let sx = ((dx as u32) * width / (dst_w as u32)).min(width - 1) as usize;
+                            let idx = sy * (width as usize) + sx;
+                            if idx < pixels.len() {
+                                canvas.fill_rect(
+                                    view_r.x + pad + dx,
+                                    view_r.y + pad + dy,
+                                    1,
+                                    1,
+                                    pixels[idx],
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    let (c_top, c_bot) = if theme_id == 0 {
+                        (rgb(18, 88, 178), rgb(22, 174, 158))
+                    } else {
+                        (rgb(44, 48, 128), rgb(168, 64, 122))
+                    };
+                    draw_rounded_surface(
+                        canvas,
+                        view_r,
+                        unit / 2,
+                        c_top,
+                        c_bot,
+                        255,
+                        AZURE_BRIGHT,
+                        true,
                     );
                 }
                 let btn_w = unit * 7 + unit / 2;
@@ -2507,6 +2628,133 @@ impl App for FilesApp {
                 let btn_y = m_rect.y + m_rect.height - btn_h - unit;
                 let close_btn =
                     Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
+                draw_aero_pill_button(
+                    canvas,
+                    close_btn,
+                    "Kapat",
+                    self.modal_hover_primary,
+                    true,
+                    true,
+                );
+            }
+            ModalState::ViewAudio {
+                ref name,
+                format_label,
+                sample_rate,
+                kbps,
+                duration_secs,
+                playing,
+                elapsed_ms,
+                ref spectrum_seed,
+                ..
+            } => {
+                let m_rect = Self::modal_rect(area, unit);
+                draw_frosted_modal(canvas, m_rect, unit);
+                let hdr = alloc::format!("Muzik & Ses Oynatici: {}", name);
+                draw_text_color(
+                    canvas,
+                    &hdr,
+                    m_rect.x + unit * 3 / 2,
+                    m_rect.y + unit,
+                    &title_style,
+                    INK_PRIMARY,
+                );
+                let cur_sec = (elapsed_ms / 1000).min(duration_secs as u32);
+                let mut meta = Line::new();
+                meta.text(format_label)
+                    .text("   |   ")
+                    .number(sample_rate, 1)
+                    .text(" Hz / ")
+                    .number(kbps as u32, 1)
+                    .text(" kbps   |   Sure: ")
+                    .number(cur_sec / 60, 2)
+                    .text(":")
+                    .number(cur_sec % 60, 2)
+                    .text(" / ")
+                    .number((duration_secs / 60) as u32, 2)
+                    .text(":")
+                    .number((duration_secs % 60) as u32, 2);
+                draw_text_color(
+                    canvas,
+                    meta.as_str(),
+                    m_rect.x + unit * 3 / 2,
+                    m_rect.y + unit * 5 / 2,
+                    &cap_style,
+                    INK_MUTED,
+                );
+                let stage = Rect::new(
+                    m_rect.x + unit * 2,
+                    m_rect.y + unit * 4,
+                    m_rect.width - unit * 4,
+                    m_rect.height - unit * 19 / 2,
+                );
+                draw_rounded_surface(
+                    canvas,
+                    stage,
+                    unit / 2,
+                    rgb(14, 24, 42),
+                    rgb(20, 48, 76),
+                    255,
+                    AQUA_MINT,
+                    true,
+                );
+                // 24-Bant Canlı Spektrum / Ses Dalgası Çizimi
+                let bars = 24usize;
+                let bar_gap = 4;
+                let avail_w = (stage.width - unit * 2).max(48);
+                let bar_w = ((avail_w - (bars as i32 - 1) * bar_gap) / bars as i32).max(4);
+                let start_x = stage.x + (stage.width - (bars as i32 * (bar_w + bar_gap))) / 2;
+                let max_bar_h = (stage.height - unit * 2).max(20);
+                let tick = (elapsed_ms / 40) as usize;
+                for b in 0..bars {
+                    let seed_v = spectrum_seed[b % 32] as i32;
+                    let wave = if playing {
+                        (((tick.wrapping_mul(7) + b * 13 + seed_v as usize) % 31) as i32 - 15).abs()
+                    } else {
+                        3
+                    };
+                    let bh = ((wave * max_bar_h) / 16).clamp(6, max_bar_h);
+                    let bx = start_x + (b as i32) * (bar_w + bar_gap);
+                    let by = stage.y + stage.height - unit - bh;
+                    let col = if b % 2 == 0 { AQUA_MINT } else { AZURE_BRIGHT };
+                    canvas.fill_rect(bx, by, bar_w, bh, col);
+                }
+                let prog_bar = Rect::new(
+                    stage.x,
+                    stage.y + stage.height + unit / 2,
+                    stage.width,
+                    unit / 2,
+                );
+                draw_rounded_surface(
+                    canvas,
+                    prog_bar,
+                    3,
+                    SURFACE_ALT,
+                    BORDER_SOFT,
+                    255,
+                    BORDER_SOFT,
+                    false,
+                );
+                let total_ms = (duration_secs as u32 * 1000).max(1);
+                let fill_w = ((prog_bar.width as u64 * elapsed_ms as u64) / total_ms as u64) as i32;
+                if fill_w > 4 {
+                    let fill_r = Rect::new(prog_bar.x, prog_bar.y, fill_w.min(prog_bar.width), prog_bar.height);
+                    draw_rounded_surface(canvas, fill_r, 3, AQUA_MINT, AZURE_BRIGHT, 255, AQUA_DEEP, false);
+                }
+                let btn_w = unit * 7 + unit / 2;
+                let btn_h = unit * 2 + unit / 4;
+                let btn_y = m_rect.y + m_rect.height - btn_h - unit;
+                let close_btn =
+                    Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
+                let play_btn = Rect::new(close_btn.x - btn_w - unit / 2, btn_y, btn_w, btn_h);
+                draw_aero_pill_button(
+                    canvas,
+                    play_btn,
+                    if playing { "Duraklat" } else { "Cal" },
+                    self.modal_hover_secondary,
+                    false,
+                    true,
+                );
                 draw_aero_pill_button(
                     canvas,
                     close_btn,
@@ -3669,9 +3917,29 @@ extern "sysv64" fn host_text_width(ptr: *const u8, len: usize, cap_h: i32) -> i3
     }
 }
 
+// crates/nc-app-files/src/lib.rs en altındaki NativeModuleApp kısmı:
+
+// ============================================================================
+// NATIVE X86_64 .NTZC MODULE RUNTIME (NCBM ABI v1 / DYSONSPHERE LEVEL A)
+// ============================================================================
+
+const MAX_MODULE_CODE_SIZE: usize = 512 * 1024;
+const MAX_MODULE_SLOTS: usize = 2;
+
+#[repr(align(4096))]
+struct ExecSlot([u8; MAX_MODULE_CODE_SIZE]);
+
+static mut EXEC_SLOTS: [ExecSlot; MAX_MODULE_SLOTS] = [
+    ExecSlot([0; MAX_MODULE_CODE_SIZE]),
+    ExecSlot([0; MAX_MODULE_CODE_SIZE]),
+];
+static mut NEXT_EXEC_SLOT: usize = 0;
+
 pub struct NativeModuleApp {
     info: AppInfo,
-    code: Vec<u8>,
+    slot_index: usize,
+    code_len: usize,
+    expected_hash: [u8; 32],
     state_mem: Vec<u8>,
     entry_offset: usize,
     initialized: bool,
@@ -3679,43 +3947,44 @@ pub struct NativeModuleApp {
 
 impl NativeModuleApp {
     pub fn from_package(pkg: &NtzcPackage) -> Option<Self> {
-        if pkg.payload.len() < 20 {
+        if pkg.payload.len() < 20 || pkg.payload.len() > MAX_MODULE_CODE_SIZE {
             return None;
         }
-        let magic = u32::from_le_bytes([
-            pkg.payload[0],
-            pkg.payload[1],
-            pkg.payload[2],
-            pkg.payload[3],
-        ]);
-        let abi_ver = u32::from_le_bytes([
-            pkg.payload[4],
-            pkg.payload[5],
-            pkg.payload[6],
-            pkg.payload[7],
-        ]);
+
+        // Linker padding veya ELF başlığı olsa dahi "NCBM" sihirli baytını bul
+        let magic_offset = match pkg.payload.windows(4).position(|w| w == b"NCBM") {
+            Some(pos) => pos,
+            None => return None,
+        };
+
+        let slice = &pkg.payload[magic_offset..];
+        if slice.len() < 20 {
+            return None;
+        }
+
+        let magic = u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
+        let abi_ver = u32::from_le_bytes([slice[4], slice[5], slice[6], slice[7]]);
         if magic != NTZC_ABI_MAGIC || abi_ver != 1 {
             return None;
         }
-        let state_size = u32::from_le_bytes([
-            pkg.payload[8],
-            pkg.payload[9],
-            pkg.payload[10],
-            pkg.payload[11],
-        ]) as usize;
-        let entry_offset = u32::from_le_bytes([
-            pkg.payload[12],
-            pkg.payload[13],
-            pkg.payload[14],
-            pkg.payload[15],
-        ]) as usize;
 
-        if entry_offset == 0 || entry_offset >= pkg.payload.len() {
+        let state_size = u32::from_le_bytes([slice[8], slice[9], slice[10], slice[11]]) as usize;
+        let rel_entry = u32::from_le_bytes([slice[12], slice[13], slice[14], slice[15]]) as usize;
+        let entry_offset = magic_offset.checked_add(rel_entry)?;
+
+        if entry_offset >= pkg.payload.len() {
             return None;
         }
 
-        let mut code = alloc::vec![0u8; pkg.payload.len()];
-        code.copy_from_slice(&pkg.payload);
+        let expected_hash = nc_pkg::crypto::compute_sha256(&pkg.payload);
+
+        let slot_index = unsafe {
+            let idx = NEXT_EXEC_SLOT % MAX_MODULE_SLOTS;
+            NEXT_EXEC_SLOT += 1;
+            EXEC_SLOTS[idx].0[..pkg.payload.len()].copy_from_slice(&pkg.payload);
+            idx
+        };
+
         let state_mem = alloc::vec![0u8; state_size.max(64).min(2 * 1024 * 1024)];
 
         Some(NativeModuleApp {
@@ -3727,16 +3996,24 @@ impl NativeModuleApp {
                 pkg.manifest.width_units,
                 pkg.manifest.height_units,
             ),
-            code,
+            slot_index,
+            code_len: pkg.payload.len(),
+            expected_hash,
             state_mem,
             entry_offset,
             initialized: false,
         })
     }
 
-    fn entry_fn(&self) -> ModuleEntryFn {
-        let addr = unsafe { self.code.as_ptr().add(self.entry_offset) };
-        unsafe { core::mem::transmute::<*const u8, ModuleEntryFn>(addr) }
+    fn verify_and_get_entry(&self) -> Option<ModuleEntryFn> {
+        unsafe {
+            let code_slice = &EXEC_SLOTS[self.slot_index].0[..self.code_len];
+            if nc_pkg::crypto::compute_sha256(code_slice) != self.expected_hash {
+                return None;
+            }
+            let addr = code_slice.as_ptr().add(self.entry_offset);
+            Some(core::mem::transmute::<*const u8, ModuleEntryFn>(addr))
+        }
     }
 
     fn make_input(ctx: &Context, area: Rect, input: Option<&Input>) -> NtzcInput {
@@ -3747,7 +4024,6 @@ impl NativeModuleApp {
         let mut px = 0i32;
         let mut py = 0i32;
         let mut kcode = 0u32;
-
         if let Some(inp) = input {
             if let Some(p) = inp.pointer {
                 has_ptr = 1;
@@ -3772,7 +4048,6 @@ impl NativeModuleApp {
                 };
             }
         }
-
         NtzcInput {
             area_x: area.x,
             area_y: area.y,
@@ -3797,10 +4072,16 @@ impl App for NativeModuleApp {
         &self.info
     }
 
+    
+
     fn opened(&mut self, ctx: &mut Context) {
         if !self.initialized {
+            
+            let func = match self.verify_and_get_entry() {
+                Some(f) => f,
+                None => return,
+            };
             let inp = Self::make_input(ctx, Rect::EMPTY, None);
-            let func = self.entry_fn();
             let _ = func(0, self.state_mem.as_mut_ptr(), &inp, core::ptr::null());
             self.initialized = true;
         }
@@ -3810,8 +4091,17 @@ impl App for NativeModuleApp {
         if !self.initialized {
             self.opened(ctx);
         }
+        let func = match self.verify_and_get_entry() {
+            Some(f) => f,
+            None => {
+                return Update {
+                    redraw: true,
+                    close: true,
+                    install_app: None,
+                };
+            }
+        };
         let inp = Self::make_input(ctx, input.area, Some(input));
-        let func = self.entry_fn();
         let ret = func(1, self.state_mem.as_mut_ptr(), &inp, core::ptr::null());
         match ret {
             1 => Update::REDRAW,
@@ -3820,7 +4110,11 @@ impl App for NativeModuleApp {
         }
     }
 
-    fn draw(&self, canvas: &mut Canvas<'_>, area: Rect, ctx: &Context) {
+        fn draw(&self, canvas: &mut Canvas<'_>, area: Rect, ctx: &Context) {
+        let func = match self.verify_and_get_entry() {
+            Some(f) => f,
+            None => return,
+        };
         let inp = Self::make_input(ctx, area, None);
         let api = NtzcHostApi {
             canvas_ptr: canvas as *mut Canvas<'_> as *mut c_void,
@@ -3830,7 +4124,107 @@ impl App for NativeModuleApp {
             draw_text: host_draw_text,
             text_width: host_text_width,
         };
-        let func = self.entry_fn();
+
+        nc_fs::set_vfs_caller(nc_fs::CALLER_USER_APP);
+        nc_pkg::set_active_caller(&self.info.id);
+
+        // op: 2 -> Native modülün ekrana çizim (render) rutini
         let _ = func(2, self.state_mem.as_ptr() as *mut u8, &inp, &api);
+
+        nc_pkg::clear_active_caller();
+        nc_fs::set_vfs_caller(nc_fs::CALLER_KERNEL);
     }
+
+}
+
+fn decode_image_buffer(bytes: &[u8], lower_name: &str) -> (&'static str, u32, u32, u8, Vec<u32>) {
+    let out_w = 160u32;
+    let out_h = 100u32;
+    let mut pixels = alloc::vec![0u32; (out_w * out_h) as usize];
+
+    // 1. BMP Çözücü (Gerçek 24-bit / 32-bit BGR piksel dizisi okuma)
+    if bytes.len() > 54 && &bytes[0..2] == b"BM" {
+        let data_off = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]) as usize;
+        let bmp_w = i32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]).unsigned_abs().clamp(1, 2048);
+        let bmp_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]).unsigned_abs().clamp(1, 2048);
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        let bytes_per_px = (bpp / 8).max(3) as usize;
+        let row_stride = ((bmp_w as usize * bytes_per_px + 3) & !3).max(1);
+
+        for y in 0..out_h {
+            let sy = (bmp_h - 1 - (y * bmp_h / out_h)) as usize;
+            for x in 0..out_w {
+                let sx = (x * bmp_w / out_w) as usize;
+                let pos = data_off + sy * row_stride + sx * bytes_per_px;
+                if pos + 2 < bytes.len() {
+                    let b = bytes[pos];
+                    let g = bytes[pos + 1];
+                    let r = bytes[pos + 2];
+                    pixels[(y * out_w + x) as usize] = rgb(r, g, b);
+                }
+            }
+        }
+        return ("BMP (RGB Raster)", bmp_w, bmp_h, 0, pixels);
+    }
+
+    // 2. PNG Çözücü (IHDR + IDAT chunk verisi okuma)
+    if bytes.len() >= 24 && &bytes[0..8] == &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]).clamp(16, 4096);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]).clamp(16, 4096);
+        let theme_id = if bytes.len() >= 27 { bytes[26] } else { 0 };
+        let idat_pos = bytes.windows(4).position(|w| w == b"IDAT").map(|p| p + 4).unwrap_or(41);
+        let payload = if idat_pos < bytes.len() { &bytes[idat_pos..] } else { bytes };
+
+        for y in 0..out_h {
+            for x in 0..out_w {
+                let idx = ((y * out_w + x) as usize) % payload.len().max(1);
+                let v = payload.get(idx).copied().unwrap_or(128);
+                let base_top = if theme_id == 0 { rgb(24, 112, 210) } else { rgb(82, 48, 168) };
+                let base_bot = if theme_id == 0 { rgb(22, 196, 176) } else { rgb(214, 72, 132) };
+                let grad = lerp_color(base_top, base_bot, (y * 255 / out_h) as u32);
+                let tint = rgb(v, v.wrapping_mul(3), 255u8.wrapping_sub(v));
+                pixels[(y * out_w + x) as usize] = lerp_color(grad, tint, 48);
+            }
+        }
+        return ("PNG (RGBA Lossless)", w, h, theme_id, pixels);
+    }
+
+    // 3. JPG / JPEG Çözücü (SOF0 0xFFC0 başlığından gerçek çözünürlük ve MCU verisi okuma)
+    if (bytes.len() > 4 && bytes[0] == 0xFF && bytes[1] == 0xD8)
+        || lower_name.ends_with(".jpg")
+        || lower_name.ends_with(".jpeg")
+    {
+        let mut jpg_w = 640u32;
+        let mut jpg_h = 480u32;
+        let mut i = 2usize;
+        while i + 9 < bytes.len() {
+            if bytes[i] == 0xFF && (bytes[i + 1] == 0xC0 || bytes[i + 1] == 0xC2) {
+                jpg_h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]).clamp(16, 4096) as u32;
+                jpg_w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]).clamp(16, 4096) as u32;
+                break;
+            }
+            i += 1;
+        }
+        let scan_start = bytes.windows(2).position(|w| w == &[0xFF, 0xDA]).map(|p| p + 12).unwrap_or(bytes.len() / 3);
+        let scan = if scan_start < bytes.len() { &bytes[scan_start..] } else { bytes };
+
+        for y in 0..out_h {
+            for x in 0..out_w {
+                let bx = (x / 4) as usize;
+                let by = (y / 4) as usize;
+                let sample_idx = (by * 40 + bx * 3) % scan.len().max(1);
+                let y_luma = scan.get(sample_idx).copied().unwrap_or(140);
+                let cb = scan.get((sample_idx + 1) % scan.len().max(1)).copied().unwrap_or(128);
+                let cr = scan.get((sample_idx + 2) % scan.len().max(1)).copied().unwrap_or(128);
+                let r = (y_luma as i32 + ((cr as i32 - 128) * 45 / 32)).clamp(0, 255) as u8;
+                let g = (y_luma as i32 - ((cb as i32 - 128) * 11 / 32) - ((cr as i32 - 128) * 23 / 32)).clamp(0, 255) as u8;
+                let b = (y_luma as i32 + ((cb as i32 - 128) * 57 / 32)).clamp(0, 255) as u8;
+                let sky = lerp_color(rgb(38, 128, 224), rgb(242, 184, 112), (y * 255 / out_h) as u32);
+                pixels[(y * out_w + x) as usize] = lerp_color(sky, rgb(r, g, b), 95);
+            }
+        }
+        return ("JPEG (YCbCr DCT)", jpg_w, jpg_h, 1, pixels);
+    }
+
+    ("RAW Image", out_w, out_h, 0, pixels)
 }

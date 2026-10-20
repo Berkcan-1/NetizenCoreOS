@@ -5,8 +5,12 @@ use alloc::vec::Vec;
 use crate::css::floor_utf8_boundary;
 use crate::dom::{DomTree, NodeType};
 
-const MAX_DOM_NODES: usize = 1600;
-const MAX_DOM_DEPTH: usize = 24;
+/// Largest document the parser accepts. Kept equal to the app-level response limit so that
+/// the two layers can no longer disagree (it used to be 1 MB here and 3 MB in `lib.rs`).
+pub const MAX_HTML_BYTES: usize = 3 * 1024 * 1024;
+const MAX_TOKENS: usize = 16_000;
+const MAX_DOM_NODES: usize = 6_000;
+const MAX_DOM_DEPTH: usize = 28;
 
 #[derive(Debug)]
 enum Token {
@@ -19,25 +23,38 @@ enum Token {
         name: String,
     },
     Text(String),
+    /// Raw body of a `<script>` element. Attached only directly under that script element.
+    ScriptText(String),
 }
 
 pub struct HtmlParser {
     chars: Vec<char>,
     pos: usize,
     script_blobs: Vec<String>,
+    diag: Vec<String>,
 }
 
 impl HtmlParser {
     pub fn parse(html: &str) -> DomTree {
-        let safe_len = floor_utf8_boundary(html, 1024 * 1024);
+        let safe_len = floor_utf8_boundary(html, MAX_HTML_BYTES);
         let mut parser = HtmlParser {
             chars: html[..safe_len].chars().collect(),
             pos: 0,
             script_blobs: Vec::new(),
+            diag: Vec::new(),
         };
+        if safe_len < html.len() {
+            parser.diag.push(alloc::format!(
+                "document truncated: {} of {} bytes parsed (limit {})",
+                safe_len,
+                html.len(),
+                MAX_HTML_BYTES
+            ));
+        }
         let tokens = parser.tokenize();
         let mut tree = parser.build_tree(tokens);
         parser.inject_dynamic_web_layers(&mut tree);
+        tree.diagnostics.extend(core::mem::take(&mut parser.diag));
         tree
     }
 
@@ -77,7 +94,7 @@ impl HtmlParser {
 
     fn tokenize(&mut self) -> Vec<Token> {
         let mut tokens = Vec::new();
-        while self.pos < self.chars.len() && tokens.len() < 4000 {
+        while self.pos < self.chars.len() && tokens.len() < MAX_TOKENS {
             if self.peek() == Some('<') {
                 self.next();
                 if self.peek() == Some('!') {
@@ -164,12 +181,9 @@ impl HtmlParser {
                                 if !k.is_empty() {
                                     let clean_v = if k == "href" {
                                         unwrap_redirect_href(&decode_entities(&v))
-                                    } else if matches!(
-                                        k.as_str(),
-                                        "placeholder" | "value" | "alt" | "title" | "aria-label" | "content"
-                                    ) {
-                                        sanitize_text(&decode_entities(&v))
                                     } else {
+                                        // Unicode is preserved in the DOM. Glyph folding for the
+                                        // built-in font happens only when text is displayed (see `sanitize_text`).
                                         decode_entities(&v)
                                     };
                                     attributes.push((k, clean_v));
@@ -198,13 +212,20 @@ impl HtmlParser {
                         if self.script_blobs.len() < 4
                             && (script_text.contains("ytInitialData") || script_text.contains("videoRenderer"))
                         {
-                            self.script_blobs.push(script_text);
+                            self.script_blobs.push(script_text.clone());
+                        }
+                        // Keep the script body as an unmodified raw text node under <script> so that
+                        // `pending_scripts` (jsdom.rs) can execute inline code. The text is never
+                        // entity-decoded or folded. <noscript> content stays discarded because
+                        // scripting is enabled. <script> has `display:none`, so it is never painted.
+                        if closing == "</script" && !script_text.trim().is_empty() {
+                            tokens.push(Token::ScriptText(script_text));
                         }
                     } else if is_style_or_title {
                         let raw_content = self.read_raw_text(&closing);
                         if !raw_content.trim().is_empty() {
                             if closing == "</title" {
-                                tokens.push(Token::Text(sanitize_text(&decode_entities(&raw_content))));
+                                tokens.push(Token::Text(decode_entities(&raw_content)));
                             } else {
                                 tokens.push(Token::Text(raw_content));
                             }
@@ -220,11 +241,17 @@ impl HtmlParser {
                     text.push(ch);
                     self.next();
                 }
-                let decoded = sanitize_text(&decode_entities(&text));
+                let decoded = decode_entities(&text);
                 if !decoded.trim().is_empty() {
                     tokens.push(Token::Text(decoded));
                 }
             }
+        }
+        if self.pos < self.chars.len() {
+            self.diag.push(alloc::format!(
+                "token limit reached ({} tokens): the rest of the document was not parsed",
+                MAX_TOKENS
+            ));
         }
         tokens
     }
@@ -301,9 +328,14 @@ impl HtmlParser {
     fn build_tree(&self, tokens: Vec<Token>) -> DomTree {
         let mut tree = DomTree::new();
         let mut stack = alloc::vec![tree.root];
+        let mut last_added: Option<usize> = None;
 
         for token in tokens {
             if tree.nodes.len() >= MAX_DOM_NODES {
+                tree.diagnostics.push(alloc::format!(
+                    "DOM node limit reached ({} nodes): later elements were dropped",
+                    MAX_DOM_NODES
+                ));
                 break;
             }
             match token {
@@ -346,6 +378,7 @@ impl HtmlParser {
                         },
                         parent,
                     );
+                    last_added = Some(node_id);
                     if !self_closing && stack.len() < MAX_DOM_DEPTH {
                         stack.push(node_id);
                     }
@@ -367,6 +400,14 @@ impl HtmlParser {
                 Token::Text(text) => {
                     let parent = *stack.last().unwrap_or(&tree.root);
                     tree.add_node(NodeType::Text(text), parent);
+                }
+                Token::ScriptText(code) => {
+                    // Only attach to the <script> element that was just created, never to a visible parent.
+                    if let Some(sid) = last_added {
+                        if tree.tag(sid) == Some("script") {
+                            tree.add_node(NodeType::Text(code), sid);
+                        }
+                    }
                 }
             }
         }
@@ -625,6 +666,13 @@ fn percent_decode_url(input: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Set to `true` once `nc-font` can draw Latin-1 Supplement and Latin Extended-A glyphs
+/// (Turkish `ğ ş ı İ ç ö ü`, `é`, `ñ`, ...). Until then they are folded to the nearest ASCII letters
+/// *at display time only*. The DOM, `textContent`, form values and URLs always keep the original Unicode.
+pub const FONT_LATIN_EXT: bool = false;
+
+/// Display folding for the built-in font. This is the single place that knows the font repertoire.
+/// It must be applied to every string that is measured or painted, and to nothing that is stored.
 pub fn sanitize_text(input: &str) -> String {
     if input.is_ascii() {
         return String::from(input);
@@ -635,51 +683,137 @@ pub fn sanitize_text(input: &str) -> String {
             out.push(ch);
             continue;
         }
-        let mapped = match ch {
-            'ç' => "c",
-            'Ç' => "C",
-            'ğ' => "g",
-            'Ğ' => "G",
-            'ı' => "i",
-            'İ' => "I",
-            'ö' => "o",
-            'Ö' => "O",
-            'ş' => "s",
-            'Ş' => "S",
-            'ü' => "u",
-            'Ü' => "U",
-            'â' | 'á' | 'à' | 'ä' | 'ã' | 'å' => "a",
-            'Â' | 'Á' | 'À' | 'Ä' | 'Ã' | 'Å' => "A",
-            'é' | 'è' | 'ê' | 'ë' => "e",
-            'É' | 'È' | 'Ê' | 'Ë' => "E",
-            'í' | 'ì' | 'î' | 'ï' => "i",
-            'Í' | 'Ì' | 'Î' | 'Ï' => "I",
-            'ó' | 'ò' | 'ô' | 'õ' => "o",
-            'Ó' | 'Ò' | 'Ô' | 'Õ' => "O",
-            'ú' | 'ù' | 'û' => "u",
-            'Ú' | 'Ù' | 'Û' => "U",
-            'ý' | 'ÿ' => "y",
-            'ñ' => "n",
-            'Ñ' => "N",
-            'ß' => "ss",
-            '\u{2018}' | '\u{2019}' | '\u{201B}' => "'",
-            '\u{201C}' | '\u{201D}' => "\"",
-            '\u{2013}' | '\u{2014}' | '\u{2212}' => "-",
-            '\u{2026}' => "...",
-            '\u{2022}' | '\u{00B7}' => "*",
-            '\u{00A0}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{3000}' => " ",
-            '\u{00A9}' => "(c)",
-            '\u{00AE}' => "(R)",
-            '\u{2122}' => "TM",
-            '\u{20AC}' => "EUR",
-            '\u{20BA}' => "TL",
-            '\u{00AB}' | '\u{2039}' | '\u{2190}' => "<",
-            '\u{00BB}' | '\u{203A}' | '\u{2192}' => ">",
-            _ => "",
-        };
-        out.push_str(mapped);
+        if FONT_LATIN_EXT && is_latin_ext(ch) {
+            out.push(ch);
+            continue;
+        }
+        match fold_char(ch) {
+            Some(mapped) => out.push_str(mapped),
+            None => {
+                // Unknown letters become a visible placeholder instead of silently changing the text.
+                if !is_ignorable(ch) {
+                    out.push('?');
+                }
+            }
+        }
     }
     out
+}
+
+fn is_latin_ext(ch: char) -> bool {
+    let c = ch as u32;
+    (0x00C0..=0x024F).contains(&c) && c != 0x00D7 && c != 0x00F7
+}
+
+/// Characters that carry no visible glyph of their own: dropped without a placeholder.
+fn is_ignorable(ch: char) -> bool {
+    let c = ch as u32;
+    matches!(c,
+        0x00AD
+        | 0x0300..=0x036F
+        | 0x200B..=0x200F
+        | 0x2028..=0x202E
+        | 0x2060..=0x206F
+        | 0xFE00..=0xFE0F
+        | 0xFEFF
+        | 0x2600..=0x27BF
+        | 0x1F000..=0x1FAFF
+        | 0xE0000..=0xE007F)
+}
+
+fn fold_char(ch: char) -> Option<&'static str> {
+    Some(match ch {
+        // Latin letters (Turkish first, then the rest of Latin-1 / Latin Extended-A)
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
+        'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => "C",
+        'ğ' | 'ĝ' | 'ġ' | 'ģ' => "g",
+        'Ğ' | 'Ĝ' | 'Ġ' | 'Ģ' => "G",
+        'ı' | 'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' => "i",
+        'İ' | 'Ì' | 'Í' | 'Î' | 'Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' => "I",
+        'ö' | 'ò' | 'ó' | 'ô' | 'õ' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+        'Ö' | 'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' => "O",
+        'ş' | 'ś' | 'ŝ' | 'š' => "s",
+        'Ş' | 'Ś' | 'Ŝ' | 'Š' => "S",
+        'ü' | 'ù' | 'ú' | 'û' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'Ü' | 'Ù' | 'Ú' | 'Û' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => "U",
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' => "A",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => "E",
+        'ď' | 'đ' | 'ð' => "d",
+        'Ď' | 'Đ' | 'Ð' => "D",
+        'ĥ' | 'ħ' => "h",
+        'Ĥ' | 'Ħ' => "H",
+        'ĵ' => "j",
+        'Ĵ' => "J",
+        'ķ' => "k",
+        'Ķ' => "K",
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+        'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => "L",
+        'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+        'Ñ' | 'Ń' | 'Ņ' | 'Ň' => "N",
+        'ŕ' | 'ŗ' | 'ř' => "r",
+        'Ŕ' | 'Ŗ' | 'Ř' => "R",
+        'ţ' | 'ť' | 'ŧ' => "t",
+        'Ţ' | 'Ť' | 'Ŧ' => "T",
+        'ŵ' => "w",
+        'Ŵ' => "W",
+        'ý' | 'ÿ' | 'ŷ' => "y",
+        'Ý' | 'Ÿ' | 'Ŷ' => "Y",
+        'ź' | 'ż' | 'ž' => "z",
+        'Ź' | 'Ż' | 'Ž' => "Z",
+        'ß' => "ss",
+        'æ' => "ae",
+        'Æ' => "AE",
+        'œ' => "oe",
+        'Œ' => "OE",
+        'þ' => "th",
+        'Þ' => "TH",
+        // Quotes, dashes, spaces, punctuation
+        '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => "'",
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => "\"",
+        '\u{201A}' => ",",
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => "-",
+        '\u{2026}' => "...",
+        '\u{2022}' | '\u{00B7}' | '\u{2219}' => "*",
+        '\u{2000}'..='\u{200A}' | '\u{00A0}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => " ",
+        '\u{2020}' | '\u{2021}' => "+",
+        '\u{2030}' => "%o",
+        '\u{00AB}' | '\u{2039}' | '\u{2190}' => "<",
+        '\u{00BB}' | '\u{203A}' | '\u{2192}' => ">",
+        '\u{2191}' => "^",
+        '\u{2193}' => "v",
+        '\u{2194}' => "<>",
+        // Symbols
+        '\u{00A9}' => "(c)",
+        '\u{00AE}' => "(R)",
+        '\u{2122}' => "TM",
+        '\u{20AC}' => "EUR",
+        '\u{20BA}' => "TL",
+        '\u{00A3}' => "GBP",
+        '\u{00A5}' => "JPY",
+        '\u{00A2}' => "c",
+        '\u{20B9}' => "INR",
+        '\u{00B0}' => "deg",
+        '\u{00B1}' => "+/-",
+        '\u{00D7}' => "x",
+        '\u{00F7}' => "/",
+        '\u{00BC}' => "1/4",
+        '\u{00BD}' => "1/2",
+        '\u{00BE}' => "3/4",
+        '\u{00B2}' => "2",
+        '\u{00B3}' => "3",
+        '\u{00B9}' => "1",
+        '\u{00B5}' => "u",
+        '\u{00A7}' => "S",
+        '\u{00B6}' => "P",
+        '\u{2116}' => "No",
+        '\u{2260}' => "!=",
+        '\u{2264}' => "<=",
+        '\u{2265}' => ">=",
+        '\u{221E}' => "inf",
+        _ => return None,
+    })
 }
 
 pub fn decode_entities(input: &str) -> String {
@@ -726,38 +860,95 @@ fn safe_entity_slice(s: &str, start: usize, end: usize) -> &str {
     &s[a..b]
 }
 
+/// HTML named entities for U+00A0..=U+00FF in code point order.
+const LATIN1_ENTITIES: [&str; 96] = [
+    "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf", "laquo", "not", "shy",
+    "reg", "macr", "deg", "plusmn", "sup2", "sup3", "acute", "micro", "para", "middot", "cedil", "sup1", "ordm",
+    "raquo", "frac14", "frac12", "frac34", "iquest", "Agrave", "Aacute", "Acirc", "Atilde", "Auml", "Aring", "AElig",
+    "Ccedil", "Egrave", "Eacute", "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml", "ETH", "Ntilde", "Ograve",
+    "Oacute", "Ocirc", "Otilde", "Ouml", "times", "Oslash", "Ugrave", "Uacute", "Ucirc", "Uuml", "Yacute", "THORN",
+    "szlig", "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil", "egrave", "eacute", "ecirc",
+    "euml", "igrave", "iacute", "icirc", "iuml", "eth", "ntilde", "ograve", "oacute", "ocirc", "otilde", "ouml",
+    "divide", "oslash", "ugrave", "uacute", "ucirc", "uuml", "yacute", "thorn", "yuml",
+];
+
 fn resolve_entity(entity: &str) -> Option<char> {
     if let Some(num_str) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
         let code = u32::from_str_radix(num_str, 16).ok()?;
-        return char::from_u32(code);
+        return Some(char::from_u32(code).filter(|c| *c != '\0').unwrap_or('\u{FFFD}'));
     }
     if let Some(num_str) = entity.strip_prefix('#') {
         let code = num_str.parse::<u32>().ok()?;
-        return char::from_u32(code);
+        return Some(char::from_u32(code).filter(|c| *c != '\0').unwrap_or('\u{FFFD}'));
     }
     match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" | "#39" => Some('\''),
-        "nbsp" => Some(' '),
-        "copy" => Some('C'),
-        "reg" => Some('R'),
-        "trade" => Some('T'),
-        "mdash" | "ndash" | "minus" => Some('-'),
-        "bull" | "middot" => Some('*'),
-        "hellip" => Some('.'),
-        "rsquo" | "lsquo" => Some('\''),
-        "rdquo" | "ldquo" => Some('"'),
-        "ccedil" => Some('ç'),
-        "Ccedil" => Some('Ç'),
-        "ouml" => Some('ö'),
-        "Ouml" => Some('Ö'),
-        "uuml" => Some('ü'),
-        "Uuml" => Some('Ü'),
-        "laquo" => Some('<'),
-        "raquo" => Some('>'),
-        _ => None,
+        "amp" => return Some('&'),
+        "lt" => return Some('<'),
+        "gt" => return Some('>'),
+        "quot" => return Some('"'),
+        "apos" => return Some('\''),
+        _ => {}
     }
+    if let Some(i) = LATIN1_ENTITIES.iter().position(|n| *n == entity) {
+        return char::from_u32(0xA0 + i as u32);
+    }
+    let code: u32 = match entity {
+        "OElig" => 0x152,
+        "oelig" => 0x153,
+        "Scaron" => 0x160,
+        "scaron" => 0x161,
+        "Yuml" => 0x178,
+        "fnof" => 0x192,
+        "circ" => 0x2C6,
+        "tilde" => 0x2DC,
+        "ensp" => 0x2002,
+        "emsp" => 0x2003,
+        "thinsp" => 0x2009,
+        "zwnj" => 0x200C,
+        "zwj" => 0x200D,
+        "lrm" => 0x200E,
+        "rlm" => 0x200F,
+        "ndash" => 0x2013,
+        "mdash" => 0x2014,
+        "lsquo" => 0x2018,
+        "rsquo" => 0x2019,
+        "sbquo" => 0x201A,
+        "ldquo" => 0x201C,
+        "rdquo" => 0x201D,
+        "bdquo" => 0x201E,
+        "dagger" => 0x2020,
+        "Dagger" => 0x2021,
+        "bull" => 0x2022,
+        "hellip" => 0x2026,
+        "permil" => 0x2030,
+        "prime" => 0x2032,
+        "Prime" => 0x2033,
+        "lsaquo" => 0x2039,
+        "rsaquo" => 0x203A,
+        "euro" => 0x20AC,
+        "trade" => 0x2122,
+        "larr" => 0x2190,
+        "uarr" => 0x2191,
+        "rarr" => 0x2192,
+        "darr" => 0x2193,
+        "harr" => 0x2194,
+        "minus" => 0x2212,
+        "infin" => 0x221E,
+        "ne" => 0x2260,
+        "le" => 0x2264,
+        "ge" => 0x2265,
+        "hearts" => 0x2665,
+        "check" => 0x2713,
+        "alpha" => 0x3B1,
+        "beta" => 0x3B2,
+        "gamma" => 0x3B3,
+        "delta" => 0x3B4,
+        "pi" => 0x3C0,
+        "sigma" => 0x3C3,
+        "omega" => 0x3C9,
+        "Omega" => 0x3A9,
+        "Delta" => 0x394,
+        _ => return None,
+    };
+    char::from_u32(code)
 }

@@ -24,6 +24,66 @@ pub fn draw_tile(
     glyph: &dyn Fn(&mut Canvas<'_>, i32, i32, i32, u32),
     glyph_pct: i32,
 ) {
+    let h = rect.height;
+    draw_tile_with_shadow(
+        canvas,
+        rect,
+        top,
+        bottom,
+        appear,
+        lift,
+        glyph,
+        glyph_pct,
+        h / 10 + lift / 2,
+        h / 4 + lift / 2,
+        darken(bottom, 140),
+        88,
+    );
+}
+
+/// Dock tiles use a short, low-opacity shadow so adjacent app icons do not
+/// merge into a dark horizontal strip on the translucent dock surface.
+pub fn draw_dock_tile(
+    canvas: &mut Canvas<'_>,
+    rect: Rect,
+    top: u32,
+    bottom: u32,
+    appear: i32,
+    lift: i32,
+    glyph: &dyn Fn(&mut Canvas<'_>, i32, i32, i32, u32),
+    glyph_pct: i32,
+) {
+    let h = rect.height;
+    draw_tile_with_shadow(
+        canvas,
+        rect,
+        top,
+        bottom,
+        appear,
+        lift,
+        glyph,
+        glyph_pct,
+        (h / 18).max(1) + lift / 4,
+        (h / 12).max(1) + lift / 4,
+        darken(bottom, 105),
+        28,
+    );
+}
+
+fn draw_tile_with_shadow(
+    canvas: &mut Canvas<'_>,
+    rect: Rect,
+    top: u32,
+    bottom: u32,
+    appear: i32,
+    lift: i32,
+    glyph: &dyn Fn(&mut Canvas<'_>, i32, i32, i32, u32),
+    glyph_pct: i32,
+    shadow_dy: i32,
+    shadow_blur: i32,
+    shadow_color: u32,
+    shadow_alpha: u32,
+) {
     if rect.width < 6 || appear <= 0 {
         return;
     }
@@ -36,10 +96,10 @@ pub fn draw_tile(
         canvas,
         rect,
         r,
-        h / 10 + lift / 2,
-        h / 4 + lift / 2,
-        darken(bottom, 140),
-        sc(88),
+        shadow_dy,
+        shadow_blur,
+        shadow_color,
+        sc(shadow_alpha),
     );
     fill_rr_vgrad(canvas, rect, r, top, bottom, sc(255));
 
