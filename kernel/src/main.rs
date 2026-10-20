@@ -203,6 +203,10 @@ pub extern "C" fn kernel_main() -> ! {
     nc_arch::idt::init();
     let drv_reg = nc_driver::init();
     log!(&active, "{}", drv_reg.status_log);
+    log!(&active, "[DysonSphere] Headless yetki ve politika motoru aktif (Default-Deny)");
+
+    let drv_reg = nc_driver::init();
+    log!(&active, "{}", drv_reg.status_log);
 
     // Eksik olan satır:
     let is_installed = nc_storage::find_installed_disk().is_some();
@@ -216,10 +220,74 @@ pub extern "C" fn kernel_main() -> ! {
         Some(canvas) => canvas,
         None => halt_forever(),
     };
+    // Mevcut kodun:
     let mut wallpaper = match new_canvas(&mut arena, width, height) {
         Some(canvas) => canvas,
         None => halt_forever(),
     };
+
+    // --- YENİ EKLENECEK DYSONSPHERE FAZ 5: TRUSTED BOOT KİLİDİ ---
+    if is_installed {
+        if let Err(reason) = nc_storage::verify_boot_integrity() {
+            log!(&active, "[FATAL BOOTLOADER LOCK] THE SYSTEM HAS BEEN DESTROYED: {}", reason);
+            // Ekranı koyu kan kırmızısına boya
+            screen.fill_rect(0, 0, width as i32, height as i32, nc_gfx::rgb(140, 12, 18));
+            // Ortaya uyarı kutusu çiz
+            let box_w = (width as i32 - 120).min(680);
+            let box_h = 220;
+            let bx = (width as i32 - box_w) / 2;
+            let by = (height as i32 - box_h) / 2;
+            nc_ui::draw_panel(
+                &mut screen,
+                nc_gfx::Rect::new(bx, by, box_w, box_h),
+                12,
+                nc_gfx::rgb(24, 10, 14),
+                245,
+                nc_gfx::rgb(255, 70, 70),
+                255,
+            );
+            let title_st = nc_ui::text_style(22, 16);
+            let sub_st = nc_ui::text_style(13, 15);
+            nc_ui::draw_text_color(
+                &mut screen,
+                "THE SYSTEM HAS BEEN DESTROYED",
+                bx + 40,
+                by + 45,
+                &title_st,
+                nc_gfx::rgb(255, 80, 80),
+            );
+            nc_ui::draw_text_color(
+                &mut screen,
+                "DysonSphere Bootloader Lock: Non-data partition integrity check failed.",
+                bx + 40,
+                by + 100,
+                &sub_st,
+                nc_ui::WHITE,
+            );
+            nc_ui::draw_text_color(
+                &mut screen,
+                reason,
+                bx + 40,
+                by + 135,
+                &sub_st,
+                nc_gfx::rgb(255, 190, 120),
+            );
+            nc_ui::draw_text_color(
+                &mut screen,
+                "System halted to prevent unauthorized execution. Reinstall OS from ISO.",
+                bx + 40,
+                by + 170,
+                &sub_st,
+                nc_gfx::rgb(180, 180, 190),
+            );
+            unsafe {
+                present(&screen, &framebuffer);
+            }
+            halt_forever();
+        }
+        log!(&active, "[DysonSphere] Verified Boot OK: /boot, /system ve /security muhurleri dogrulandi.");
+    }
+    
 
     nc_ui::draw_backdrop(&mut screen);
     unsafe {
