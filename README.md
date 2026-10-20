@@ -1,5 +1,9 @@
 # NetizenCore Kernel
 
+<img width="256" height="256" alt="netizencore-crab-c" src="https://github.com/user-attachments/assets/79860eb6-02eb-4187-840f-be337bc37714" />
+
+
+
 ![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)
 ![Architecture](https://img.shields.io/badge/architecture-x86__64-blue)
 ![Kernel](https://img.shields.io/badge/kernel-bare--metal-black)
