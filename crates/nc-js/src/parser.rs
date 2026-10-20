@@ -192,7 +192,10 @@ fn is_assign_op(p: &str) -> bool {
 }
 
 pub fn parse_program(src: &str) -> Result<Vec<Stmt>, String> {
-    let toks = tokenize(src)?;
+    let toks = match tokenize(src) {
+        Ok(t) => t,
+        Err(e) => return Err(add_context(e, src)),
+    };
     let mut p = Parser { toks, pos: 0, no_in: false, depth: 0, in_gen: false };
     let mut out = Vec::new();
     while !p.at_eof() {
@@ -205,6 +208,17 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>, String> {
 }
 
 fn add_context(e: String, src: &str) -> String {
+    if !e.contains("[pos=") {
+        if let Some(i) = e.rfind(" at char ") {
+            let num: String = e[i + 9..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(pos) = num.parse::<usize>() {
+                let start = pos.saturating_sub(70);
+                let snippet: String = src.chars().skip(start).take(140).map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+                return format!("{} near: ...{}...", e, snippet);
+            }
+        }
+        return e;
+    }
     if let Some(i) = e.rfind("[pos=") {
         let num: String = e[i + 5..].chars().take_while(|c| c.is_ascii_digit()).collect();
         if let Ok(p) = num.parse::<usize>() {

@@ -296,6 +296,16 @@ fn pack(color: u32, framebuffer: &FramebufferInfo) -> u32 {
 }
 
 pub unsafe fn present_region(canvas: &Canvas, framebuffer: &FramebufferInfo, area: Rect) {
+    // Bölüm 8: GOP/VBE Framebuffer adres, bpp ve pitch/stride doğrulaması
+    if framebuffer.address == 0
+        || framebuffer.width == 0
+        || framebuffer.height == 0
+        || framebuffer.bpp < 24
+        || (framebuffer.pitch as usize) < (framebuffer.width as usize) * 4
+    {
+        return;
+    }
+
     let limit_x = canvas.width().min(framebuffer.width as usize);
     let limit_y = canvas.height().min(framebuffer.height as usize);
     let x_start = area.x.max(0) as usize;

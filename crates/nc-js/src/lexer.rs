@@ -45,7 +45,7 @@ fn starts_at(ch: &[char], i: usize, s: &str) -> bool {
     true
 }
 
-fn regex_allowed(prev: Option<&Tok>) -> bool {
+fn regex_allowed(prev: Option<&Tok>, close_ok: bool) -> bool {
     match prev {
         None => true,
         Some(Tok::Num(_)) | Some(Tok::Str(_)) | Some(Tok::Tpl(_, _)) | Some(Tok::Regex(_, _)) => false,
@@ -53,7 +53,11 @@ fn regex_allowed(prev: Option<&Tok>) -> bool {
             k.as_str(),
             "return" | "typeof" | "instanceof" | "in" | "of" | "new" | "delete" | "void" | "throw" | "case" | "do" | "else" | "yield" | "await"
         ),
-        Some(Tok::Punct(p)) => !matches!(p.as_str(), ")" | "]" | "}"),
+        Some(Tok::Punct(p)) => match p.as_str() {
+            ")" | "}" => close_ok,
+            "]" => false,
+            _ => true,
+        },
         Some(Tok::Eof) => true,
     }
 }
@@ -198,6 +202,10 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
     let mut i = 0usize;
     let mut out: Vec<Token> = Vec::new();
     let mut nl = false;
+    // After `)` of if/while/for/with and after `}` of a block, a `/` starts a regex, not a division.
+    let mut paren_stack: Vec<bool> = Vec::new();
+    let mut brace_stack: Vec<bool> = Vec::new();
+    let mut close_ok = false;
 
     if starts_at(&ch, 0, "#!") {
         while i < len && ch[i] != '\n' {
@@ -236,12 +244,20 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
 
         let tok_start = i;
         let tok: Tok;
-        if is_id_start(c) {
-            let start = i;
-            while i < len && is_id_part(ch[i]) {
-                i += 1;
+        if is_id_start(c) || (c == '\\' && i + 1 < len && ch[i + 1] == 'u') {
+            let mut name = String::new();
+            while i < len {
+                if is_id_part(ch[i]) {
+                    name.push(ch[i]);
+                    i += 1;
+                } else if ch[i] == '\\' && i + 1 < len && ch[i + 1] == 'u' {
+                    i += 1;
+                    read_escape(&ch, &mut i, &mut name)?;
+                } else {
+                    break;
+                }
             }
-            tok = Tok::Ident(ch[start..i].iter().collect());
+            tok = Tok::Ident(name);
         } else if c.is_ascii_digit() || (c == '.' && i + 1 < len && ch[i + 1].is_ascii_digit()) {
             if c == '0' && i + 1 < len && matches!(ch[i + 1], 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
                 let radix: u32 = match ch[i + 1] {
@@ -317,7 +333,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
             let mut s = String::new();
             loop {
                 if i >= len {
-                    return Err(String::from("unterminated string literal"));
+                    return Err(alloc::format!("unterminated string literal at char {}", tok_start));
                 }
                 let d = ch[i];
                 if d == q {
@@ -337,13 +353,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
             i += 1;
             let (strs, exprs) = read_template(&ch, &mut i)?;
             tok = Tok::Tpl(strs, exprs);
-        } else if c == '/' && regex_allowed(out.last().map(|t| &t.tok)) {
+        } else if c == '/' && regex_allowed(out.last().map(|t| &t.tok), close_ok) {
             i += 1;
             let mut body = String::new();
             let mut in_class = false;
             loop {
                 if i >= len || ch[i] == '\n' {
-                    return Err(String::from("unterminated regex literal"));
+                    return Err(alloc::format!("unterminated regex literal at char {}", tok_start));
                 }
                 let d = ch[i];
                 if d == '\\' {
@@ -404,6 +420,26 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                         return Err(alloc::format!("unexpected character '{}' at char {}", c, i));
                     }
                 }
+            }
+        }
+        if let Tok::Punct(p) = &tok {
+            match p.as_str() {
+                "(" => {
+                    let ctl = matches!(out.last().map(|t| &t.tok), Some(Tok::Ident(k)) if matches!(k.as_str(), "if" | "while" | "for" | "with"));
+                    paren_stack.push(ctl);
+                }
+                ")" => close_ok = paren_stack.pop().unwrap_or(false),
+                "{" => {
+                    let block = match out.last().map(|t| &t.tok) {
+                        None => true,
+                        Some(Tok::Punct(q)) => matches!(q.as_str(), ")" | "=>" | ";" | "{" | "}"),
+                        Some(Tok::Ident(k)) => !matches!(k.as_str(), "return" | "typeof" | "case" | "in" | "of" | "delete" | "void" | "throw" | "new" | "instanceof" | "yield" | "await"),
+                        _ => false,
+                    };
+                    brace_stack.push(block);
+                }
+                "}" => close_ok = brace_stack.pop().unwrap_or(true),
+                _ => {}
             }
         }
         out.push(Token { tok, nl, pos: tok_start });

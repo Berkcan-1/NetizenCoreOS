@@ -272,6 +272,16 @@ fn dom_prelude() {
             (r##"var done = []; fetch('/data.json').then(function (r) { return r.json(); }).then(function (j) { done.push('fetch json ' + j.v); }); __net_done(1, true, 200, '{"v":42}', 'https://z.com/data.json'); 0"##, r##"done.join()"##, r##"fetch json 42"##),
             (r##"var done = []; var x = new XMLHttpRequest(); x.open('GET', '/x'); x.onload = function () { done.push('xhr ' + x.status + x.responseText); }; x.send(); __net_done(1, true, 200, 'ok', 'u'); 0"##, r##"done.join()"##, r##"xhr 200ok"##),
             (r##"var done = []; document.addEventListener('DOMContentLoaded', function () { done.push('dcl'); }); window.addEventListener('load', function () { done.push('load'); }); __fire_ready(); 0"##, r##"done.join() + ' ' + document.readyState"##, r##"dcl,load complete"##),
+            (r##"(function(){ var u = new Uint8Array([1, 2, 300]); u[0] = 257; var f = new Float64Array(2); f[1] = 1.5; return u[0] + ',' + u[2] + ',' + u.length + ',' + f[1] + ',' + Array.from(u).join('|') + ',' + (u instanceof Uint8Array) + ',' + Uint32Array.BYTES_PER_ELEMENT; })()"##, r##""##, r##"1,44,3,1.5,1|2|44,true,4"##),
+            (r##"(function(){ var e = new TextEncoder().encode('a\u00e9\u20ac'); return e.length + ':' + new TextDecoder().decode(e); })()"##, r##""##, r##"6:aé€"##),
+            (r##"(function(){ var c = document.createElement('canvas'); var x = c.getContext('2d'); x.fillRect(0, 0, 1, 1); return (c.getContext('webgl') === null) + ',' + x.measureText('abc').width + ',' + (x.canvas === c); })()"##, r##""##, r##"true,18,true"##),
+            (r##"(function(){ var e = document.createEvent('CustomEvent'); e.initCustomEvent('x', true, false, 5); return e.type + e.detail + e.bubbles; })()"##, r##""##, r##"x5true"##),
+            (r##"NodeFilter.SHOW_ELEMENT + ',' + Node.TEXT_NODE + ',' + (typeof CSS.supports('a', 'b'))"##, r##""##, r##"1,3,boolean"##),
+            (r##"(function(){ document.cookie = 'sid=abc; path=/'; document.cookie = 'k=v'; return document.cookie; })()"##, r##""##, r##"sid=abc; k=v"##),
+            (r##"(function(){ var f = new FormData(); f.append('a', 1); f.append('b', 'x y'); return f.toString() + '|' + new Blob(['abc', 'de']).size; })()"##, r##""##, r##"a=1&b=x+y|5"##),
+            (r##"new Image().tagName + new Option('t', 'v').getAttribute('value')"##, r##""##, r##"IMGv"##),
+            (r##"var done = []; fetch('/post', { method: 'POST', headers: { 'X-Test': '1' }, body: new URLSearchParams({ a: '1', b: '2' }) }).then(function (r) { done.push('post ' + r.status + ' ' + r.headers.get('content-type')); }); __net_done(1, true, 201, 'ok', 'https://z.com/post', 'Content-Type: application/json\nX-A: b\n'); 0"##, r##"done.join() + ' ' + __queue[0][1] + ' ' + __queue[0][3]"##, r##"post 201 application/json POST a=1&b=2"##),
+            (r##"(function(){ var u = new Int16Array(3); u.fill(70000); return u.join() + '/' + u.subarray(1).length + '/' + [...new Uint8Array([5, 6])].join(); })() /*subarray*/"##, r##""##, r##"4464,4464,4464/2/5,6"##),
             (r##"var out = []; for (const [k, v] of new URLSearchParams('a=1&b=%20x')) out.push(k + v); out.join('|')"##, r##""##, r##"a1|b x"##),
         ];
         let mut failed = 0;

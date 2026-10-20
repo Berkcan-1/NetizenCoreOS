@@ -82,5 +82,13 @@ var __host = {
   location: function () { return __href; },
   navigate: function (u) { __href = u; },
   userAgent: function () { return 'UA'; },
-  net: function (u) { __queue.push(u); return __queue.length; }
+  net: function (u, m, h, b) { __queue.push([u, m, h, b]); return __queue.length; },
+  getCookie: function () { return __jar.join('; '); },
+  setCookie: function (v) {
+    var s = String(v).split(';')[0];
+    var n = s.split('=')[0];
+    for (var i = __jar.length - 1; i >= 0; i--) { if (__jar[i].split('=')[0] === n) { __jar.splice(i, 1); } }
+    __jar.push(s);
+  }
 };
+var __jar = [];

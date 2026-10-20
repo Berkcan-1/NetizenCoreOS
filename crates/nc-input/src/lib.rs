@@ -1,11 +1,16 @@
+// crates/nc-input/src/lib.rs
 #![no_std]
 
-use core::sync::atomic::{AtomicU8, Ordering};
+pub mod xhci;
+
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use nc_arch::idt::pop_input_event;
 use nc_arch::{inb, outb};
 use nc_hal::{InputDevice, KeyCode, MouseState};
+use xhci::{init_and_probe_xhci, pop_usb_hid_event, UsbHidEvent};
 
 static KEYBOARD_LAYOUT: AtomicU8 = AtomicU8::new(0); // 0: US/TR-Q, 1: TR-F / Alternatif
+static I8042_PRESENT: AtomicBool = AtomicBool::new(true);
 
 pub fn set_keyboard_layout(code: u8) {
     KEYBOARD_LAYOUT.store(code, Ordering::Relaxed);
@@ -24,20 +29,29 @@ pub struct Ps2Input {
     caps_lock: bool,
 }
 
-fn wait_write() {
+fn wait_write() -> bool {
     let mut spins = 0u32;
-    while spins < 100_000 {
-        if unsafe { inb(0x64) } & 0x02 == 0 {
-            return;
+    while spins < 50_000 {
+        let st = unsafe { inb(0x64) };
+        if st == 0xFF {
+            return false;
+        }
+        if st & 0x02 == 0 {
+            return true;
         }
         spins += 1;
     }
+    false
 }
 
 fn wait_read() -> bool {
     let mut spins = 0u32;
-    while spins < 100_000 {
-        if unsafe { inb(0x64) } & 0x01 != 0 {
+    while spins < 50_000 {
+        let st = unsafe { inb(0x64) };
+        if st == 0xFF {
+            return false;
+        }
+        if st & 0x01 != 0 {
             return true;
         }
         spins += 1;
@@ -46,39 +60,57 @@ fn wait_read() -> bool {
 }
 
 pub fn init() {
-    // Yardimci (fare) ve klavye portlarini ac
-    wait_write();
-    unsafe { outb(0x64, 0xAE); }
-    wait_write();
-    unsafe { outb(0x64, 0xA8); }
+    // 1. Önce PCI üzerindeki xHCI (USB 3.x) denetleyicisini ve BIOS Legacy HID köprüsünü doğrula
+    let _xhci_info = init_and_probe_xhci();
 
-    wait_write();
-    unsafe { outb(0x64, 0x20); }
+    // 2. Anakartta fiziksel veya SMM-emüle i8042 (0x64) olup olmadığını kontrol et
+    let initial_status = unsafe { inb(0x64) };
+    if initial_status == 0xFF {
+        I8042_PRESENT.store(false, Ordering::Release);
+        return;
+    }
+    I8042_PRESENT.store(true, Ordering::Release);
+
+    if !wait_write() {
+        return;
+    }
+    unsafe { outb(0x64, 0xAE); }
+    if wait_write() {
+        unsafe { outb(0x64, 0xA8); }
+    }
+    if wait_write() {
+        unsafe { outb(0x64, 0x20); }
+    }
     if wait_read() {
         let mut status = unsafe { inb(0x60) };
-        status |= 0x03;  // Bit 0 (IRQ1 Klavye) ve Bit 1 (IRQ12 Fare) kesmelerini ac
-        status &= !0x30; // Port saatlerini etkinlestir
-        wait_write();
-        unsafe { outb(0x64, 0x60); }
-        wait_write();
-        unsafe { outb(0x60, status); }
+        status |= 0x03;  // IRQ1 ve IRQ12 aktif
+        status &= !0x30; // Saatleri aç
+        if wait_write() {
+            unsafe { outb(0x64, 0x60); }
+            if wait_write() {
+                unsafe { outb(0x60, status); }
+            }
+        }
     }
 
-    // Fare varsayilanlarini yukle ve veri akisini baslat
-    wait_write();
-    unsafe { outb(0x64, 0xD4); }
-    wait_write();
-    unsafe { outb(0x60, 0xF6); }
-    if wait_read() {
-        let _ = unsafe { inb(0x60) };
+    // Fare varsayılanlarını yükle ve veri akışını başlat
+    if wait_write() {
+        unsafe { outb(0x64, 0xD4); }
+        if wait_write() {
+            unsafe { outb(0x60, 0xF6); }
+            if wait_read() {
+                let _ = unsafe { inb(0x60) };
+            }
+        }
     }
-
-    wait_write();
-    unsafe { outb(0x64, 0xD4); }
-    wait_write();
-    unsafe { outb(0x60, 0xF4); }
-    if wait_read() {
-        let _ = unsafe { inb(0x60) };
+    if wait_write() {
+        unsafe { outb(0x64, 0xD4); }
+        if wait_write() {
+            unsafe { outb(0x60, 0xF4); }
+            if wait_read() {
+                let _ = unsafe { inb(0x60) };
+            }
+        }
     }
 }
 
@@ -98,6 +130,37 @@ impl Ps2Input {
         }
     }
 
+    fn map_letter(code: u8, upper: bool, is_tr_f: bool) -> Option<char> {
+        let ch_lower = if !is_tr_f {
+            // Standart QWERTY / TR-Q
+            match code {
+                0x10 => 'q', 0x11 => 'w', 0x12 => 'e', 0x13 => 'r', 0x14 => 't',
+                0x15 => 'y', 0x16 => 'u', 0x17 => 'i', 0x18 => 'o', 0x19 => 'p',
+                0x1E => 'a', 0x1F => 's', 0x20 => 'd', 0x21 => 'f', 0x22 => 'g',
+                0x23 => 'h', 0x24 => 'j', 0x25 => 'k', 0x26 => 'l',
+                0x2C => 'z', 0x2D => 'x', 0x2E => 'c', 0x2F => 'v', 0x30 => 'b',
+                0x31 => 'n', 0x32 => 'm',
+                _ => return None,
+            }
+        } else {
+            // Türkçe F (TR-F) dizilimi
+            match code {
+                0x10 => 'f', 0x11 => 'g', 0x12 => 'g', 0x13 => 'i', 0x14 => 'o',
+                0x15 => 'd', 0x16 => 'r', 0x17 => 'n', 0x18 => 'h', 0x19 => 'p',
+                0x1E => 'u', 0x1F => 'i', 0x20 => 'e', 0x21 => 'a', 0x22 => 'u',
+                0x23 => 't', 0x24 => 'k', 0x25 => 'm', 0x26 => 'l',
+                0x2C => 'j', 0x2D => 'o', 0x2E => 'v', 0x2F => 'c', 0x30 => 'c',
+                0x31 => 'z', 0x32 => 's',
+                _ => return None,
+            }
+        };
+        Some(if upper {
+            ((ch_lower as u8) - 32) as char
+        } else {
+            ch_lower
+        })
+    }
+
     fn process_byte(
         &mut self,
         status: u8,
@@ -107,10 +170,12 @@ impl Ps2Input {
         left_clicked: &mut bool,
         right_clicked: &mut bool,
     ) {
+        if status == 0xFF {
+            return;
+        }
         if status & 0x20 != 0 {
             match self.mouse_cycle {
                 0 => {
-                    // Bit 3 her zaman 1 olmalidir; degilse paket senkronu kaymistir
                     if data & 0x08 != 0 && data & 0xC0 == 0 {
                         self.mouse_packet[0] = data;
                         self.mouse_cycle = 1;
@@ -130,8 +195,8 @@ impl Ps2Input {
                     let dx = if flags & 0x10 != 0 { raw_dx | !0xFF } else { raw_dx };
                     let dy = if flags & 0x20 != 0 { raw_dy | !0xFF } else { raw_dy };
 
-                    self.mouse_x = (self.mouse_x + dx).clamp(0, screen_width - 1);
-                    self.mouse_y = (self.mouse_y - dy).clamp(0, screen_height - 1);
+                    self.mouse_x = (self.mouse_x + dx).clamp(0, (screen_width - 1).max(0));
+                    self.mouse_y = (self.mouse_y - dy).clamp(0, (screen_height - 1).max(0));
 
                     let l_down = flags & 0x01 != 0;
                     if l_down && !self.mouse_left_down {
@@ -157,12 +222,10 @@ impl Ps2Input {
             let ext = self.extended;
             self.extended = false;
 
-            // Sol Shift (0x2A) ve Sag Shift (0x36)
             if !ext && (code == 0x2A || code == 0x36) {
                 self.shift_down = !release;
                 return;
             }
-            // Caps Lock (0x3A)
             if !ext && code == 0x3A && !release {
                 self.caps_lock = !self.caps_lock;
                 return;
@@ -171,6 +234,14 @@ impl Ps2Input {
             if !release {
                 let upper = self.shift_down ^ self.caps_lock;
                 let shift = self.shift_down;
+                let is_tr_f = KEYBOARD_LAYOUT.load(Ordering::Relaxed) == 1;
+
+                if !ext {
+                    if let Some(ch) = Self::map_letter(code, upper, is_tr_f) {
+                        self.last_key = Some(KeyCode::Char(ch));
+                        return;
+                    }
+                }
 
                 let key = match (ext, code) {
                     (false, 0x1C) => KeyCode::Enter,
@@ -192,32 +263,6 @@ impl Ps2Input {
                     (false, 0x09) => KeyCode::Char(if shift { '(' } else { '8' }),
                     (false, 0x0A) => KeyCode::Char(if shift { ')' } else { '9' }),
                     (false, 0x0B) => KeyCode::Char(if shift { '=' } else { '0' }),
-                    (false, 0x10) => KeyCode::Char(if upper { 'Q' } else { 'q' }),
-                    (false, 0x11) => KeyCode::Char(if upper { 'W' } else { 'w' }),
-                    (false, 0x12) => KeyCode::Char(if upper { 'E' } else { 'e' }),
-                    (false, 0x13) => KeyCode::Char(if upper { 'R' } else { 'r' }),
-                    (false, 0x14) => KeyCode::Char(if upper { 'T' } else { 't' }),
-                    (false, 0x15) => KeyCode::Char(if upper { 'Y' } else { 'y' }),
-                    (false, 0x16) => KeyCode::Char(if upper { 'U' } else { 'u' }),
-                    (false, 0x17) => KeyCode::Char(if upper { 'I' } else { 'i' }),
-                    (false, 0x18) => KeyCode::Char(if upper { 'O' } else { 'o' }),
-                    (false, 0x19) => KeyCode::Char(if upper { 'P' } else { 'p' }),
-                    (false, 0x1E) => KeyCode::Char(if upper { 'A' } else { 'a' }),
-                    (false, 0x1F) => KeyCode::Char(if upper { 'S' } else { 's' }),
-                    (false, 0x20) => KeyCode::Char(if upper { 'D' } else { 'd' }),
-                    (false, 0x21) => KeyCode::Char(if upper { 'F' } else { 'f' }),
-                    (false, 0x22) => KeyCode::Char(if upper { 'G' } else { 'g' }),
-                    (false, 0x23) => KeyCode::Char(if upper { 'H' } else { 'h' }),
-                    (false, 0x24) => KeyCode::Char(if upper { 'J' } else { 'j' }),
-                    (false, 0x25) => KeyCode::Char(if upper { 'K' } else { 'k' }),
-                    (false, 0x26) => KeyCode::Char(if upper { 'L' } else { 'l' }),
-                    (false, 0x2C) => KeyCode::Char(if upper { 'Z' } else { 'z' }),
-                    (false, 0x2D) => KeyCode::Char(if upper { 'X' } else { 'x' }),
-                    (false, 0x2E) => KeyCode::Char(if upper { 'C' } else { 'c' }),
-                    (false, 0x2F) => KeyCode::Char(if upper { 'V' } else { 'v' }),
-                    (false, 0x30) => KeyCode::Char(if upper { 'B' } else { 'b' }),
-                    (false, 0x31) => KeyCode::Char(if upper { 'N' } else { 'n' }),
-                    (false, 0x32) => KeyCode::Char(if upper { 'M' } else { 'm' }),
                     (false, 0x0C) => KeyCode::Char(if shift { '_' } else { '-' }),
                     (false, 0x0D) => KeyCode::Char(if shift { '+' } else { '=' }),
                     (false, 0x33) => KeyCode::Char(if shift { ';' } else { ',' }),
@@ -235,21 +280,85 @@ impl Ps2Input {
         }
     }
 
-    pub fn poll_state(&mut self, screen_width: i32, screen_height: i32) -> (MouseState, Option<KeyCode>) {
+    pub fn poll_state(
+        &mut self,
+        screen_width: i32,
+        screen_height: i32,
+    ) -> (MouseState, Option<KeyCode>) {
         let mut left_clicked = false;
         let mut right_clicked = false;
         self.last_key = None;
 
-        // 1. Kesme (IRQ1/IRQ12) halka tamponundaki tum olaylari tuket
+        // 1. Kesme (IRQ1/IRQ12) halka tamponundaki olayları tüket
         while let Some((status, data)) = pop_input_event() {
-            self.process_byte(status, data, screen_width, screen_height, &mut left_clicked, &mut right_clicked);
+            self.process_byte(
+                status,
+                data,
+                screen_width,
+                screen_height,
+                &mut left_clicked,
+                &mut right_clicked,
+            );
         }
 
-        // 2. Tamponda kalan donanim verisi varsa onu da al
-        while unsafe { inb(0x64) } & 0x01 != 0 {
-            let status = unsafe { inb(0x64) };
-            let data = unsafe { inb(0x60) };
-            self.process_byte(status, data, screen_width, screen_height, &mut left_clicked, &mut right_clicked);
+        // 2. i8042 mevcutsa tamponda kalan veriyi (en fazla 32 okumayla sınırlı) al
+        if I8042_PRESENT.load(Ordering::Relaxed) {
+            for _ in 0..32 {
+                let status = unsafe { inb(0x64) };
+                if status == 0xFF || (status & 0x01) == 0 {
+                    break;
+                }
+                let data = unsafe { inb(0x60) };
+                self.process_byte(
+                    status,
+                    data,
+                    screen_width,
+                    screen_height,
+                    &mut left_clicked,
+                    &mut right_clicked,
+                );
+            }
+        }
+
+        // 3. USB xHCI / HID kuyruğundaki olayları birleştir
+        while let Some(usb_ev) = pop_usb_hid_event() {
+            match usb_ev {
+                UsbHidEvent::Key(k) => self.last_key = Some(k),
+                UsbHidEvent::MouseDelta { dx, dy, buttons } => {
+                    self.mouse_x = (self.mouse_x + dx as i32).clamp(0, (screen_width - 1).max(0));
+                    self.mouse_y = (self.mouse_y + dy as i32).clamp(0, (screen_height - 1).max(0));
+                    let l_down = (buttons & 1) != 0;
+                    if l_down && !self.mouse_left_down {
+                        left_clicked = true;
+                    }
+                    self.mouse_left_down = l_down;
+                    let r_down = (buttons & 2) != 0;
+                    if r_down && !self.mouse_right_down {
+                        right_clicked = true;
+                    }
+                    self.mouse_right_down = r_down;
+                }
+                UsbHidEvent::MouseAbsolute {
+                    x_norm,
+                    y_norm,
+                    buttons,
+                } => {
+                    self.mouse_x =
+                        ((x_norm as i64 * screen_width.max(1) as i64) / 32768) as i32;
+                    self.mouse_y =
+                        ((y_norm as i64 * screen_height.max(1) as i64) / 32768) as i32;
+                    let l_down = (buttons & 1) != 0;
+                    if l_down && !self.mouse_left_down {
+                        left_clicked = true;
+                    }
+                    self.mouse_left_down = l_down;
+                    let r_down = (buttons & 2) != 0;
+                    if r_down && !self.mouse_right_down {
+                        right_clicked = true;
+                    }
+                    self.mouse_right_down = r_down;
+                }
+            }
         }
 
         (
@@ -268,7 +377,7 @@ impl Ps2Input {
 
 impl InputDevice for Ps2Input {
     fn name(&self) -> &'static str {
-        "ps2-input"
+        "universal-hid-input"
     }
 
     fn poll(&mut self, screen_width: i32, screen_height: i32) -> (MouseState, Option<KeyCode>) {
