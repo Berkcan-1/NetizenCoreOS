@@ -1,10 +1,48 @@
+// crates/nc-net/src/wireless.rs
 extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use nc_arch::{inb, inl, outb, outl};
+use nc_arch::{inb, outb};
+use nc_driver::pci::enumerate_pci_bus;
 
 const COM2_PORT: u16 = 0x02F8;
+
+/// Teknik bağlam (Bölüm 7) uyarınca Kablosuz ve Bluetooth durum makinesi
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RadioLifecycleState {
+    NotPresent,
+    Discovered,
+    DriverMatched,
+    FirmwareRequired(&'static str),
+    BridgeTransportActive,
+    NativeOperational,
+}
+
+impl RadioLifecycleState {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::NotPresent => "Donanim Bulunamadi",
+            Self::Discovered => "PCIe/USB Kesfedildi (Discovered)",
+            Self::DriverMatched => "Yonga Surucusu Eslesti (DriverMatched)",
+            Self::FirmwareRequired(fw) => fw,
+            Self::BridgeTransportActive => "Harici HCI/802.11 Koprusu Aktif",
+            Self::NativeOperational => "Native Sürücü Aktif (Operational)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WifiChipsetFamily {
+    None,
+    IntelIwlwifi,
+    RealtekRtw88,
+    RealtekRtw89,
+    MediaTekMt76,
+    QualcommAtheros,
+    BroadcomFullMac,
+    VirtioOrGeneric,
+}
 
 #[derive(Clone, Debug)]
 pub struct WifiNetworkInfo {
@@ -48,24 +86,77 @@ pub struct PciRadioHardware {
     pub wifi_pci_found: bool,
     pub wifi_vendor: u16,
     pub wifi_device: u16,
+    pub wifi_subsys_vendor: u16,
+    pub wifi_subsys_device: u16,
+    pub wifi_revision: u8,
     pub wifi_bus: u8,
     pub wifi_dev: u8,
     pub wifi_irq: u8,
     pub wifi_bar0: u32,
+    pub wifi_family: WifiChipsetFamily,
+    pub wifi_state: RadioLifecycleState,
     pub bt_controller_found: bool,
     pub bt_vendor: u16,
     pub bt_device: u16,
+    pub bt_is_usb_xhci: bool,
+    pub bt_state: RadioLifecycleState,
 }
 
-fn pci_read(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
-    let address = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xFC);
-    unsafe {
-        outl(0xCF8, address);
-        inl(0xCFC)
+fn classify_wifi_chipset(
+    vendor: u16,
+    device: u16,
+) -> (&'static str, WifiChipsetFamily, &'static str) {
+    match (vendor, device) {
+        (0x8086, 0x2723) => (
+            "Intel Wi-Fi 6 AX200 160MHz",
+            WifiChipsetFamily::IntelIwlwifi,
+            "iwlwifi-cc-a0.ucode",
+        ),
+        (0x8086, 0x06F0) | (0x8086, 0xA0F0) | (0x8086, 0x51F0) | (0x8086, 0x51F1) => (
+            "Intel Wi-Fi 6 AX201 / AX211 CNVi",
+            WifiChipsetFamily::IntelIwlwifi,
+            "iwlwifi-QuZ-a0.ucode",
+        ),
+        (0x8086, 0x2725) => (
+            "Intel Wi-Fi 6E AX210 160MHz",
+            WifiChipsetFamily::IntelIwlwifi,
+            "iwlwifi-ty-a0.ucode",
+        ),
+        (0x8086, 0x2526) | (0x8086, 0x9DF0) => (
+            "Intel Wireless-AC 9260 / 9560",
+            WifiChipsetFamily::IntelIwlwifi,
+            "iwlwifi-9260.ucode",
+        ),
+        (0x10EC, 0xC821) | (0x10EC, 0xB822) | (0x10EC, 0xC822) => (
+            "Realtek RTL8821CE / RTL8822CE 802.11ac",
+            WifiChipsetFamily::RealtekRtw88,
+            "rtw88/rtw8822c_fw.bin",
+        ),
+        (0x10EC, 0x8852) | (0x10EC, 0xB852) | (0x10EC, 0xA85A) => (
+            "Realtek RTL8852AE / RTL8852BE Wi-Fi 6",
+            WifiChipsetFamily::RealtekRtw89,
+            "rtw89/rtw8852a_fw.bin",
+        ),
+        (0x14C3, 0x7961) | (0x14C3, 0x0608) | (0x14C3, 0x7922) => (
+            "MediaTek MT7921 / MT7922 (RZ608) Wi-Fi 6E",
+            WifiChipsetFamily::MediaTekMt76,
+            "mediatek/WIFI_MT7961_patch.bin",
+        ),
+        (0x168C, _) => (
+            "Qualcomm Atheros QCA9377 / QCA6174 802.11ac",
+            WifiChipsetFamily::QualcommAtheros,
+            "ath10k/QCA6174/hw3.0/firmware.bin",
+        ),
+        (0x14E4, _) => (
+            "Broadcom BCM43xx 802.11ac FullMAC",
+            WifiChipsetFamily::BroadcomFullMac,
+            "brcm/brcmfmac43602-pcie.bin",
+        ),
+        _ => (
+            "Generic PCIe 802.11 Kablosuz Denetleyicisi",
+            WifiChipsetFamily::VirtioOrGeneric,
+            "generic-80211.fw",
+        ),
     }
 }
 
@@ -74,69 +165,72 @@ pub fn scan_pci_radio_hardware() -> PciRadioHardware {
         wifi_pci_found: false,
         wifi_vendor: 0,
         wifi_device: 0,
+        wifi_subsys_vendor: 0,
+        wifi_subsys_device: 0,
+        wifi_revision: 0,
         wifi_bus: 0,
         wifi_dev: 0,
         wifi_irq: 0,
         wifi_bar0: 0,
+        wifi_family: WifiChipsetFamily::None,
+        wifi_state: RadioLifecycleState::NotPresent,
         bt_controller_found: false,
         bt_vendor: 0,
         bt_device: 0,
+        bt_is_usb_xhci: false,
+        bt_state: RadioLifecycleState::NotPresent,
     };
 
-    for bus in 0..=32u8 {
-        for dev in 0..32u8 {
-            for func in 0..8u8 {
-                let vd = pci_read(bus, dev, func, 0x00);
-                let vendor = (vd & 0xFFFF) as u16;
-                let device = ((vd >> 16) & 0xFFFF) as u16;
-                if vendor == 0xFFFF || vendor == 0x0000 {
-                    if func == 0 {
-                        break;
-                    }
-                    continue;
-                }
-                let class_reg = pci_read(bus, dev, func, 0x08);
-                let base_class = ((class_reg >> 24) & 0xFF) as u8;
-                let sub_class = ((class_reg >> 16) & 0xFF) as u8;
+    for ep in enumerate_pci_bus() {
+        // 1. PCIe 802.11 Kablosuz Ağ Denetleyicisi (Class 0x02, Subclass 0x80)
+        if ep.class_code == 0x02 && ep.subclass == 0x80 && !hw.wifi_pci_found {
+            let (_, family, fw_name) = classify_wifi_chipset(ep.vendor_id, ep.device_id);
+            let bar0 = ep.bar(0).mmio_base().unwrap_or(0) as u32;
 
-                if base_class == 0x02 && sub_class == 0x80 && !hw.wifi_pci_found {
-                    hw.wifi_pci_found = true;
-                    hw.wifi_vendor = vendor;
-                    hw.wifi_device = device;
-                    hw.wifi_bus = bus;
-                    hw.wifi_dev = dev;
-                    hw.wifi_bar0 = pci_read(bus, dev, func, 0x10) & 0xFFFF_FFF0;
-                    hw.wifi_irq = (pci_read(bus, dev, func, 0x3C) & 0xFF) as u8;
-                }
+            hw.wifi_pci_found = true;
+            hw.wifi_vendor = ep.vendor_id;
+            hw.wifi_device = ep.device_id;
+            hw.wifi_subsys_vendor = ep.subsys_vendor_id;
+            hw.wifi_subsys_device = ep.subsys_id;
+            hw.wifi_revision = ep.revision_id;
+            hw.wifi_bus = ep.loc.bus;
+            hw.wifi_dev = ep.loc.dev;
+            hw.wifi_irq = ep.irq_line;
+            hw.wifi_bar0 = bar0;
+            hw.wifi_family = family;
+            hw.wifi_state = if bar0 != 0 {
+                RadioLifecycleState::FirmwareRequired(fw_name)
+            } else {
+                RadioLifecycleState::Discovered
+            };
+        }
 
-                if (base_class == 0x0D || (base_class == 0x0C && sub_class == 0x03))
-                    && !hw.bt_controller_found
-                {
-                    hw.bt_controller_found = true;
-                    hw.bt_vendor = vendor;
-                    hw.bt_device = device;
-                }
-            }
+        // 2. Bluetooth HCI: Doğrudan Wireless/BT PCI (0x0D) veya Combo kartın bağlı olduğu USB xHCI (0x0C:0x03)
+        if (ep.class_code == 0x0D || (ep.class_code == 0x0C && ep.subclass == 0x03))
+            && !hw.bt_controller_found
+        {
+            hw.bt_controller_found = true;
+            hw.bt_vendor = ep.vendor_id;
+            hw.bt_device = ep.device_id;
+            hw.bt_is_usb_xhci = ep.class_code == 0x0C;
+            hw.bt_state = RadioLifecycleState::DriverMatched;
         }
     }
+
     hw
 }
 
-fn pci_wifi_model_name(vendor: u16, device: u16) -> &'static str {
-    match (vendor, device) {
-        (0x8086, 0x2723) => "Intel Wi-Fi 6 AX200 160MHz",
-        (0x8086, 0x06F0) | (0x8086, 0xA0F0) | (0x8086, 0x51F0) | (0x8086, 0x51F1) => {
-            "Intel Wi-Fi 6 AX201 / AX211 160MHz"
+/// Parola ve gizli anahtarları loglarda maskeler (Örn: "gizlisifre" -> "********")
+pub fn mask_secret(secret: &str) -> String {
+    if secret.is_empty() {
+        String::from("<acik-ag>")
+    } else {
+        let count = secret.chars().count().clamp(4, 12);
+        let mut s = String::with_capacity(count);
+        for _ in 0..count {
+            s.push('*');
         }
-        (0x8086, 0x2725) => "Intel Wi-Fi 6E AX210 160MHz",
-        (0x8086, 0x2526) | (0x8086, 0x9DF0) => "Intel Wireless-AC 9260 / 9560",
-        (0x14C3, 0x7961) | (0x14C3, 0x0608) => "MediaTek MT7921 / RZ608 Wi-Fi 6",
-        (0x10EC, 0xC821) | (0x10EC, 0xB822) | (0x10EC, 0x8852) => {
-            "Realtek 802.11ac / 802.11ax PCIe"
-        }
-        (0x168C, _) => "Qualcomm Atheros 802.11 Kablosuz",
-        (0x14E4, _) => "Broadcom 802.11 Kablosuz",
-        _ => "PCI 802.11 Kablosuz Ag Denetleyicisi",
+        s
     }
 }
 
@@ -161,19 +255,58 @@ pub struct WirelessManager {
 
 impl WirelessManager {
     pub fn new() -> Self {
-        let pci_hw = scan_pci_radio_hardware();
+        let mut pci_hw = scan_pci_radio_hardware();
         let uart_present = Self::init_com2_uart();
 
+        if uart_present {
+            pci_hw.wifi_state = RadioLifecycleState::BridgeTransportActive;
+            pci_hw.bt_state = RadioLifecycleState::BridgeTransportActive;
+        }
+
         let wifi_name = if pci_hw.wifi_pci_found {
-            String::from(pci_wifi_model_name(pci_hw.wifi_vendor, pci_hw.wifi_device))
+            let (model, _, _) = classify_wifi_chipset(pci_hw.wifi_vendor, pci_hw.wifi_device);
+            alloc::format!(
+                "{} [{:04X}:{:04X} rev {:02X}]",
+                model,
+                pci_hw.wifi_vendor,
+                pci_hw.wifi_device,
+                pci_hw.wifi_revision
+            )
+        } else if uart_present {
+            String::from("Harici 802.11 Radyo Transport Koprusu")
         } else {
-            String::from("Fiziksel 802.11 PCI bagdastirici bulunamadi")
+            String::from("Fiziksel 802.11 PCIe bagdastirici bulunamadi")
         };
 
         let bt_name = if pci_hw.bt_controller_found {
-            String::from("USB / PCI Bluetooth HCI Denetleyicisi")
+            if pci_hw.bt_is_usb_xhci {
+                alloc::format!(
+                    "USB xHCI Bluetooth HCI Transport [{:04X}:{:04X}]",
+                    pci_hw.bt_vendor,
+                    pci_hw.bt_device
+                )
+            } else {
+                alloc::format!(
+                    "PCI Bluetooth HCI Denetleyicisi [{:04X}:{:04X}]",
+                    pci_hw.bt_vendor,
+                    pci_hw.bt_device
+                )
+            }
+        } else if uart_present {
+            String::from("Harici Bluetooth HCI Transport Koprusu")
         } else {
             String::from("Bluetooth HCI denetleyicisi bulunamadi")
+        };
+
+        let initial_status = if uart_present {
+            String::from("Radyo donanimi ve HCI transport koprusu sorgulaniyor...")
+        } else if let RadioLifecycleState::FirmwareRequired(fw) = pci_hw.wifi_state {
+            alloc::format!(
+                "Kesfedildi (DriverMatched) — Native 802.11 icin '/system/firmware/{}' gerekli.",
+                fw
+            )
+        } else {
+            String::from("Bu makinede kablosuz donanim veya radyo koprusu algilanmadi.")
         };
 
         let mut mgr = WirelessManager {
@@ -188,7 +321,7 @@ impl WirelessManager {
             bt_scanning: false,
             wifi_networks: Vec::new(),
             bt_devices: Vec::new(),
-            status_message: String::from("Radyo donanimi sorgulaniyor..."),
+            status_message: initial_status,
             rx_line: Vec::with_capacity(256),
             staging_wifi: Vec::new(),
             staging_bt: Vec::new(),
@@ -201,11 +334,7 @@ impl WirelessManager {
             mgr.send_command("CMD:BT_SCAN");
             mgr.wifi_scanning = true;
             mgr.bt_scanning = true;
-        } else if !pci_hw.wifi_pci_found {
-            mgr.status_message =
-                String::from("Bu makinede kablosuz donanim veya radyo koprusu algilanmadi.");
         }
-
         mgr
     }
 
@@ -251,14 +380,31 @@ impl WirelessManager {
             self.status_message = String::from("Kablosuz alici kapali.");
             return;
         }
+        if !self.uart_present {
+            if let RadioLifecycleState::FirmwareRequired(fw) = self.pci_hw.wifi_state {
+                self.status_message = alloc::format!(
+                    "Donanim kesfedildi ({:04X}:{:04X}); tarama icin '{}' firmware bekleniyor.",
+                    self.pci_hw.wifi_vendor,
+                    self.pci_hw.wifi_device,
+                    fw
+                );
+            }
+            return;
+        }
         self.wifi_scanning = true;
-        self.status_message = String::from("Cevredeki gercek 802.11 aglari taraniyor...");
+        self.status_message = String::from("Cevredeki 802.11 aglari taraniyor...");
         self.send_command("CMD:WIFI_SCAN");
     }
 
     pub fn request_bt_scan(&mut self) {
         if !self.bt_enabled {
             self.status_message = String::from("Bluetooth denetleyicisi kapali.");
+            return;
+        }
+        if !self.uart_present {
+            self.status_message = String::from(
+                "Bluetooth denetleyicisi kesfedildi (DriverMatched); USB HCI enumeration bekleniyor.",
+            );
             return;
         }
         self.bt_scanning = true;
@@ -293,7 +439,8 @@ impl WirelessManager {
     }
 
     pub fn connect_wifi(&mut self, ssid: &str, password: &str) {
-        self.status_message = alloc::format!("'{}' agina baglaniliyor...", ssid);
+        let masked = mask_secret(password);
+        self.status_message = alloc::format!("'{}' agina baglaniliyor (Kimlik: {})...", ssid, masked);
         let cmd = alloc::format!("CMD:WIFI_CONN|{}|{}", ssid, password);
         self.send_command(&cmd);
     }
@@ -356,7 +503,6 @@ impl WirelessManager {
             return;
         }
         self.bridge_online = true;
-
         if let Some(rest) = line.strip_prefix("H|") {
             let mut parts = rest.split('|');
             if let Some(w_hw) = parts.next() {
@@ -392,7 +538,6 @@ impl WirelessManager {
                 .unwrap_or(50)
                 .min(100);
             let sec = parts.next().unwrap_or("WPA2").trim();
-
             if !ssid.is_empty() && ssid != "--" {
                 if let Some(existing) = self.staging_wifi.iter_mut().find(|n| n.ssid == ssid) {
                     if in_use {
@@ -416,7 +561,7 @@ impl WirelessManager {
             self.wifi_networks = self.staging_wifi.clone();
             self.wifi_scanning = false;
             self.status_message = alloc::format!(
-                "Tarama tamamlandi: {} gercek kablosuz ag bulundu.",
+                "Tarama tamamlandi: {} kablosuz ag bulundu.",
                 self.wifi_networks.len()
             );
         } else if line == "B_CLEAR" {
@@ -431,7 +576,6 @@ impl WirelessManager {
                 .and_then(|s| s.trim().parse::<u8>().ok())
                 .unwrap_or(0);
             let name = parts.next().unwrap_or("").trim();
-
             if !mac.is_empty() && !name.is_empty() && self.staging_bt.len() < 8 {
                 self.staging_bt.push(BluetoothDeviceInfo {
                     mac: String::from(mac),
@@ -445,7 +589,7 @@ impl WirelessManager {
             self.bt_devices = self.staging_bt.clone();
             self.bt_scanning = false;
             self.status_message = alloc::format!(
-                "HCI sorgusu bitti: {} gercek Bluetooth cihazi listelendi.",
+                "HCI sorgusu bitti: {} Bluetooth cihazi listelendi.",
                 self.bt_devices.len()
             );
         } else if let Some(msg) = line.strip_prefix("MSG|") {

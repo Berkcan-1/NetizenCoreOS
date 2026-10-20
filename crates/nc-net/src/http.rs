@@ -39,6 +39,8 @@ pub struct TcpHttpClient {
     dns_tx_id: u16,
     dns_cache: Vec<(String, [u8; 4])>,
     tls: Option<Tls13>,
+    /// Why the last HTTPS connection was rejected (certificate / handshake problem), if it was.
+    pub tls_error: Option<&'static str>,
     request_sent: bool,
     ticks: u32,
     retries: u8,
@@ -49,6 +51,15 @@ pub struct TcpHttpClient {
     /// Timeouts and retries advance once every `tick_every` polls.
     /// Set this high when polling in a tight loop so timers still mean roughly real time.
     pub tick_every: u32,
+    req_method: String,
+    req_headers: Vec<(String, String)>,
+    req_body: Vec<u8>,
+    /// Value for the `Cookie` request header; set by the caller before navigate()/request().
+    pub cookie_header: String,
+    /// Headers of the final response.
+    pub last_headers: Vec<(String, String)>,
+    /// (host, Set-Cookie value) from every response in the redirect chain.
+    pub set_cookies: Vec<(String, String)>,
 }
 
 impl TcpHttpClient {
@@ -70,6 +81,7 @@ impl TcpHttpClient {
             dns_tx_id: 0x1A2B,
             dns_cache: Vec::new(),
             tls: None,
+            tls_error: None,
             request_sent: false,
             ticks: 0,
             retries: 0,
@@ -78,12 +90,41 @@ impl TcpHttpClient {
             pending: None,
             poll_calls: 0,
             tick_every: 1,
+            req_method: String::from("GET"),
+            req_headers: Vec::new(),
+            req_body: Vec::new(),
+            cookie_header: String::new(),
+            last_headers: Vec::new(),
+            set_cookies: Vec::new(),
         }
     }
 
     pub fn navigate(&mut self, url: &str, net: &mut NetworkStack) {
         self.redirects = 0;
+        self.req_method = String::from("GET");
+        self.req_headers.clear();
+        self.req_body.clear();
+        self.set_cookies.clear();
+        self.last_headers.clear();
         self.start(url, net);
+    }
+
+    /// Like `navigate` but with an arbitrary method, extra headers and a body.
+    pub fn request(&mut self, method: &str, url: &str, headers: &[(String, String)], body: &[u8], net: &mut NetworkStack) {
+        self.redirects = 0;
+        self.req_method = method.chars().filter(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_uppercase();
+        if self.req_method.is_empty() {
+            self.req_method = String::from("GET");
+        }
+        self.req_headers = headers.to_vec();
+        self.req_body = body.to_vec();
+        self.set_cookies.clear();
+        self.last_headers.clear();
+        self.start(url, net);
+    }
+
+    fn build_request(&self) -> Vec<u8> {
+        crate::tcp::build_http_request(&self.req_method, &self.host, &self.path, &self.req_headers, &self.req_body, &self.cookie_header)
     }
 
     fn start(&mut self, url: &str, net: &mut NetworkStack) {
@@ -135,6 +176,7 @@ impl TcpHttpClient {
         self.raw_body.clear();
         self.html_body.clear();
         self.tls = None;
+        self.tls_error = None;
         self.request_sent = false;
         self.ticks = 0;
         self.retries = 0;
@@ -296,7 +338,7 @@ impl TcpHttpClient {
             self.state = HttpState::Handshaking;
             self.send_data(net, &hello);
         } else {
-            let req = crate::tcp::build_http_get(&self.host, &self.path);
+            let req = self.build_request();
             self.send_data(net, &req);
             self.request_sent = true;
             self.state = HttpState::RequestSent;
@@ -304,7 +346,7 @@ impl TcpHttpClient {
     }
 
     fn on_payload(&mut self, payload: &[u8], net: &mut NetworkStack) {
-        const MAX_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+        const MAX_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
         if !self.https {
             self.state = HttpState::ReceivingData;
             let space = MAX_RESPONSE_BYTES.saturating_sub(self.response_data.len());
@@ -327,6 +369,7 @@ impl TcpHttpClient {
             self.send_data(net, &out);
         }
         if failed {
+            self.tls_error = self.tls.as_ref().and_then(|t| t.failure_reason());
             if !self.response_data.is_empty() {
                 self.finish(net);
             } else {
@@ -335,7 +378,7 @@ impl TcpHttpClient {
             return;
         }
         if ready && !self.request_sent {
-            let req = crate::tcp::build_http_get(&self.host, &self.path);
+            let req = self.build_request();
             let record = match self.tls.as_mut() {
                 Some(tls) => tls.encrypt_app(&req),
                 None => Vec::new(),
@@ -470,15 +513,29 @@ impl TcpHttpClient {
     fn finish(&mut self, net: &mut NetworkStack) {
         let (status, raw_bytes, html_str) = parse_http_payload_bytes(&self.response_data);
         self.status_code = status;
+        let host_now = self.host.clone();
+        for c in header_values(&self.response_data, "set-cookie") {
+            if self.set_cookies.len() < 64 {
+                self.set_cookies.push((host_now.clone(), c));
+            }
+        }
         if matches!(status, 301 | 302 | 303 | 307 | 308) && self.redirects < 6 {
             if let Some(location) = header_value(&self.response_data, "location") {
                 let url = self.resolve_location(&location);
                 let next_redirects = self.redirects + 1;
+                if status != 307 && status != 308 {
+                    self.req_method = String::from("GET");
+                    self.req_body.clear();
+                }
                 self.start(&url, net);
+                if self.host != host_now {
+                    self.cookie_header.clear();
+                }
                 self.redirects = next_redirects;
                 return;
             }
         }
+        self.last_headers = header_lines(&self.response_data);
         self.raw_body = raw_bytes;
         self.html_body = html_str;
         self.state = HttpState::Complete;
@@ -512,6 +569,42 @@ fn is_http_response_complete(raw: &[u8]) -> bool {
         }
     }
     false
+}
+
+pub fn header_values(raw: &[u8], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let end = match raw.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(e) => e,
+        None => return out,
+    };
+    if let Ok(text) = core::str::from_utf8(&raw[..end]) {
+        for line in text.lines().skip(1) {
+            if let Some((key, value)) = line.split_once(':') {
+                if key.trim().eq_ignore_ascii_case(name) {
+                    out.push(String::from(value.trim()));
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn header_lines(raw: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let end = match raw.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(e) => e,
+        None => return out,
+    };
+    if let Ok(text) = core::str::from_utf8(&raw[..end]) {
+        for line in text.lines().skip(1) {
+            if let Some((key, value)) = line.split_once(':') {
+                if !key.trim().eq_ignore_ascii_case("set-cookie") && out.len() < 64 {
+                    out.push((String::from(key.trim()), String::from(value.trim())));
+                }
+            }
+        }
+    }
+    out
 }
 
 pub fn header_value(raw: &[u8], name: &str) -> Option<String> {

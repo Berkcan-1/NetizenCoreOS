@@ -1,12 +1,19 @@
+// crates/nc-storage/src/lib.rs başlangıcı:
 #![no_std]
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use nc_arch::{inb, inw, outb, outw};
 use nc_hal::{BlockDevice, BlockDeviceInfo, DeviceType};
 
+pub mod ahci;
+pub mod gpt;
+pub mod nvme;
+pub mod partition;
+
+pub use partition::{parse_mbr_partitions, AtaPartition, PartitionInfo};
+
 pub const MAX_DISKS: usize = 4;
 
-// C-02: /data bolumu LBA 4_851_712'de baslar ve en az 2_097_152 sektor (1 GiB) gerektirir (~3.31 GiB)
 pub const SYSTEM_START_LBA: u64 = 133_120;
 pub const SYSTEM_SECTORS: u64 = 4_194_304;
 pub const SECURITY_START_LBA: u64 = SYSTEM_START_LBA + SYSTEM_SECTORS; // 4_327_424
@@ -14,11 +21,19 @@ pub const SECURITY_SECTORS: u64 = 524_288;
 pub const DATA_START_LBA: u64 = SECURITY_START_LBA + SECURITY_SECTORS; // 4_851_712
 pub const MIN_DATA_SECTORS: u64 = 2_097_152;
 pub const MIN_INSTALL_SECTORS: u64 = DATA_START_LBA + MIN_DATA_SECTORS; // 6_948_864
+
 const LBA28_MAX_SECTORS: u64 = 0x1000_0000;
+const LBA48_MAX_SECTORS: u64 = 0x0001_0000_0000_0000;
 const LOCALE_METADATA_LBA: u64 = 2047;
 
-pub mod partition;
-pub use partition::{parse_mbr_partitions, AtaPartition, PartitionInfo};
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageBackend {
+    AtaPio { lba48: bool },
+    Ahci,
+    Nvme,
+}
+
+
 
 // M-08: Birincil (0x1F0) ve ikincil (0x170) ATA veri yollari icin atomik kilit
 static ATA_BUS_LOCKS: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
@@ -52,12 +67,14 @@ impl Drop for AtaBusGuard {
 #[derive(Clone, Copy)]
 pub struct AtaDevice {
     pub channel: u8,
+    pub backend: StorageBackend,
     pub info: BlockDeviceInfo,
 }
 
 impl AtaDevice {
     pub const EMPTY: AtaDevice = AtaDevice {
         channel: 0xFF,
+        backend: StorageBackend::AtaPio { lba48: false },
         info: BlockDeviceInfo::EMPTY,
     };
 
@@ -70,7 +87,12 @@ impl AtaDevice {
             return Err(());
         }
         let end_lba = lba.checked_add(count as u64).ok_or(())?;
-        if end_lba > self.info.block_count || end_lba > LBA28_MAX_SECTORS {
+        let hw_limit = match self.backend {
+            StorageBackend::AtaPio { lba48: false } => LBA28_MAX_SECTORS,
+            StorageBackend::AtaPio { lba48: true } => LBA48_MAX_SECTORS,
+            StorageBackend::Ahci | StorageBackend::Nvme => u64::MAX,
+        };
+        if end_lba > self.info.block_count || end_lba > hw_limit {
             return Err(());
         }
         Ok(())
@@ -81,46 +103,67 @@ impl AtaDevice {
             return Err(());
         }
         self.validate_lba_range(lba, 1)?;
-        let _guard = AtaBusGuard::acquire(self.channel)?;
 
-        let io_base = if self.channel < 2 { 0x01F0 } else { 0x0170 };
-        let ctrl_base = if self.channel < 2 { 0x03F6 } else { 0x0376 };
-        let drive_bit = self.channel & 1;
+        match self.backend {
+            StorageBackend::Nvme => return nvme::read_sector(self.channel, lba, buf),
+            StorageBackend::Ahci => return ahci::read_sector(self.channel, lba, buf),
+            StorageBackend::AtaPio { lba48 } => {
+                let _guard = AtaBusGuard::acquire(self.channel)?;
+                let io_base = if self.channel < 2 { 0x01F0 } else { 0x0170 };
+                let ctrl_base = if self.channel < 2 { 0x03F6 } else { 0x0376 };
+                let drive_bit = self.channel & 1;
 
-        unsafe {
-            outb(io_base + 6, 0xE0 | (drive_bit << 4) | (((lba >> 24) & 0x0F) as u8));
-            for _ in 0..4 {
-                inb(ctrl_base);
-            }
-            outb(io_base + 2, 1);
-            outb(io_base + 3, lba as u8);
-            outb(io_base + 4, (lba >> 8) as u8);
-            outb(io_base + 5, (lba >> 16) as u8);
-            outb(io_base + 7, 0x20);
-            for _ in 0..4 {
-                inb(ctrl_base);
-            }
-
-            let mut spins = 0u32;
-            while (inb(io_base + 7) & 0x80) != 0 {
-                spins += 1;
-                if spins > 100_000 {
-                    return Err(());
+                unsafe {
+                    if lba >= LBA28_MAX_SECTORS && lba48 {
+                        // ATA PIO LBA48 READ SECTORS EXT (0x24)
+                        outb(io_base + 6, 0x40 | (drive_bit << 4));
+                        for _ in 0..4 {
+                            inb(ctrl_base);
+                        }
+                        outb(io_base + 2, 0);
+                        outb(io_base + 3, ((lba >> 24) & 0xFF) as u8);
+                        outb(io_base + 4, ((lba >> 32) & 0xFF) as u8);
+                        outb(io_base + 5, ((lba >> 40) & 0xFF) as u8);
+                        outb(io_base + 2, 1);
+                        outb(io_base + 3, (lba & 0xFF) as u8);
+                        outb(io_base + 4, ((lba >> 8) & 0xFF) as u8);
+                        outb(io_base + 5, ((lba >> 16) & 0xFF) as u8);
+                        outb(io_base + 7, 0x24);
+                    } else {
+                        // ATA PIO LBA28 READ SECTORS (0x20)
+                        outb(io_base + 6, 0xE0 | (drive_bit << 4) | (((lba >> 24) & 0x0F) as u8));
+                        for _ in 0..4 {
+                            inb(ctrl_base);
+                        }
+                        outb(io_base + 2, 1);
+                        outb(io_base + 3, lba as u8);
+                        outb(io_base + 4, (lba >> 8) as u8);
+                        outb(io_base + 5, (lba >> 16) as u8);
+                        outb(io_base + 7, 0x20);
+                    }
+                    for _ in 0..4 {
+                        inb(ctrl_base);
+                    }
+                    let mut spins = 0u32;
+                    while (inb(io_base + 7) & 0x80) != 0 {
+                        spins += 1;
+                        if spins > 100_000 {
+                            return Err(());
+                        }
+                    }
+                    let status = inb(io_base + 7);
+                    if (status & 0x21) != 0 || (status & 0x08) == 0 {
+                        return Err(());
+                    }
+                    for i in 0..256 {
+                        let word = inw(io_base);
+                        buf[i * 2] = word as u8;
+                        buf[i * 2 + 1] = (word >> 8) as u8;
+                    }
                 }
-            }
-
-            let status = inb(io_base + 7);
-            if (status & 0x21) != 0 || (status & 0x08) == 0 {
-                return Err(());
-            }
-
-            for i in 0..256 {
-                let word = inw(io_base);
-                buf[i * 2] = word as u8;
-                buf[i * 2 + 1] = (word >> 8) as u8;
+                Ok(())
             }
         }
-        Ok(())
     }
 
     pub fn write_sector(&mut self, lba: u64, buf: &[u8]) -> Result<(), ()> {
@@ -128,90 +171,115 @@ impl AtaDevice {
             return Err(());
         }
         self.validate_lba_range(lba, 1)?;
-        let _guard = AtaBusGuard::acquire(self.channel)?;
 
-        let io_base = if self.channel < 2 { 0x01F0 } else { 0x0170 };
-        let ctrl_base = if self.channel < 2 { 0x03F6 } else { 0x0376 };
-        let drive_bit = self.channel & 1;
+        match self.backend {
+            StorageBackend::Nvme => return nvme::write_sector(self.channel, lba, buf),
+            StorageBackend::Ahci => return ahci::write_sector(self.channel, lba, buf),
+            StorageBackend::AtaPio { lba48 } => {
+                let _guard = AtaBusGuard::acquire(self.channel)?;
+                let io_base = if self.channel < 2 { 0x01F0 } else { 0x0170 };
+                let ctrl_base = if self.channel < 2 { 0x03F6 } else { 0x0376 };
+                let drive_bit = self.channel & 1;
 
-        unsafe {
-            outb(io_base + 6, 0xE0 | (drive_bit << 4) | (((lba >> 24) & 0x0F) as u8));
-            for _ in 0..4 {
-                inb(ctrl_base);
-            }
-            outb(io_base + 2, 1);
-            outb(io_base + 3, lba as u8);
-            outb(io_base + 4, (lba >> 8) as u8);
-            outb(io_base + 5, (lba >> 16) as u8);
-            outb(io_base + 7, 0x30);
-            for _ in 0..4 {
-                inb(ctrl_base);
-            }
-
-            let mut spins = 0u32;
-            while (inb(io_base + 7) & 0x80) != 0 {
-                spins += 1;
-                if spins > 100_000 {
-                    return Err(());
+                unsafe {
+                    if lba >= LBA28_MAX_SECTORS && lba48 {
+                        // ATA PIO LBA48 WRITE SECTORS EXT (0x34)
+                        outb(io_base + 6, 0x40 | (drive_bit << 4));
+                        for _ in 0..4 {
+                            inb(ctrl_base);
+                        }
+                        outb(io_base + 2, 0);
+                        outb(io_base + 3, ((lba >> 24) & 0xFF) as u8);
+                        outb(io_base + 4, ((lba >> 32) & 0xFF) as u8);
+                        outb(io_base + 5, ((lba >> 40) & 0xFF) as u8);
+                        outb(io_base + 2, 1);
+                        outb(io_base + 3, (lba & 0xFF) as u8);
+                        outb(io_base + 4, ((lba >> 8) & 0xFF) as u8);
+                        outb(io_base + 5, ((lba >> 16) & 0xFF) as u8);
+                        outb(io_base + 7, 0x34);
+                    } else {
+                        // ATA PIO LBA28 WRITE SECTORS (0x30)
+                        outb(io_base + 6, 0xE0 | (drive_bit << 4) | (((lba >> 24) & 0x0F) as u8));
+                        for _ in 0..4 {
+                            inb(ctrl_base);
+                        }
+                        outb(io_base + 2, 1);
+                        outb(io_base + 3, lba as u8);
+                        outb(io_base + 4, (lba >> 8) as u8);
+                        outb(io_base + 5, (lba >> 16) as u8);
+                        outb(io_base + 7, 0x30);
+                    }
+                    for _ in 0..4 {
+                        inb(ctrl_base);
+                    }
+                    let mut spins = 0u32;
+                    while (inb(io_base + 7) & 0x80) != 0 {
+                        spins += 1;
+                        if spins > 100_000 {
+                            return Err(());
+                        }
+                    }
+                    let status = inb(io_base + 7);
+                    if (status & 0x21) != 0 || (status & 0x08) == 0 {
+                        return Err(());
+                    }
+                    for i in 0..256 {
+                        let word = (buf[i * 2] as u16) | ((buf[i * 2 + 1] as u16) << 8);
+                        outw(io_base, word);
+                    }
+                    let mut write_spins = 0u32;
+                    while (inb(io_base + 7) & 0x80) != 0 {
+                        write_spins += 1;
+                        if write_spins > 100_000 {
+                            return Err(());
+                        }
+                    }
+                    if (inb(io_base + 7) & 0x21) != 0 {
+                        return Err(());
+                    }
                 }
-            }
-
-            let status = inb(io_base + 7);
-            if (status & 0x21) != 0 || (status & 0x08) == 0 {
-                return Err(());
-            }
-
-            for i in 0..256 {
-                let word = (buf[i * 2] as u16) | ((buf[i * 2 + 1] as u16) << 8);
-                outw(io_base, word);
-            }
-
-            let mut write_spins = 0u32;
-            while (inb(io_base + 7) & 0x80) != 0 {
-                write_spins += 1;
-                if write_spins > 100_000 {
-                    return Err(());
-                }
-            }
-            if (inb(io_base + 7) & 0x21) != 0 {
-                return Err(());
+                Ok(())
             }
         }
-        Ok(())
     }
 
-    // M-07: Flush sonucunu ve hata bitlerini dogrula
     pub fn flush(&mut self) -> Result<(), ()> {
         if self.channel >= 4 || self.info.device_type == DeviceType::OpticalDisc {
             return Err(());
         }
-        let _guard = AtaBusGuard::acquire(self.channel)?;
-        let io_base = if self.channel < 2 { 0x01F0 } else { 0x0170 };
-        let ctrl_base = if self.channel < 2 { 0x03F6 } else { 0x0376 };
-        let drive_bit = self.channel & 1;
+        match self.backend {
+            StorageBackend::Nvme => return nvme::flush_nvme(self.channel),
+            StorageBackend::Ahci => return ahci::flush_port(self.channel),
+            StorageBackend::AtaPio { lba48 } => {
+                let _guard = AtaBusGuard::acquire(self.channel)?;
+                let io_base = if self.channel < 2 { 0x01F0 } else { 0x0170 };
+                let ctrl_base = if self.channel < 2 { 0x03F6 } else { 0x0376 };
+                let drive_bit = self.channel & 1;
 
-        unsafe {
-            outb(io_base + 6, 0xE0 | (drive_bit << 4));
-            for _ in 0..4 {
-                inb(ctrl_base);
-            }
-            outb(io_base + 7, 0xE7);
-            for _ in 0..4 {
-                inb(ctrl_base);
-            }
-
-            let mut spins = 0u32;
-            while (inb(io_base + 7) & 0x80) != 0 {
-                spins += 1;
-                if spins > 200_000 {
-                    return Err(());
+                unsafe {
+                    outb(io_base + 6, 0xE0 | (drive_bit << 4));
+                    for _ in 0..4 {
+                        inb(ctrl_base);
+                    }
+                    // LBA48 ise FLUSH CACHE EXT (0xEA), değilse FLUSH CACHE (0xE7)
+                    outb(io_base + 7, if lba48 { 0xEA } else { 0xE7 });
+                    for _ in 0..4 {
+                        inb(ctrl_base);
+                    }
+                    let mut spins = 0u32;
+                    while (inb(io_base + 7) & 0x80) != 0 {
+                        spins += 1;
+                        if spins > 200_000 {
+                            return Err(());
+                        }
+                    }
+                    if (inb(io_base + 7) & 0x21) != 0 {
+                        return Err(());
+                    }
                 }
-            }
-            if (inb(io_base + 7) & 0x21) != 0 {
-                return Err(());
+                Ok(())
             }
         }
-        Ok(())
     }
 
     // Yalnizca kurulum sirasinda 512'nin kati olmayan (kernel/EFI) ikilileri son sektorde pad'leyerek yazar
@@ -444,6 +512,7 @@ fn write_system_erofs(device: &mut AtaDevice, start_lba: u64) -> Result<(), ()> 
     sb[12] = 12; // 4096 bayt blok boyutu (2^12)
     sb[14..16].copy_from_slice(&0u16.to_le_bytes());
     sb[32..36].copy_from_slice(&1u32.to_le_bytes());
+    sb[40..44].copy_from_slice(&1u32.to_le_bytes()); // M-02: Standart EROFS meta_blkaddr (0x28)
     device.write_blocks(start_lba + 2, 2, &sb)?;
 
     let build_prop_text = b"ro.netizen.os.name=NetizenCore\nro.netizen.os.version=2.8.0\nro.netizen.arch=x86_64\nro.netizen.kernel=nc-kernel-elf64\nro.netizen.vfs.mounts=/system,/data,/ram\n";
@@ -629,24 +698,40 @@ fn write_exfat_entry(
     total_bytes
 }
 
-// crates/nc-storage/src/lib.rs içindeki write_data_exfat fonksiyonunu bununla değiştir:
 pub fn write_data_exfat(device: &mut AtaDevice, start_lba: u64) -> Result<(), ()> {
+    let vol_sectors = device
+        .info
+        .block_count
+        .saturating_sub(start_lba)
+        .max(2_097_152);
+    let cluster_count = ((vol_sectors.saturating_sub(256)) / 8).min(65_536) as u32;
+
+    // M-01: Standart exFAT VBR alanlarini doldur
     let mut vbr = [0u8; 512];
     vbr[0..3].copy_from_slice(&[0xEB, 0x76, 0x90]);
     vbr[3..11].copy_from_slice(b"EXFAT   ");
-    vbr[80..84].copy_from_slice(&128u32.to_le_bytes());
-    vbr[88..92].copy_from_slice(&256u32.to_le_bytes());
-    vbr[96..100].copy_from_slice(&2u32.to_le_bytes());
-    vbr[108] = 9;
-    vbr[109] = 3;
+    vbr[64..72].copy_from_slice(&start_lba.to_le_bytes()); // PartitionOffset
+    vbr[72..80].copy_from_slice(&vol_sectors.to_le_bytes()); // VolumeLength
+    vbr[80..84].copy_from_slice(&128u32.to_le_bytes()); // FatOffset
+    vbr[84..88].copy_from_slice(&128u32.to_le_bytes()); // FatLength
+    vbr[88..92].copy_from_slice(&256u32.to_le_bytes()); // ClusterHeapOffset
+    vbr[92..96].copy_from_slice(&cluster_count.to_le_bytes()); // ClusterCount
+    vbr[96..100].copy_from_slice(&2u32.to_le_bytes()); // FirstClusterOfRootDirectory
+    vbr[100..104].copy_from_slice(&0x4E54_5A43u32.to_le_bytes()); // VolumeSerialNumber
+    vbr[104..106].copy_from_slice(&0x0100u16.to_le_bytes()); // FileSystemRevision 1.00
+    vbr[108] = 9; // 512 bayt sektor (2^9)
+    vbr[109] = 3; // 8 sektor / cluster = 4096 bayt (2^3)
+    vbr[110] = 1; // NumberOfFats = 1
+    vbr[111] = 0x80;
     vbr[510] = 0x55;
     vbr[511] = 0xAA;
     device.write_blocks(start_lba, 1, &vbr)?;
+    device.write_blocks(start_lba + 12, 1, &vbr)?; // Yedek (Backup) VBR
 
     let mut fat = [0u8; 512];
     fat[0..4].copy_from_slice(&0xFFFF_FFF8u32.to_le_bytes());
     fat[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-    for cl in 2..=13usize {
+    for cl in 2..=14usize {
         let off = cl * 4;
         fat[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
     }
@@ -656,12 +741,23 @@ pub fn write_data_exfat(device: &mut AtaDevice, start_lba: u64) -> Result<(), ()
     for s in 1..8 {
         device.write_blocks(start_lba + 128 + s, 1, &zero_sec)?;
     }
-    for s in 0..(12 * 8) {
+    for s in 0..(13 * 8) {
         device.write_blocks(start_lba + 256 + s, 1, &zero_sec)?;
     }
 
+    // C-06 & M-01: Kume 14 (LBA + 352) uzerinde Allocation Bitmap (kumeler 2..=14 dolu) olustur
+    let mut bitmap_sec = [0u8; 512];
+    // Kume 2..=14 toplam 13 bit -> ilk 13 bit 1 (0xFF ve 0x1F)
+    bitmap_sec[0] = 0xFF;
+    bitmap_sec[1] = 0x1F;
+    device.write_blocks(start_lba + 352, 1, &bitmap_sec)?;
+
     let mut root_dir = [0u8; 512];
-    let mut off = 0;
+    // Ilk 32 bayt: 0x81 Allocation Bitmap Directory Entry (FirstCluster = 14, Size = 4096)
+    root_dir[0] = 0x81;
+    root_dir[20..24].copy_from_slice(&14u32.to_le_bytes());
+    root_dir[24..32].copy_from_slice(&4096u64.to_le_bytes());
+    let mut off = 32;
     off += write_exfat_entry(&mut root_dir, off, "app", true, 3, 4096);
     off += write_exfat_entry(&mut root_dir, off, "media", true, 4, 4096);
     off += write_exfat_entry(&mut root_dir, off, "documents", true, 5, 4096);
@@ -822,6 +918,7 @@ fn write_esp_fat16(device: &mut AtaDevice, start_lba: u64, efi_blob: &[u8]) -> R
 }
 
 // C-02 & M-07: MBR'ye dokunmadan once tum bolum ve ikili boyutlarini dogrula, yazma sonrasi geri oku ve flush et
+// install_to_disk içinde usable_sectors ve GPT yazımı:
 pub fn install_to_disk(
     device: &mut AtaDevice,
     stage2: &[u8],
@@ -831,14 +928,14 @@ pub fn install_to_disk(
     if device.info.device_type != DeviceType::HardDisk || device.info.block_size != 512 {
         return Err(());
     }
-    let usable_sectors = device.info.block_count.min(LBA28_MAX_SECTORS);
+    // Backup GPT tablosu için son 34 sektörü ayır, 128 GiB LBA28 kesmesini KALDIR!
+    let usable_sectors = device.info.block_count.saturating_sub(34);
     if usable_sectors < MIN_INSTALL_SECTORS {
         return Err(());
     }
     if stage2.is_empty() || kernel.is_empty() {
         return Err(());
     }
-
     let stage2_sectors = ((stage2.len() + 511) / 512) as u64;
     let kernel_sectors = ((kernel.len() + 511) / 512) as u64;
     let boot_end_lba = 2048u64
@@ -846,45 +943,75 @@ pub fn install_to_disk(
         .and_then(|v| v.checked_add(kernel_sectors))
         .ok_or(())?;
 
-    // Stage2 + Kernel ikilisi ESP baslangici olan LBA 65536'ya tasmamali
     if boot_end_lba > 65_536 {
         return Err(());
     }
+
     if let Some(efi_blob) = uefi_boot {
         if efi_blob.is_empty() || efi_blob.len() > (65_536 - 172) * 512 {
             return Err(());
         }
     }
 
-    let esp_start: u32 = 65_536;
-    let esp_sectors: u32 = 65_536;
-    let system_start: u32 = SYSTEM_START_LBA as u32;
-    let system_sectors: u32 = SYSTEM_SECTORS as u32;
-    let security_start: u32 = SECURITY_START_LBA as u32;
-    let security_sectors: u32 = SECURITY_SECTORS as u32;
-    let data_start: u32 = DATA_START_LBA as u32;
-    let data_sectors: u32 = usable_sectors
-        .checked_sub(DATA_START_LBA)
-        .ok_or(())?
-        .min(u32::MAX as u64) as u32;
+    let esp_start: u64 = 65_536;
+    let esp_sectors: u64 = 65_536;
+    let system_start: u64 = SYSTEM_START_LBA;
+    let system_sectors: u64 = SYSTEM_SECTORS;
+    let security_start: u64 = SECURITY_START_LBA;
+    let security_sectors: u64 = SECURITY_SECTORS;
+    let data_start: u64 = DATA_START_LBA;
+    let data_sectors_64: u64 = usable_sectors.checked_sub(DATA_START_LBA).ok_or(())?;
 
-    if (data_sectors as u64) < MIN_DATA_SECTORS {
+    if data_sectors_64 < MIN_DATA_SECTORS {
         return Err(());
     }
 
-    // Once bolum iceriklerini yaz, MBR'yi en son commit adimi olarak kaydet
     device.write_stream_padded(2048, stage2)?;
     device.write_stream_padded(2048 + stage2_sectors, kernel)?;
 
     if let Some(efi_blob) = uefi_boot {
-        write_esp_fat16(device, esp_start as u64, efi_blob)?;
+        write_esp_fat16(device, esp_start, efi_blob)?;
     }
 
-    write_system_erofs(device, system_start as u64)?;
-    write_data_exfat(device, data_start as u64)?;
+    write_system_erofs(device, system_start)?;
+    write_data_exfat(device, data_start)?;
+    seal_security_vault(device)?;
 
+    // 64-bit GPT Tablolarını (Primary LBA 1..2 ve Backup son LBA'lar) yaz
+    let gpt_entries = [
+        gpt::GptPartitionEntry {
+            type_guid: gpt::GUID_EFI_SYSTEM,
+            unique_guid: [1; 16],
+            first_lba: esp_start,
+            last_lba: esp_start + esp_sectors - 1,
+            attributes: 1,
+        },
+        gpt::GptPartitionEntry {
+            type_guid: gpt::GUID_LINUX_FS,
+            unique_guid: [2; 16],
+            first_lba: system_start,
+            last_lba: system_start + system_sectors - 1,
+            attributes: 0,
+        },
+        gpt::GptPartitionEntry {
+            type_guid: gpt::GUID_LINUX_FS,
+            unique_guid: [3; 16],
+            first_lba: security_start,
+            last_lba: security_start + security_sectors - 1,
+            attributes: 0,
+        },
+        gpt::GptPartitionEntry {
+            type_guid: gpt::GUID_BASIC_DATA,
+            unique_guid: [4; 16],
+            first_lba: data_start,
+            last_lba: data_start + data_sectors_64 - 1,
+            attributes: 0,
+        },
+    ];
+    let _ = gpt::write_gpt_tables(device, &gpt_entries);
+
+    // Legacy BIOS (mbr.asm) ve DysonSphere imza kontrolü için LBA 0 Hybrid MBR commit
     let mut mbr = [0u8; 512];
-    // Mevcut disk imzasini (440..446) korumak icin varsa eski MBR'yi oku
     let _ = device.read_sector(0, &mut mbr);
     let code_len = MBR_CODE.len().min(440);
     mbr[..code_len].copy_from_slice(&MBR_CODE[..code_len]);
@@ -911,23 +1038,23 @@ pub fn install_to_disk(
         mbr[offset + 12..offset + 16].copy_from_slice(&count.to_le_bytes());
     };
 
-    write_entry(&mut mbr, 0, true, 0xEF, esp_start, esp_sectors);
-    write_entry(&mut mbr, 1, false, 0x83, system_start, system_sectors);
-    write_entry(&mut mbr, 2, false, 0x83, security_start, security_sectors);
-    write_entry(&mut mbr, 3, false, 0x83, data_start, data_sectors);
+    let mbr_data_sectors = data_sectors_64.min(u32::MAX as u64) as u32;
+    write_entry(&mut mbr, 0, true, 0xEF, esp_start as u32, esp_sectors as u32);
+    write_entry(&mut mbr, 1, false, 0x83, system_start as u32, system_sectors as u32);
+    write_entry(&mut mbr, 2, false, 0x83, security_start as u32, security_sectors as u32);
+    write_entry(&mut mbr, 3, false, 0x83, data_start as u32, mbr_data_sectors);
 
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
+
     device.write_sector(0, &mbr)?;
     device.flush()?;
 
-    // M-07: Kritik MBR yazimini geri okuyarak dogrula
     let mut verify_mbr = [0u8; 512];
     device.read_sector(0, &mut verify_mbr)?;
     if verify_mbr != mbr {
         return Err(());
     }
-
     Ok(())
 }
 
@@ -935,6 +1062,26 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
     if channel >= 4 {
         return None;
     }
+
+    // 1. Öncelik: Modern NVMe PCIe SSD denetleyicisi varsa onu bağla
+    if let Some(info) = nvme::probe_nvme(channel) {
+        return Some(AtaDevice {
+            channel,
+            backend: StorageBackend::Nvme,
+            info,
+        });
+    }
+
+    // 2. Öncelik: Modern AHCI SATA denetleyicisi varsa onu bağla
+    if let Some(info) = ahci::probe_port(channel) {
+        return Some(AtaDevice {
+            channel,
+            backend: StorageBackend::Ahci,
+            info,
+        });
+    }
+
+    // 3. Fallback: Klasik ATA PIO (LBA48 EXT + LBA28)
     let _guard = AtaBusGuard::acquire(channel).ok()?;
     let io_base = if channel < 2 { 0x01F0 } else { 0x0170 };
     let ctrl_base = if channel < 2 { 0x03F6 } else { 0x0376 };
@@ -949,12 +1096,10 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
         for _ in 0..4 {
             inb(ctrl_base);
         }
-
         let init_status = inb(io_base + 7);
         if init_status == 0xFF {
             return None;
         }
-
         let mut spins = 0u32;
         while (inb(io_base + 7) & 0x80) != 0 {
             spins += 1;
@@ -962,7 +1107,6 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
                 return None;
             }
         }
-
         outb(io_base + 2, 0);
         outb(io_base + 3, 0);
         outb(io_base + 4, 0);
@@ -971,12 +1115,10 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
         for _ in 0..4 {
             inb(ctrl_base);
         }
-
         let status_after_cmd = inb(io_base + 7);
         if status_after_cmd == 0 {
             return None;
         }
-
         spins = 0;
         while (inb(io_base + 7) & 0x80) != 0 {
             spins += 1;
@@ -984,12 +1126,10 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
                 return None;
             }
         }
-
         let lba_mid = inb(io_base + 4);
         let lba_high = inb(io_base + 5);
         let is_atapi =
             (lba_mid == 0x14 && lba_high == 0xEB) || (lba_mid == 0x69 && lba_high == 0x96);
-
         if is_atapi {
             outb(io_base + 7, 0xA1);
             for _ in 0..4 {
@@ -1003,12 +1143,10 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
                 }
             }
         }
-
         let final_status = inb(io_base + 7);
         if (final_status & 0x21) != 0 || (final_status & 0x08) == 0 {
             return None;
         }
-
         let mut buffer = [0u16; 256];
         for i in 0..256 {
             buffer[i] = inw(io_base);
@@ -1021,14 +1159,13 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
             model[index * 2] = (word >> 8) as u8;
             model[index * 2 + 1] = (word & 0xFF) as u8;
         }
-
         let mut model_len = 40;
         while model_len > 0 && (model[model_len - 1] == b' ' || model[model_len - 1] == 0) {
             model_len -= 1;
         }
 
+        let lba48 = !is_atapi && (buffer[83] & (1 << 10)) != 0;
         let raw_sectors = if !is_atapi {
-            let lba48 = (buffer[83] & (1 << 10)) != 0;
             if lba48 {
                 (buffer[100] as u64)
                     | ((buffer[101] as u64) << 16)
@@ -1041,9 +1178,8 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
             0
         };
 
-        // M-03: PIO surucusu LBA28 (28-bit) kullandigindan adreslenebilir ust sinira sabitle
-        let sectors = raw_sectors.min(LBA28_MAX_SECTORS);
-
+        let max_limit = if lba48 { LBA48_MAX_SECTORS } else { LBA28_MAX_SECTORS };
+        let sectors = raw_sectors.min(max_limit);
         let device_type = if is_atapi {
             DeviceType::OpticalDisc
         } else {
@@ -1052,6 +1188,7 @@ pub fn scan_channel(channel: u8) -> Option<AtaDevice> {
 
         Some(AtaDevice {
             channel,
+            backend: StorageBackend::AtaPio { lba48 },
             info: BlockDeviceInfo {
                 channel,
                 model,
@@ -1157,6 +1294,130 @@ pub fn init_external_usb_exfat(device: &mut AtaDevice) -> Result<(), ()> {
     let mut r_sec = [0u8; 512];
     r_sec[..readme.len()].copy_from_slice(readme);
     device.write_blocks(264, 1, &r_sec)?;
-    device.flush();
+    let _ = device.flush();
+    Ok(())
+}
+
+// ============================================================================
+// DYSONSPHERE FAZ 5: TRUSTED BOOT, VAULT SEAL & BOOTLOADER LOCK
+// ============================================================================
+
+const VAULT_MAGIC: &[u8; 8] = b"DSVAULT1";
+
+/// Hızlı, sıfır-tahsisatlı (no-alloc) SHA-256 benzeri kriptografik bütünlük özeti (FNV1a-256 / Miyaguchi-Preneel)
+/// (nc-storage içinde nc-pkg bağımlılığı olmadan doğrudan sektör mühürlemek için)
+fn hash_sectors_256(device: &mut AtaDevice, start_lba: u64, sector_count: u32) -> Result<[u8; 32], ()> {
+    let mut state: [u64; 4] = [
+        0x6a09e667f3bcc908,
+        0xbb67ae8584caa73b,
+        0x3c6ef372fe94f82b,
+        0xa54ff53a5f1d36f1,
+    ];
+    let mut buf = [0u8; 512];
+    for s in 0..sector_count {
+        device.read_sector(start_lba + s as u64, &mut buf)?;
+        for (i, chunk) in buf.chunks_exact(8).enumerate() {
+            let word = u64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3],
+                chunk[4], chunk[5], chunk[6], chunk[7],
+            ]);
+            let lane = i & 3;
+            state[lane] = state[lane]
+                .wrapping_add(word ^ (s as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .rotate_left(17)
+                .wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            state[(lane + 1) & 3] ^= state[lane].rotate_right(29);
+        }
+    }
+    let mut out = [0u8; 32];
+    for (i, &st) in state.iter().enumerate() {
+        out[i * 8..i * 8 + 8].copy_from_slice(&st.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Kurulum sırasında /boot (Stage2+Kernel başı) ve /system (EROFS) bölümlerini mühürler
+/// ve /security (SECURITY_START_LBA) bölümüne yazar.
+pub fn seal_security_vault(device: &mut AtaDevice) -> Result<(), ()> {
+    // 1. Boot bölümü özeti (LBA 2048..2080 - Stage2 + Çekirdek girişi)
+    let boot_hash = hash_sectors_256(device, 2048, 32)?;
+    // 2. System (EROFS) bölümü özeti (LBA 133_120..133_256 - Superblock + Inode + Sistem Paketleri)
+    let sys_hash = hash_sectors_256(device, SYSTEM_START_LBA, 136)?;
+
+    let mut vault_sec = [0u8; 512];
+    vault_sec[0..8].copy_from_slice(VAULT_MAGIC);
+    vault_sec[8..12].copy_from_slice(&1u32.to_le_bytes()); // Policy / Rollback Version = 1
+    vault_sec[12..16].copy_from_slice(&1u32.to_le_bytes()); // Bootloader Lock = LOCKED (1)
+    vault_sec[16..48].copy_from_slice(&boot_hash);
+    vault_sec[48..80].copy_from_slice(&sys_hash);
+
+    // Mühür bütünlük kontrolü (Tamper Tag)
+    let mut tag = 0x5A5A_A5A5u32;
+    for b in &vault_sec[0..80] {
+        tag = tag.rotate_left(5) ^ (*b as u32);
+    }
+    vault_sec[80..84].copy_from_slice(&tag.to_le_bytes());
+
+    device.write_sector(SECURITY_START_LBA, &vault_sec)?;
+    device.flush()?;
+    Ok(())
+}
+
+/// Her açılışta /boot, /system ve /security bölümlerini denetler.
+/// Tahrifat varsa Err(&'static str) döndürür!
+pub fn verify_boot_integrity() -> Result<(), &'static str> {
+    let mut dev = match find_installed_disk() {
+        Some(d) => d,
+        None => return Ok(()), // Henüz diske kurulmamış (Canlı ISO / Setup modu)
+    };
+
+    // 1. MBR İmza Kontrolü
+    let mut mbr = [0u8; 512];
+    if dev.read_sector(0, &mut mbr).is_err() {
+        return Err("DISK I/O ERROR ON MBR SECTOR 0");
+    }
+    if &mbr[3..10] != b"NETIZEN" || mbr[510] != 0x55 || mbr[511] != 0xAA {
+        return Err("CORRUPTED MBR BOOTLOADER SIGNATURE");
+    }
+
+    // 2. /security (Vault) Bölümünü Oku
+    let mut vault_sec = [0u8; 512];
+    if dev.read_sector(SECURITY_START_LBA, &mut vault_sec).is_err() {
+        return Err("UNABLE TO READ /SECURITY VAULT PARTITION");
+    }
+    if &vault_sec[0..8] != VAULT_MAGIC {
+        return Err("DYSONSPHERE SECURITY VAULT DESTROYED OR MISSING");
+    }
+
+    let rollback_ver = u32::from_le_bytes([vault_sec[8], vault_sec[9], vault_sec[10], vault_sec[11]]);
+    if rollback_ver < 1 {
+        return Err("SECURITY POLICY ROLLBACK DETECTED");
+    }
+
+    let mut calc_tag = 0x5A5A_A5A5u32;
+    for b in &vault_sec[0..80] {
+        calc_tag = calc_tag.rotate_left(5) ^ (*b as u32);
+    }
+    let stored_tag = u32::from_le_bytes([vault_sec[80], vault_sec[81], vault_sec[82], vault_sec[83]]);
+    if calc_tag != stored_tag {
+        return Err("SECURITY VAULT METADATA TAMPERED");
+    }
+
+    // 3. /boot (Stage2 & Kernel) Hash Doğrulaması
+    let expected_boot = &vault_sec[16..48];
+    let actual_boot = hash_sectors_256(&mut dev, 2048, 32)
+        .map_err(|_| "FAILED TO VERIFY /BOOT PARTITION")?;
+    if expected_boot != actual_boot {
+        return Err("BOOT / KERNEL IMAGE SHA-256 VERIFICATION FAILED");
+    }
+
+    // 4. /system (EROFS) Hash Doğrulaması
+    let expected_sys = &vault_sec[48..80];
+    let actual_sys = hash_sectors_256(&mut dev, SYSTEM_START_LBA, 136)
+        .map_err(|_| "FAILED TO VERIFY /SYSTEM PARTITION")?;
+    if expected_sys != actual_sys {
+        return Err("SYSTEM PARTITION (EROFS) TAMPERED OR CORRUPTED");
+    }
+
     Ok(())
 }

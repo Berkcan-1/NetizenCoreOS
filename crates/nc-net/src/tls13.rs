@@ -9,6 +9,13 @@ use nc_arch::rand::HardwareRng;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use crate::tls_verify;
+
+/// DEVELOPMENT ONLY. When `true`, a failed server authentication is logged into `fail_reason`
+/// but the handshake continues, which makes HTTPS vulnerable to man-in-the-middle attacks.
+/// It must stay `false` in every build that touches real accounts or passwords.
+pub const ALLOW_UNVERIFIED_DEV_ONLY: bool = false;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tls13State {
     Start,
@@ -122,6 +129,16 @@ pub struct Tls13 {
     read: Option<Keys>,
     rx: Vec<u8>,
     hs_rx: Vec<u8>,
+    s_hs_secret: [u8; 32],
+    /// 0 = expect EncryptedExtensions, 1 = (CertificateRequest|Certificate), 2 = CertificateVerify, 3 = Finished
+    stage: u8,
+    chain: Vec<Vec<u8>>,
+    cert_hash: [u8; 32],
+    unix_time: Option<u64>,
+    /// Set when the server certificate chain, host name and CertificateVerify were all validated.
+    pub peer_verified: bool,
+    /// Why the handshake failed, for diagnostics.
+    pub fail_reason: Option<&'static str>,
 }
 
 impl Tls13 {
@@ -151,7 +168,24 @@ impl Tls13 {
             read: None,
             rx: Vec::new(),
             hs_rx: Vec::new(),
+            s_hs_secret: [0; 32],
+            stage: 0,
+            chain: Vec::new(),
+            cert_hash: [0; 32],
+            unix_time: None,
+            peer_verified: false,
+            fail_reason: None,
         }
+    }
+
+    /// Supplies the current time (seconds since 1970-01-01 UTC) so certificate validity periods are enforced.
+    /// Without it expiry is NOT checked; wire the OS real-time clock in here as soon as it exists.
+    pub fn set_unix_time(&mut self, unix_secs: Option<u64>) {
+        self.unix_time = unix_secs;
+    }
+
+    pub fn failure_reason(&self) -> Option<&'static str> {
+        self.fail_reason
     }
 
     pub fn is_ready(&self) -> bool {
@@ -185,10 +219,21 @@ impl Tls13 {
         sni.extend_from_slice(name);
         Self::push_ext(&mut ext, 0x0000, &sni);
         Self::push_ext(&mut ext, 0x000a, &[0x00, 0x02, 0x00, 0x1d]);
+        // signature_algorithms: ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384, rsa_pss_rsae_sha256/384/512.
+        // (rsa_pkcs1 is not allowed for CertificateVerify in TLS 1.3 and Ed25519 is not verified yet.)
         Self::push_ext(
             &mut ext,
             0x000d,
-            &[0x00, 0x0c, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x03, 0x08, 0x05, 0x08, 0x07],
+            &[0x00, 0x0a, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06],
+        );
+        // signature_algorithms_cert: what may appear in the certificate chain itself (RSA PKCS#1 v1.5 is common there).
+        Self::push_ext(
+            &mut ext,
+            0x0032,
+            &[
+                0x00, 0x10, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06, 0x04, 0x01, 0x05, 0x01, 0x06,
+                0x01,
+            ],
         );
         Self::push_ext(&mut ext, 0x002b, &[0x02, 0x03, 0x04]);
         Self::push_ext(&mut ext, 0x002d, &[0x01, 0x01]);
@@ -270,10 +315,139 @@ impl Tls13 {
         let client = expand32(&self.hs_secret, "c hs traffic", &hash);
         let server = expand32(&self.hs_secret, "s hs traffic", &hash);
         self.c_hs_secret = client;
+        self.s_hs_secret = server;
         self.write = Some(Keys::from_secret(&client));
         self.read = Some(Keys::from_secret(&server));
         self.state = Tls13State::WaitFlight;
         true
+    }
+
+    fn fail(&mut self, reason: &'static str) -> bool {
+        if self.fail_reason.is_none() {
+            self.fail_reason = Some(reason);
+        }
+        false
+    }
+
+    /// Server `Finished`: HMAC over the transcript up to CertificateVerify, keyed from the server handshake secret.
+    fn server_finished_ok(&self, message: &[u8]) -> bool {
+        if message.len() != 4 + 32 {
+            return false;
+        }
+        let hash = self.transcript_hash();
+        let key = expand32(&self.s_hs_secret, "finished", &[]);
+        let (expected, _) = Hkdf::<Sha256>::extract(Some(&key[..]), &hash[..]);
+        let mut diff = 0u8;
+        for (a, b) in expected.as_slice().iter().zip(message[4..].iter()) {
+            diff |= a ^ b;
+        }
+        diff == 0
+    }
+
+    fn parse_certificate_message(message: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let body = message.get(4..)?;
+        let ctx_len = *body.first()? as usize;
+        let mut p = 1 + ctx_len;
+        let hdr = body.get(p..p + 3)?;
+        let list_len = ((hdr[0] as usize) << 16) | ((hdr[1] as usize) << 8) | hdr[2] as usize;
+        p += 3;
+        if p + list_len != body.len() {
+            return None;
+        }
+        let mut certs: Vec<Vec<u8>> = Vec::new();
+        while p < body.len() {
+            let h = body.get(p..p + 3)?;
+            let cert_len = ((h[0] as usize) << 16) | ((h[1] as usize) << 8) | h[2] as usize;
+            p += 3;
+            let data = body.get(p..p + cert_len)?;
+            p += cert_len;
+            let ext_len = be16(body.get(p..p + 2)?);
+            p += 2;
+            body.get(p..p + ext_len)?;
+            p += ext_len;
+            certs.push(data.to_vec());
+            if certs.len() > 8 {
+                return None;
+            }
+        }
+        if certs.is_empty() {
+            None
+        } else {
+            Some(certs)
+        }
+    }
+
+    fn on_certificate_verify(&mut self, message: &[u8]) -> bool {
+        let body = match message.get(4..) {
+            Some(b) if b.len() >= 4 => b,
+            _ => return self.fail("malformed CertificateVerify"),
+        };
+        let scheme = be16(&body[0..2]) as u16;
+        let sig_len = be16(&body[2..4]);
+        if body.len() != 4 + sig_len {
+            return self.fail("malformed CertificateVerify");
+        }
+        let signature = &body[4..];
+        let result = match tls_verify::verify_chain(&self.chain, &self.host, self.unix_time) {
+            Ok(()) => tls_verify::verify_certificate_verify(&self.chain[0], scheme, &self.cert_hash, signature),
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(()) => {
+                self.peer_verified = true;
+                true
+            }
+            Err(reason) => {
+                self.fail_reason = Some(reason);
+                ALLOW_UNVERIFIED_DEV_ONLY
+            }
+        }
+    }
+
+    fn on_flight_message(&mut self, msg_type: u8, message: &[u8], out: &mut Vec<u8>) -> bool {
+        match (self.stage, msg_type) {
+            // EncryptedExtensions
+            (0, 8) => {
+                self.transcript.update(message);
+                self.stage = 1;
+                true
+            }
+            // CertificateRequest: we have no client certificate, only keep the transcript consistent
+            (1, 13) => {
+                self.transcript.update(message);
+                true
+            }
+            // Certificate
+            (1, 11) => {
+                let chain = match Self::parse_certificate_message(message) {
+                    Some(c) => c,
+                    None => return self.fail("malformed Certificate message"),
+                };
+                self.chain = chain;
+                self.transcript.update(message);
+                self.cert_hash = self.transcript_hash();
+                self.stage = 2;
+                true
+            }
+            // CertificateVerify
+            (2, 15) => {
+                if !self.on_certificate_verify(message) {
+                    return false;
+                }
+                self.transcript.update(message);
+                self.stage = 3;
+                true
+            }
+            // Finished
+            (3, 20) => {
+                if !self.server_finished_ok(message) {
+                    return self.fail("server Finished verification failed");
+                }
+                self.on_server_finished(message, out);
+                true
+            }
+            _ => self.fail("unexpected handshake message"),
+        }
     }
 
     fn on_server_finished(&mut self, message: &[u8], out: &mut Vec<u8>) {
@@ -318,15 +492,15 @@ impl Tls13 {
             match self.state {
                 Tls13State::WaitServerHello => {
                     if !self.on_server_hello(&message) {
+                        self.fail("unsupported or malformed ServerHello");
                         self.state = Tls13State::Failed;
                         break;
                     }
                 }
                 Tls13State::WaitFlight => {
-                    if msg_type == 20 {
-                        self.on_server_finished(&message, out);
-                    } else {
-                        self.transcript.update(&message);
+                    if !self.on_flight_message(msg_type, &message, out) {
+                        self.state = Tls13State::Failed;
+                        break;
                     }
                 }
                 _ => {}

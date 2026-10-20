@@ -1,5 +1,7 @@
-use nc_hal::{BlockDevice, BlockDeviceInfo};
+// crates/nc-storage/src/partition.rs içinde parse_mbr_partitions güncellemesi:
+use crate::gpt::parse_gpt_partitions;
 use crate::AtaDevice;
+use nc_hal::{BlockDevice, BlockDeviceInfo};
 
 #[derive(Clone, Copy)]
 pub struct PartitionInfo {
@@ -53,6 +55,23 @@ impl BlockDevice for AtaPartition {
 }
 
 pub fn parse_mbr_partitions(device: &mut dyn BlockDevice) -> [Option<PartitionInfo>; 4] {
+    // 1. Önce 64-bit GPT (GUID Partition Table) var mı kontrol et
+    if let Some(gpt_entries) = parse_gpt_partitions(device) {
+        let mut out = [None; 4];
+        for i in 0..4 {
+            if let Some(ge) = gpt_entries[i] {
+                out[i] = Some(PartitionInfo {
+                    start_lba: ge.first_lba,
+                    sector_count: ge.sector_count(),
+                    partition_type: if i == 0 { 0xEF } else { 0x83 },
+                    bootable: i == 0,
+                });
+            }
+        }
+        return out;
+    }
+
+    // 2. GPT yoksa klasik MBR bölüm tablosunu ayrıştır
     let mut sector = [0u8; 512];
     if device.read_blocks(0, 1, &mut sector).is_err() {
         return [None, None, None, None];
@@ -60,6 +79,7 @@ pub fn parse_mbr_partitions(device: &mut dyn BlockDevice) -> [Option<PartitionIn
     if sector[510] != 0x55 || sector[511] != 0xAA {
         return [None, None, None, None];
     }
+
     let mut partitions = [None, None, None, None];
     for i in 0..4 {
         let offset = 446 + i * 16;
@@ -80,6 +100,7 @@ pub fn parse_mbr_partitions(device: &mut dyn BlockDevice) -> [Option<PartitionIn
             sector[offset + 14],
             sector[offset + 15],
         ]) as u64;
+
         if sector_count > 0 {
             partitions[i] = Some(PartitionInfo {
                 start_lba,

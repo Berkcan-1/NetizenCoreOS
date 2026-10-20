@@ -1,5 +1,6 @@
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 pub const TCP_FIN: u8 = 0x01;
@@ -91,18 +92,52 @@ pub fn user_agent_for_host(_host: &str) -> &'static str {
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 NetizenCore/1.0"
 }
 
-pub fn build_http_get(host: &str, path: &str) -> Vec<u8> {
-    let mut req = Vec::new();
-    req.extend_from_slice(b"GET ");
-    req.extend_from_slice(path.as_bytes());
+fn clean_header(s: &str) -> String {
+    s.chars().filter(|c| *c != '\r' && *c != '\n').collect()
+}
+
+pub fn build_http_request(method: &str, host: &str, path: &str, headers: &[(String, String)], body: &[u8], cookie: &str) -> Vec<u8> {
+    let has = |n: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(n));
+    let mut req: Vec<u8> = Vec::new();
+    req.extend_from_slice(method.as_bytes());
+    req.push(b' ');
+    req.extend_from_slice(clean_header(path).as_bytes());
     req.extend_from_slice(b" HTTP/1.1\r\nHost: ");
     req.extend_from_slice(host.as_bytes());
     req.extend_from_slice(b"\r\nUser-Agent: ");
     req.extend_from_slice(user_agent_for_host(host).as_bytes());
-    req.extend_from_slice(
-        b"\r\nAccept: text/html,application/xhtml+xml,text/css,application/json,image/png,image/jpeg,image/bmp,image/svg+xml;q=0.9,*/*;q=0.5\r\nAccept-Language: tr-TR,tr;q=0.9,en;q=0.7\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-    );
+    if !has("accept") {
+        req.extend_from_slice(b"\r\nAccept: text/html,application/xhtml+xml,text/css,application/json,image/png,image/jpeg,image/bmp,image/svg+xml;q=0.9,*/*;q=0.5");
+    }
+    if !has("accept-language") {
+        req.extend_from_slice(b"\r\nAccept-Language: tr-TR,tr;q=0.9,en;q=0.7");
+    }
+    req.extend_from_slice(b"\r\nAccept-Encoding: identity\r\nConnection: close");
+    if !cookie.is_empty() {
+        req.extend_from_slice(b"\r\nCookie: ");
+        req.extend_from_slice(clean_header(cookie).as_bytes());
+    }
+    for (k, v) in headers.iter() {
+        let kl = k.to_ascii_lowercase();
+        if matches!(kl.as_str(), "host" | "user-agent" | "content-length" | "connection" | "accept-encoding" | "cookie" | "transfer-encoding") {
+            continue;
+        }
+        req.extend_from_slice(b"\r\n");
+        req.extend_from_slice(clean_header(k).as_bytes());
+        req.extend_from_slice(b": ");
+        req.extend_from_slice(clean_header(v).as_bytes());
+    }
+    if !body.is_empty() || matches!(method, "POST" | "PUT" | "PATCH") {
+        req.extend_from_slice(b"\r\nContent-Length: ");
+        req.extend_from_slice(alloc::format!("{}", body.len()).as_bytes());
+    }
+    req.extend_from_slice(b"\r\n\r\n");
+    req.extend_from_slice(body);
     req
+}
+
+pub fn build_http_get(host: &str, path: &str) -> Vec<u8> {
+    build_http_request("GET", host, path, &[], &[], "")
 }
 
 pub fn build_tcp_segment(

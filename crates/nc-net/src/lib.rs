@@ -1,27 +1,35 @@
+// crates/nc-net/src/lib.rs başlangıcı:
 #![no_std]
 extern crate alloc;
 
 pub mod dhcp;
 pub mod dns;
 pub mod http;
+pub mod rtl8168;
 pub mod tcp;
 pub mod tls;
 pub mod tls13;
 pub mod tls_engine;
+pub mod tls_verify;
 pub mod wireless;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use nc_arch::{inl, outl};
+use nc_driver::dma::{DmaBuffer, DmaMask};
+use nc_driver::pci::{enumerate_pci_bus, PciEndpoint};
 
 pub use dhcp::{DhcpAction, DhcpClient, DhcpState};
 pub use dns::{encode_dns_query, parse_dns_response};
 pub use http::{HttpState, TcpHttpClient};
-pub use tcp::{build_ethernet_frame, build_ipv4_packet, build_tcp_segment, TcpSocket, TcpState, TCP_ACK, TCP_FIN, TCP_PSH, TCP_SYN};
+pub use tcp::{
+    build_ethernet_frame, build_ipv4_packet, build_tcp_segment, TcpSocket, TcpState, TCP_ACK,
+    TCP_FIN, TCP_PSH, TCP_SYN,
+};
 pub use tls::{build_tls_client_hello, parse_tls_record};
 
 pub const E1000_VENDOR_ID: u16 = 0x8086;
 pub const E1000_DEVICE_ID: u16 = 0x100E;
+pub const REALTEK_VENDOR_ID: u16 = 0x10EC;
 
 pub fn build_udp_packet(
     _src_ip: [u8; 4],
@@ -40,30 +48,6 @@ pub fn build_udp_packet(
     pkt
 }
 
-fn pci_read_config_32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
-    let address = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xFC);
-    unsafe {
-        outl(0xCF8, address);
-        inl(0xCFC)
-    }
-}
-
-fn pci_write_config_32(bus: u8, dev: u8, func: u8, offset: u8, val: u32) {
-    let address = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xFC);
-    unsafe {
-        outl(0xCF8, address);
-        outl(0xCFC, val);
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct PciDeviceInfo {
     pub bus: u8,
@@ -73,44 +57,6 @@ pub struct PciDeviceInfo {
     pub device_id: u16,
     pub bar0: u32,
     pub irq: u8,
-}
-
-pub fn scan_pci_e1000() -> Option<PciDeviceInfo> {
-    for bus in 0..=255 {
-        for dev in 0..32 {
-            for func in 0..8 {
-                let vendor_dev = pci_read_config_32(bus, dev, func, 0x00);
-                let vendor_id = (vendor_dev & 0xFFFF) as u16;
-                let device_id = ((vendor_dev >> 16) & 0xFFFF) as u16;
-
-                let is_supported_e1000 = vendor_id == E1000_VENDOR_ID
-                    && matches!(
-                        device_id,
-                        0x100E | 0x100F | 0x1004 | 0x10D3 | 0x1502 | 0x153A | 0x15B7 | 0x15B8
-                    );
-                if is_supported_e1000 {
-                    
-                    let bar0 = pci_read_config_32(bus, dev, func, 0x10);
-                    let irq_info = pci_read_config_32(bus, dev, func, 0x3C);
-                    let irq = (irq_info & 0xFF) as u8;
-
-                    let cmd = pci_read_config_32(bus, dev, func, 0x04);
-                    pci_write_config_32(bus, dev, func, 0x04, cmd | 0x07);
-
-                    return Some(PciDeviceInfo {
-                        bus,
-                        dev,
-                        func,
-                        vendor_id,
-                        device_id,
-                        bar0: bar0 & 0xFFFF_FFF0,
-                        irq,
-                    });
-                }
-            }
-        }
-    }
-    None
 }
 
 #[repr(C, align(16))]
@@ -136,22 +82,93 @@ pub struct TxDesc {
     pub special: u16,
 }
 
+const E1000_NUM_RX: usize = 64;
+const E1000_NUM_TX: usize = 16;
+
+enum NicBackend {
+    IntelE1000 {
+        rx_ring_dma: DmaBuffer,
+        tx_ring_dma: DmaBuffer,
+        rx_bufs_dma: Vec<DmaBuffer>,
+        tx_bufs_dma: Vec<DmaBuffer>,
+    },
+    Realtek8168(rtl8168::Rtl8168Driver),
+}
+
 pub struct E1000Driver {
     pub pci: PciDeviceInfo,
     pub mmio_base: usize,
     pub mac_addr: [u8; 6],
-    pub rx_descs: Vec<RxDesc>,
-    pub tx_descs: Vec<TxDesc>,
-    pub rx_buffers: Vec<Vec<u8>>,
-    pub tx_buffers: Vec<Vec<u8>>,
     pub rx_cur: usize,
     pub tx_cur: usize,
+    backend: NicBackend,
+}
+
+pub fn scan_pci_e1000() -> Option<PciDeviceInfo> {
+    for ep in enumerate_pci_bus() {
+        let is_intel = ep.vendor_id == E1000_VENDOR_ID
+            && matches!(
+                ep.device_id,
+                0x100E | 0x100F | 0x1004 | 0x10D3 | 0x1502 | 0x153A | 0x15B7 | 0x15B8
+            );
+        let is_realtek = ep.vendor_id == REALTEK_VENDOR_ID
+            && matches!(ep.device_id, 0x8168 | 0x8169 | 0x8136 | 0x8125);
+
+        if is_intel || is_realtek {
+            let mmio = ep
+                .bar(0)
+                .mmio_base()
+                .or_else(|| ep.bar(2).mmio_base())
+                .unwrap_or(0) as u32;
+            return Some(PciDeviceInfo {
+                bus: ep.loc.bus,
+                dev: ep.loc.dev,
+                func: ep.loc.func,
+                vendor_id: ep.vendor_id,
+                device_id: ep.device_id,
+                bar0: mmio,
+                irq: ep.irq_line,
+            });
+        }
+    }
+    None
+}
+
+fn find_matching_endpoint(pci: PciDeviceInfo) -> Option<PciEndpoint> {
+    enumerate_pci_bus().into_iter().find(|ep| {
+        ep.loc.bus == pci.bus && ep.loc.dev == pci.dev && ep.loc.func == pci.func
+    })
 }
 
 impl E1000Driver {
     pub fn new(pci: PciDeviceInfo) -> Self {
+        // 1. Eğer kart Realtek RTL8111/8168 ise native Realtek PCIe sürücüsünü başlat
+        if pci.vendor_id == REALTEK_VENDOR_ID {
+            if let Some(ep) = find_matching_endpoint(pci) {
+                if let Some(rtl) = rtl8168::Rtl8168Driver::try_new(ep) {
+                    let mac_addr = rtl.mac_addr;
+                    let mmio_base = rtl.mmio_base;
+                    return E1000Driver {
+                        pci,
+                        mmio_base,
+                        mac_addr,
+                        rx_cur: 0,
+                        tx_cur: 0,
+                        backend: NicBackend::Realtek8168(rtl),
+                    };
+                }
+            }
+        }
+
+        // 2. Intel PRO/1000 (E1000 / 82540EM / 82574L / I217 / I219) DMA kurulumu
+        let mut ep_opt = find_matching_endpoint(pci);
+        if let Some(ref mut ep) = ep_opt {
+            ep.enable_resource_decoding(true, false);
+        }
+
         let mmio_base = pci.bar0 as usize;
         let mut mac_addr = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
         if mmio_base != 0 {
             let mac_low = unsafe { core::ptr::read_volatile((mmio_base + 0x5400) as *const u32) };
             let mac_high = unsafe { core::ptr::read_volatile((mmio_base + 0x5404) as *const u32) };
@@ -164,62 +181,117 @@ impl E1000Driver {
                 mac_addr[5] = ((mac_high >> 8) & 0xFF) as u8;
             }
         }
-        let num_rx = 64;
-        let num_tx = 16;
-        let mut rx_descs = Vec::with_capacity(num_rx);
-        let mut tx_descs = Vec::with_capacity(num_tx);
-        let mut rx_buffers = Vec::with_capacity(num_rx);
-        let mut tx_buffers = Vec::with_capacity(num_tx);
-        for _ in 0..num_rx {
-            let mut buf = Vec::with_capacity(2048);
-            buf.resize(2048, 0u8);
-            let ptr = buf.as_ptr() as u64;
-            rx_descs.push(RxDesc {
-                addr: ptr,
-                length: 0,
-                checksum: 0,
-                status: 0,
-                errors: 0,
-                special: 0,
-            });
-            rx_buffers.push(buf);
+
+        let mut rx_ring_dma = DmaBuffer::allocate(
+            E1000_NUM_RX * core::mem::size_of::<RxDesc>(),
+            128,
+            DmaMask::Bits64,
+        )
+        .expect("E1000 RX ring DMA hatasi");
+        let mut tx_ring_dma = DmaBuffer::allocate(
+            E1000_NUM_TX * core::mem::size_of::<TxDesc>(),
+            128,
+            DmaMask::Bits64,
+        )
+        .expect("E1000 TX ring DMA hatasi");
+
+        let mut rx_bufs_dma = Vec::with_capacity(E1000_NUM_RX);
+        let mut tx_bufs_dma = Vec::with_capacity(E1000_NUM_TX);
+
+        unsafe {
+            let rx_descs = rx_ring_dma
+                .as_typed_slice_mut::<RxDesc>(E1000_NUM_RX)
+                .unwrap();
+            for i in 0..E1000_NUM_RX {
+                let buf = DmaBuffer::allocate(2048, 64, DmaMask::Bits64).unwrap();
+                rx_descs[i] = RxDesc {
+                    addr: buf.phys_addr(),
+                    length: 0,
+                    checksum: 0,
+                    status: 0,
+                    errors: 0,
+                    special: 0,
+                };
+                rx_bufs_dma.push(buf);
+            }
+
+            let tx_descs = tx_ring_dma
+                .as_typed_slice_mut::<TxDesc>(E1000_NUM_TX)
+                .unwrap();
+            for i in 0..E1000_NUM_TX {
+                let buf = DmaBuffer::allocate(2048, 64, DmaMask::Bits64).unwrap();
+                tx_descs[i] = TxDesc {
+                    addr: buf.phys_addr(),
+                    length: 0,
+                    cso: 0,
+                    cmd: 0,
+                    status: 1, // DD (Descriptor Done) = 1
+                    css: 0,
+                    special: 0,
+                };
+                tx_bufs_dma.push(buf);
+            }
         }
-        for _ in 0..num_tx {
-            let mut buf = Vec::with_capacity(2048);
-            buf.resize(2048, 0u8);
-            let ptr = buf.as_ptr() as u64;
-            tx_descs.push(TxDesc {
-                addr: ptr,
-                length: 0,
-                cso: 0,
-                cmd: 0,
-                status: 1,
-                css: 0,
-                special: 0,
-            });
-            tx_buffers.push(buf);
-        }
+
+        rx_ring_dma.sync_for_device();
+        tx_ring_dma.sync_for_device();
 
         if mmio_base != 0 {
             unsafe {
+                // CTRL (0x0000): SLU (Set Link Up - Bit 6) | ASDE (Bit 5)
                 let ctrl = core::ptr::read_volatile(mmio_base as *const u32);
                 core::ptr::write_volatile(mmio_base as *mut u32, ctrl | (1 << 6) | (1 << 5));
+                // IMC (0x00D8): Kesmeleri maskele
                 core::ptr::write_volatile((mmio_base + 0x00D8) as *mut u32, 0xFFFF_FFFF);
-                let rx_base_ptr = rx_descs.as_ptr() as u32;
-                core::ptr::write_volatile((mmio_base + 0x2800) as *mut u32, rx_base_ptr);
-                core::ptr::write_volatile((mmio_base + 0x2804) as *mut u32, 0);
-                core::ptr::write_volatile((mmio_base + 0x2808) as *mut u32, (num_rx * 16) as u32);
-                core::ptr::write_volatile((mmio_base + 0x2810) as *mut u32, 0);
-                core::ptr::write_volatile((mmio_base + 0x2818) as *mut u32, (num_rx - 1) as u32);
-                core::ptr::write_volatile((mmio_base + 0x0100) as *mut u32, (1 << 1) | (1 << 15) | (1 << 26));
 
-                let tx_base_ptr = tx_descs.as_ptr() as u32;
-                core::ptr::write_volatile((mmio_base + 0x3800) as *mut u32, tx_base_ptr);
-                core::ptr::write_volatile((mmio_base + 0x3804) as *mut u32, 0);
-                core::ptr::write_volatile((mmio_base + 0x3808) as *mut u32, (num_tx * 16) as u32);
+                // 64-bit fiziksel RX Ring adresini RDBAL (0x2800) ve RDBAH (0x2804) yazmaçlarına yaz
+                let rx_phys = rx_ring_dma.phys_addr();
+                core::ptr::write_volatile(
+                    (mmio_base + 0x2800) as *mut u32,
+                    (rx_phys & 0xFFFF_FFFF) as u32,
+                );
+                core::ptr::write_volatile(
+                    (mmio_base + 0x2804) as *mut u32,
+                    (rx_phys >> 32) as u32,
+                );
+                core::ptr::write_volatile(
+                    (mmio_base + 0x2808) as *mut u32,
+                    (E1000_NUM_RX * 16) as u32,
+                );
+                core::ptr::write_volatile((mmio_base + 0x2810) as *mut u32, 0);
+                core::ptr::write_volatile(
+                    (mmio_base + 0x2818) as *mut u32,
+                    (E1000_NUM_RX - 1) as u32,
+                );
+                core::ptr::write_volatile(
+                    (mmio_base + 0x0100) as *mut u32,
+                    (1 << 1) | (1 << 15) | (1 << 26),
+                );
+
+                // 64-bit fiziksel TX Ring adresini TDBAL (0x3800) ve TDBAH (0x3804) yazmaçlarına yaz
+                let tx_phys = tx_ring_dma.phys_addr();
+                core::ptr::write_volatile(
+                    (mmio_base + 0x3800) as *mut u32,
+                    (tx_phys & 0xFFFF_FFFF) as u32,
+                );
+                core::ptr::write_volatile(
+                    (mmio_base + 0x3804) as *mut u32,
+                    (tx_phys >> 32) as u32,
+                );
+                core::ptr::write_volatile(
+                    (mmio_base + 0x3808) as *mut u32,
+                    (E1000_NUM_TX * 16) as u32,
+                );
                 core::ptr::write_volatile((mmio_base + 0x3810) as *mut u32, 0);
                 core::ptr::write_volatile((mmio_base + 0x3818) as *mut u32, 0);
-                core::ptr::write_volatile((mmio_base + 0x0400) as *mut u32, (1 << 1) | (1 << 3) | (0x0F << 4));
+                core::ptr::write_volatile(
+                    (mmio_base + 0x0400) as *mut u32,
+                    (1 << 1) | (1 << 3) | (0x0F << 4),
+                );
+            }
+            // DMA adresleri doğrulandıktan sonra Bus Mastering açılır
+            if let Some(ref mut ep) = ep_opt {
+                ep.enable_bus_mastering();
             }
         }
 
@@ -227,51 +299,112 @@ impl E1000Driver {
             pci,
             mmio_base,
             mac_addr,
-            rx_descs,
-            tx_descs,
-            rx_buffers,
-            tx_buffers,
             rx_cur: 0,
             tx_cur: 0,
+            backend: NicBackend::IntelE1000 {
+                rx_ring_dma,
+                tx_ring_dma,
+                rx_bufs_dma,
+                tx_bufs_dma,
+            },
+        }
+    }
+
+    /// Gerçek donanım PHY/STATUS yazmacından hat durumunu (Link Up) okur
+    pub fn is_link_up(&self) -> bool {
+        match &self.backend {
+            NicBackend::Realtek8168(rtl) => rtl.is_link_up(),
+            NicBackend::IntelE1000 { .. } => {
+                if self.mmio_base == 0 {
+                    return false;
+                }
+                // E1000 STATUS Register (0x0008), Bit 1 = LU (Link Up)
+                let status =
+                    unsafe { core::ptr::read_volatile((self.mmio_base + 0x0008) as *const u32) };
+                (status & (1 << 1)) != 0
+            }
         }
     }
 
     pub fn send_packet(&mut self, data: &[u8]) -> Result<(), ()> {
-        if data.len() > 2048 {
+        if data.is_empty() || data.len() > 2048 {
             return Err(());
         }
-        let idx = self.tx_cur;
-        self.tx_buffers[idx][..data.len()].copy_from_slice(data);
-        self.tx_descs[idx].length = data.len() as u16;
-        self.tx_descs[idx].cmd = (1 << 0) | (1 << 1) | (1 << 3);
-        self.tx_descs[idx].status = 0;
-        self.tx_cur = (self.tx_cur + 1) % self.tx_descs.len();
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        if self.mmio_base != 0 {
-            unsafe {
-                core::ptr::write_volatile((self.mmio_base + 0x3818) as *mut u32, self.tx_cur as u32);
+        match &mut self.backend {
+            NicBackend::Realtek8168(rtl) => rtl.send_packet(data),
+            NicBackend::IntelE1000 {
+                tx_ring_dma,
+                tx_bufs_dma,
+                ..
+            } => {
+                let idx = self.tx_cur;
+                let tx_descs = tx_ring_dma.virt_ptr() as *mut TxDesc;
+
+                unsafe {
+                    tx_ring_dma.sync_for_cpu();
+                    let prev_status = core::ptr::read_volatile(&(*tx_descs.add(idx)).status);
+                    if (prev_status & 1) == 0 {
+                        return Err(());
+                    }
+
+                    tx_bufs_dma[idx].as_mut_slice()[..data.len()].copy_from_slice(data);
+                    tx_bufs_dma[idx].sync_for_device();
+
+                    let desc_ptr = tx_descs.add(idx);
+                    (*desc_ptr).length = data.len() as u16;
+                    (*desc_ptr).cmd = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS
+                    (*desc_ptr).status = 0;
+                    tx_ring_dma.sync_for_device();
+
+                    self.tx_cur = (idx + 1) % E1000_NUM_TX;
+                    if self.mmio_base != 0 {
+                        core::ptr::write_volatile(
+                            (self.mmio_base + 0x3818) as *mut u32,
+                            self.tx_cur as u32,
+                        );
+                    }
+                }
+                Ok(())
             }
         }
-        Ok(())
     }
 
     pub fn poll_rx(&mut self) -> Option<Vec<u8>> {
-        let idx = self.rx_cur;
-        let status = unsafe { core::ptr::read_volatile(&self.rx_descs[idx].status) };
-        if (status & 1) != 0 {
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            let len = (unsafe { core::ptr::read_volatile(&self.rx_descs[idx].length) } as usize).min(2048);
-            let packet = self.rx_buffers[idx][..len].to_vec();
-            self.rx_descs[idx].status = 0;
-            self.rx_cur = (self.rx_cur + 1) % self.rx_descs.len();
-            if self.mmio_base != 0 {
+        match &mut self.backend {
+            NicBackend::Realtek8168(rtl) => rtl.poll_rx(),
+            NicBackend::IntelE1000 {
+                rx_ring_dma,
+                rx_bufs_dma,
+                ..
+            } => {
+                let idx = self.rx_cur;
+                let rx_descs = rx_ring_dma.virt_ptr() as *mut RxDesc;
+
                 unsafe {
-                    core::ptr::write_volatile((self.mmio_base + 0x2818) as *mut u32, idx as u32);
+                    rx_ring_dma.sync_for_cpu();
+                    let status = core::ptr::read_volatile(&(*rx_descs.add(idx)).status);
+                    if (status & 1) != 0 {
+                        let len = (core::ptr::read_volatile(&(*rx_descs.add(idx)).length) as usize)
+                            .min(2048);
+                        rx_bufs_dma[idx].sync_for_cpu();
+                        let packet = rx_bufs_dma[idx].as_slice()[..len].to_vec();
+
+                        (*rx_descs.add(idx)).status = 0;
+                        rx_ring_dma.sync_for_device();
+
+                        self.rx_cur = (idx + 1) % E1000_NUM_RX;
+                        if self.mmio_base != 0 {
+                            core::ptr::write_volatile(
+                                (self.mmio_base + 0x2818) as *mut u32,
+                                idx as u32,
+                            );
+                        }
+                        Some(packet)
+                    } else {
+                        None
+                    }
                 }
             }
-            Some(packet)
-        } else {
-            None
         }
     }
 }
