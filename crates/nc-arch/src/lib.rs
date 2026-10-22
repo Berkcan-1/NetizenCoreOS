@@ -79,3 +79,28 @@ pub fn reboot() -> ! {
         core::hint::spin_loop();
     }
 }
+
+pub fn enable_cpu_hardening() -> (bool, bool) {
+    let mut smep_active = false;
+    unsafe {
+        // 1. CR0.WP (Bit 16) kesin olarak aç
+        let mut cr0: u64;
+        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+        cr0 |= 1 << 16;
+        asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
+
+        // 2. CPUID.(EAX=7, ECX=0):EBX[bit 7] ile SMEP desteğini kontrol et
+        let max_leaf = core::arch::x86_64::__cpuid(0).eax;
+        if max_leaf >= 7 {
+            let cpuid7 = core::arch::x86_64::__cpuid_count(7, 0);
+            if (cpuid7.ebx & (1 << 7)) != 0 {
+                let mut cr4: u64;
+                asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+                cr4 |= 1 << 20; // CR4.SMEP
+                asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+                smep_active = true;
+            }
+        }
+    }
+    (true, smep_active)
+}

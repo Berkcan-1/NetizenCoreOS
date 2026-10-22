@@ -4,12 +4,16 @@ extern crate alloc;
 
 mod cookies;
 mod css;
+mod cssvalues;
 mod dom;
+mod font_cov;
+mod gif;
 mod html;
 mod image;
 mod jsdom;
 mod layout;
 mod sel;
+mod supports;
 mod url;
 
 use alloc::rc::Rc;
@@ -33,7 +37,10 @@ use crate::dom::{DomTree, NodeType};
 use crate::html::{sanitize_text, HtmlParser, MAX_HTML_BYTES};
 use crate::image::DecodedImage;
 use crate::jsdom::{create_runtime, pending_scripts, pump_step, run_js_call, run_script, JsHost};
-use crate::layout::{LayoutBox, LayoutEngine, WidgetKind};
+use crate::layout::{
+    page_text_style, set_viewport, LayoutBox, LayoutEngine, WidgetKind, DECO_LINE_THROUGH, DECO_OVERLINE,
+    DECO_UNDERLINE,
+};
 use crate::url::{build_form_url, normalize_input_url, resolve_url};
 
 const MAX_SUGGESTIONS: usize = 6;
@@ -60,7 +67,7 @@ const HOME_HTML: &str = "<html><head><title>NetizenCore Browser</title></head>\
 <p><a href=\"https://www.google.com/\">Google</a></p>\
 <p><a href=\"http://info.cern.ch/\">info.cern.ch</a></p>\
 <p><a href=\"https://example.com/\">example.com</a></p>\
-<p style=\"color:#64748b\">Tip: type view-source:URL to see page source, about:debug for script errors</p>\
+<p style=\"color:#64748b\">Tip: view-source:URL shows page source, about:debug lists script errors, about:compat tests engine features</p>\
 </div></body></html>";
 
 #[derive(Clone, PartialEq, Eq)]
@@ -105,6 +112,7 @@ pub struct BrowserApp {
     img_queue: Vec<(String, String)>,
     css_tried: Vec<String>,
     img_tried: Vec<String>,
+    img_skipped: Vec<(String, &'static str)>,
     img_total: usize,
     img_done: usize,
     layout: LayoutEngine,
@@ -148,6 +156,9 @@ fn empty_layout() -> LayoutEngine {
     LayoutEngine::build(&tree, &sheet, &mut imgs, 320)
 }
 
+/// Self-test page (`about:compat`): see compat_probe.html.
+const COMPAT_HTML: &str = include_str!("compat_probe.html");
+
 fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -156,27 +167,37 @@ fn html_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '&' => out.push_str("&amp;"),
             '"' => out.push_str("&quot;"),
-            c if c.is_ascii() => out.push(c),
-            _ => out.push('?'),
+            c => out.push(c),
         }
     }
     out
 }
 
-fn wants_image(src: &str) -> bool {
-    if src.is_empty() || src.starts_with("data:") {
-        return false;
+/// Why an image URL is *not* fetched, or `None` when it should be. Formats the decoder in
+/// `image.rs` cannot read yet are skipped on purpose (no wasted download), but every skip is
+/// recorded and shown on `about:debug` instead of silently producing an empty box.
+fn image_skip_reason(src: &str) -> Option<&'static str> {
+    if src.is_empty() {
+        return Some("empty src");
+    }
+    // data: URIs are decoded inline by the layout engine; nothing to fetch and nothing to report.
+    if src.starts_with("data:") {
+        return Some("");
     }
     let lower = src.to_ascii_lowercase();
     let path = match lower.find('?') {
         Some(q) => &lower[..q],
         None => &lower[..],
     };
-    !(path.ends_with(".gif")
-        || path.ends_with(".webp")
-        || path.ends_with(".ico")
-        || path.ends_with(".avif")
-        || path.ends_with(".apng"))
+    if path.ends_with(".webp") {
+        Some("WebP decoder not implemented")
+    } else if path.ends_with(".avif") {
+        Some("AVIF decoder not implemented")
+    } else if path.ends_with(".ico") {
+        Some("ICO decoder not implemented")
+    } else {
+        None
+    }
 }
 
 fn collect_hits(b: &LayoutBox, out: &mut Vec<Hit>, depth: usize) {
@@ -380,6 +401,7 @@ impl BrowserApp {
             img_queue: Vec::new(),
             css_tried: Vec::new(),
             img_tried: Vec::new(),
+            img_skipped: Vec::new(),
             img_total: 0,
             img_done: 0,
             layout: empty_layout(),
@@ -421,6 +443,7 @@ impl BrowserApp {
         self.img_queue.clear();
         self.css_tried.clear();
         self.img_tried.clear();
+        self.img_skipped.clear();
         self.css_external.clear();
         self.img_total = 0;
         self.img_done = 0;
@@ -494,6 +517,12 @@ impl BrowserApp {
             for d in t.diagnostics.iter() {
                 s.push_str(&alloc::format!("<p style=\"color:#b45309\">PARSER: {}</p>", html_escape(d)));
             }
+            for (src, why) in self.img_skipped.iter().take(40) {
+                s.push_str(&alloc::format!("<p style=\"color:#b45309\">IMAGE SKIPPED: {} - {}</p>", html_escape(why), html_escape(src)));
+            }
+            if self.img_skipped.len() > 40 {
+                s.push_str(&alloc::format!("<p style=\"color:#b45309\">... and {} more skipped images</p>", self.img_skipped.len() - 40));
+            }
             let text = t.text_content(t.root);
             let snippet: String = text.split_whitespace().collect::<Vec<&str>>().join(" ").chars().take(260).collect();
             s.push_str(&alloc::format!("<p>page text: {}</p>", html_escape(&snippet)));
@@ -533,6 +562,8 @@ impl BrowserApp {
             String::from("about:home")
         } else if body_input.eq_ignore_ascii_case("about:debug") {
             String::from("about:debug")
+        } else if body_input.eq_ignore_ascii_case("about:compat") {
+            String::from("about:compat")
         } else {
             normalize_input_url(body_input)
         };
@@ -563,6 +594,13 @@ impl BrowserApp {
             let page = self.debug_page();
             self.client.state = HttpState::Idle;
             self.show_html(&page, "about:debug");
+            return;
+        }
+        if target == "about:compat" {
+            // Self-test page: its inline script probes ES / DOM / Web API support and lists what is missing.
+            self.client.state = HttpState::Idle;
+            self.show_html(COMPAT_HTML, "about:compat");
+            self.start_next_fetch();
             return;
         }
 
@@ -609,7 +647,10 @@ impl BrowserApp {
         if h.is_empty() || h.starts_with('#') {
             return;
         }
-        let target = if h.eq_ignore_ascii_case("about:home") || h.eq_ignore_ascii_case("about:debug") {
+        let target = if h.eq_ignore_ascii_case("about:home")
+            || h.eq_ignore_ascii_case("about:debug")
+            || h.eq_ignore_ascii_case("about:compat")
+        {
             String::from(h)
         } else {
             resolve_url(&self.current_url, h)
@@ -845,7 +886,13 @@ impl BrowserApp {
             }
         }
         for src in imgs {
-            if !wants_image(&src) || self.img_tried.contains(&src) || self.images.iter().any(|(k, _)| *k == src) {
+            if let Some(reason) = image_skip_reason(&src) {
+                if !reason.is_empty() && self.img_skipped.len() < 200 && !self.img_skipped.iter().any(|(k, _)| *k == src) {
+                    self.img_skipped.push((src.clone(), reason));
+                }
+                continue;
+            }
+            if self.img_tried.contains(&src) || self.images.iter().any(|(k, _)| *k == src) {
                 continue;
             }
             if self.img_tried.len() >= MAX_IMG_TRIED {
@@ -1190,6 +1237,7 @@ impl BrowserApp {
         }
         // @media rules are evaluated against the real viewport, not a fixed desktop width.
         self.stylesheet.set_viewport(viewport_w, viewport_h);
+        set_viewport(viewport_w, viewport_h);
         let mut imgs = core::mem::take(&mut self.images);
         self.layout = LayoutEngine::build(&self.tree.borrow(), &self.stylesheet, &mut imgs, viewport_w);
         self.images = imgs;
@@ -1350,7 +1398,7 @@ impl BrowserApp {
         }
 
         if let Some(text) = &b.text {
-            let st = text_style(b.style.font_size, 30);
+            let st = page_text_style(&b.style);
             let sy = vp.y + b.rect.y - self.scroll_y + (b.rect.height - st.cap_height).max(0) / 2;
             let sx = vp.x + b.rect.x;
             if sy >= vp.y + 1
@@ -1358,16 +1406,52 @@ impl BrowserApp {
                 && sx < vp.x + vp.width - 8
             {
                 draw_text_color(canvas, text, sx, sy, &st, b.style.color);
-                if b.style.is_link {
+                let deco = b.style.text_decoration;
+                if deco != 0 {
                     let tw = text_width(text, &st).min(vp.x + vp.width - 8 - sx);
-                    canvas.fill_rect(sx, sy + st.cap_height + 2, tw, 1, b.style.color);
+                    if deco & DECO_UNDERLINE != 0 {
+                        canvas.fill_rect(sx, sy + st.cap_height + 2, tw, 1, b.style.color);
+                    }
+                    if deco & DECO_LINE_THROUGH != 0 {
+                        canvas.fill_rect(sx, sy + st.cap_height / 2, tw, 1, b.style.color);
+                    }
+                    if deco & DECO_OVERLINE != 0 {
+                        canvas.fill_rect(sx, sy - 2, tw, 1, b.style.color);
+                    }
                 }
             }
             return;
         }
 
         let mut child_bg = under_bg;
-        if let Some(bg) = b.style.bg_color {
+        if b.style.sides_custom {
+            // Different border per side (e.g. only `border-bottom`): background first, then four strips.
+            if let Some(bg) = b.style.bg_color {
+                if bg != under_bg {
+                    if let Some(r) = self.clip_to_viewport(b.rect, vp) {
+                        let radius = b.style.border_radius.max(0).min(r.height / 2);
+                        draw_panel(canvas, r, radius, bg, 255, bg, 0);
+                    }
+                }
+                child_bg = bg;
+            }
+            let rc = b.rect;
+            let w = b.style.border_sides;
+            let strips = [
+                Rect::new(rc.x, rc.y, rc.width, w[0]),
+                Rect::new(rc.x + rc.width - w[1], rc.y, w[1], rc.height),
+                Rect::new(rc.x, rc.y + rc.height - w[2], rc.width, w[2]),
+                Rect::new(rc.x, rc.y, w[3], rc.height),
+            ];
+            for i in 0..4 {
+                if w[i] > 0 {
+                    let col = b.style.border_side_colors[i].unwrap_or(b.style.color);
+                    if let Some(r) = self.clip_to_viewport(strips[i], vp) {
+                        canvas.fill_rect(r.x, r.y, r.width, r.height, col);
+                    }
+                }
+            }
+        } else if let Some(bg) = b.style.bg_color {
             let has_border = b.style.border_width > 0 && b.style.border_color.is_some();
             if bg != under_bg || has_border {
                 if let Some(r) = self.clip_to_viewport(b.rect, vp) {
@@ -1390,8 +1474,20 @@ impl BrowserApp {
             }
         }
 
-        for c in b.children.iter() {
-            self.draw_box(canvas, c, vp, child_bg, accent, depth + 1);
+        // `overflow: hidden` boxes skip children that lie completely outside them. Positioned
+        // (absolute / fixed) boxes paint after normal flow so they appear on top, like in a browser.
+        let clip = b.style.overflow_clip;
+        let box_bottom = b.rect.y + b.rect.height;
+        for pass in 0..2 {
+            for c in b.children.iter() {
+                if c.style.is_out_of_flow() != (pass == 1) {
+                    continue;
+                }
+                if clip && (c.rect.y >= box_bottom || c.rect.y + c.rect.height <= b.rect.y) {
+                    continue;
+                }
+                self.draw_box(canvas, c, vp, child_bg, accent, depth + 1);
+            }
         }
     }
 

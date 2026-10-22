@@ -22,6 +22,10 @@ impl DecodedImage {
         if data.len() >= 2 && &data[0..2] == b"BM" {
             return decode_bmp(data).map(|img| fit_image(img, max_side));
         }
+        if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
+            return crate::gif::decode(data)
+                .map(|g| fit_image(DecodedImage { width: g.width, height: g.height, rgba: g.rgba }, max_side));
+        }
         if let Ok(text) = core::str::from_utf8(data) {
             if text.contains("<svg") {
                 let dom = crate::html::HtmlParser::parse(text);

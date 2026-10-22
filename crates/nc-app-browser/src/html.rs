@@ -30,7 +30,6 @@ enum Token {
 pub struct HtmlParser {
     chars: Vec<char>,
     pos: usize,
-    script_blobs: Vec<String>,
     diag: Vec<String>,
 }
 
@@ -40,7 +39,6 @@ impl HtmlParser {
         let mut parser = HtmlParser {
             chars: html[..safe_len].chars().collect(),
             pos: 0,
-            script_blobs: Vec::new(),
             diag: Vec::new(),
         };
         if safe_len < html.len() {
@@ -53,7 +51,7 @@ impl HtmlParser {
         }
         let tokens = parser.tokenize();
         let mut tree = parser.build_tree(tokens);
-        parser.inject_dynamic_web_layers(&mut tree);
+        parser.append_empty_page_fallback(&mut tree);
         tree.diagnostics.extend(core::mem::take(&mut parser.diag));
         tree
     }
@@ -209,11 +207,6 @@ impl HtmlParser {
 
                     if is_script {
                         let script_text = self.read_raw_text(&closing);
-                        if self.script_blobs.len() < 4
-                            && (script_text.contains("ytInitialData") || script_text.contains("videoRenderer"))
-                        {
-                            self.script_blobs.push(script_text.clone());
-                        }
                         // Keep the script body as an unmodified raw text node under <script> so that
                         // `pending_scripts` (jsdom.rs) can execute inline code. The text is never
                         // entity-decoded or folded. <noscript> content stays discarded because
@@ -312,8 +305,11 @@ impl HtmlParser {
                         val.push(ch);
                     }
                 } else {
+                    // WHATWG "attribute value (unquoted) state": only whitespace and '>' end the value.
+                    // '/' is an ordinary character here, so `src=https://host/a.png` and
+                    // `href=/path/` stay intact. (`<br class=x/>` yields class="x/", exactly like browsers.)
                     while let Some(ch) = self.peek() {
-                        if ch.is_whitespace() || ch == '>' || ch == '/' {
+                        if ch.is_whitespace() || ch == '>' {
                             break;
                         }
                         val.push(ch);
@@ -414,112 +410,11 @@ impl HtmlParser {
         tree
     }
 
-    fn inject_dynamic_web_layers(&self, tree: &mut DomTree) {
-        let mut videos: Vec<(String, String, String)> = Vec::new();
-        for blob in &self.script_blobs {
-            extract_youtube_videos(blob, &mut videos);
-        }
-
-     if !videos.is_empty() {
-            let kept: Vec<usize> = tree.nodes[tree.root]
-                .children
-                .iter()
-                .copied()
-                .filter(|&cid| tree.tag(cid) == Some("head") || tree.tag(cid) == Some("title"))
-                .collect();
-            tree.nodes[tree.root].children = kept;
-
-            let container = tree.add_node(
-                NodeType::Element {
-                    tag: String::from("div"),
-                    attributes: alloc::vec![(
-                        String::from("style"),
-                        String::from("background-color: #0f172a; padding: 12px; border-radius: 8px;")
-                    )],
-                },
-                tree.root,
-            );
-
-            let header = tree.add_node(
-                NodeType::Element {
-                    tag: String::from("h2"),
-                    attributes: alloc::vec![(String::from("style"), String::from("color: #f8fafc; margin-bottom: 8px;"))],
-                },
-                container,
-            );
-            tree.add_node(NodeType::Text(String::from("YOUTUBE LIVE VIDEO STREAM")), header);
-
-            let form = tree.add_node(
-                NodeType::Element {
-                    tag: String::from("form"),
-                    attributes: alloc::vec![(String::from("action"), String::from("https://www.youtube.com/results"))],
-                },
-                container,
-            );
-            tree.add_node(
-                NodeType::Element {
-                    tag: String::from("input"),
-                    attributes: alloc::vec![
-                        (String::from("type"), String::from("text")),
-                        (String::from("name"), String::from("search_query")),
-                        (String::from("placeholder"), String::from("Search YouTube videos...")),
-                    ],
-                },
-                form,
-            );
-            tree.add_node(
-                NodeType::Element {
-                    tag: String::from("input"),
-                    attributes: alloc::vec![
-                        (String::from("type"), String::from("submit")),
-                        (String::from("value"), String::from("SEARCH YOUTUBE")),
-                    ],
-                },
-                form,
-            );
-
-            for (vid_id, title, thumb_url) in videos.into_iter().take(10) {
-                let card = tree.add_node(
-                    NodeType::Element {
-                        tag: String::from("div"),
-                        attributes: alloc::vec![(
-                            String::from("style"),
-                            String::from("background-color: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 10px; margin-top: 8px;")
-                        )],
-                    },
-                    container,
-                );
-
-                if !thumb_url.is_empty() {
-                    tree.add_node(
-                        NodeType::Element {
-                            tag: String::from("img"),
-                            attributes: alloc::vec![
-                                (String::from("src"), thumb_url),
-                                (String::from("alt"), String::from("VIDEO THUMBNAIL")),
-                                (String::from("width"), String::from("120")),
-                                (String::from("height"), String::from("90")),
-                            ],
-                        },
-                        card,
-                    );
-                }
-
-                let link = tree.add_node(
-                    NodeType::Element {
-                        tag: String::from("a"),
-                        attributes: alloc::vec![
-                            (String::from("href"), alloc::format!("https://www.youtube.com/watch?v={}", vid_id)),
-                            (String::from("style"), String::from("color: #38bdf8; font-size: 14px;")),
-                        ],
-                    },
-                    card,
-                );
-                tree.add_node(NodeType::Text(title), link);
-            }
-            return;
-        }
-
+    /// Optional, *clearly labelled* fallback for pages that produced no visible text at all
+    /// (typically JS-only shells whose script did not run). It never rewrites or removes existing
+    /// nodes and never targets a specific site. Every use is recorded in `diagnostics`
+    /// (visible on `about:debug`). The former YouTube-specific DOM rewrite was removed on purpose.
+    fn append_empty_page_fallback(&mut self, tree: &mut DomTree) {
         let body_text = tree.text_content(tree.root);
         if body_text.trim().len() < 30 {
             let mut og_title = None;
@@ -546,6 +441,9 @@ impl HtmlParser {
 
             let title_fallback = og_title.or_else(|| tree.title());
             if let Some(t) = title_fallback {
+                self.diag.push(String::from(
+                    "empty-page fallback: the document has no visible text; a summary card built from <title>/Open Graph meta was appended (no existing node was changed)",
+                ));
                 let card = tree.add_node(
                     NodeType::Element {
                         tag: String::from("div"),
@@ -595,49 +493,6 @@ impl HtmlParser {
     }
 }
 
-fn extract_youtube_videos(json: &str, out: &mut Vec<(String, String, String)>) {
-    let mut search_from = 0;
-    let marker = "\"videoId\":\"";
-    while search_from < json.len() {
-        let valid_start = floor_utf8_boundary(json, search_from);
-        let Some(pos) = json[valid_start..].find(marker) else {
-            break;
-        };
-        let start = valid_start + pos + marker.len();
-        let rest = &json[start..];
-        let Some(end_q) = rest.find('"') else {
-            break;
-        };
-        let video_id = &rest[..end_q];
-        search_from = start + end_q;
-
-        if video_id.len() == 11 && !out.iter().any(|(id, _, _)| id == video_id) {
-            let window_end = floor_utf8_boundary(json, (search_from + 1400).min(json.len()));
-            let window = &json[search_from..window_end];
-            let title = extract_json_field(window, "\"text\":\"")
-                .or_else(|| extract_json_field(window, "\"simpleText\":\""))
-                .unwrap_or_else(|| alloc::format!("YouTube Video ({})", video_id));
-            let thumb = alloc::format!("https://i.ytimg.com/vi/{}/default.jpg", video_id);
-            out.push((String::from(video_id), title, thumb));
-            if out.len() >= 10 {
-                break;
-            }
-        }
-    }
-}
-
-fn extract_json_field(slice: &str, key: &str) -> Option<String> {
-    let pos = slice.find(key)?;
-    let rest = &slice[pos + key.len()..];
-    let end = rest.find('"')?;
-    let val = rest[..end].replace("\\\"", "\"").replace("\\u0026", "&");
-    if val.trim().is_empty() {
-        None
-    } else {
-        Some(val)
-    }
-}
-
 fn unwrap_redirect_href(href: &str) -> String {
     if let Some(rest) = href.strip_prefix("/url?q=").or_else(|| href.strip_prefix("https://www.google.com/url?q=")) {
         let target = rest.split('&').next().unwrap_or(rest);
@@ -666,43 +521,34 @@ fn percent_decode_url(input: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Set to `true` once `nc-font` can draw Latin-1 Supplement and Latin Extended-A glyphs
-/// (Turkish `ğ ş ı İ ç ö ü`, `é`, `ñ`, ...). Until then they are folded to the nearest ASCII letters
-/// *at display time only*. The DOM, `textContent`, form values and URLs always keep the original Unicode.
-pub const FONT_LATIN_EXT: bool = false;
-
-/// Display folding for the built-in font. This is the single place that knows the font repertoire.
-/// It must be applied to every string that is measured or painted, and to nothing that is stored.
+/// Display preparation for the built-in font. Applied to every string that is measured or painted,
+/// and to nothing that is stored: the DOM, `textContent`, form values and URLs keep the original Unicode.
+///
+/// `nc-font` draws Latin-1/Extended-A (Turkish included), Greek, Cyrillic, currency signs and composes
+/// NFD sequences itself, so those pass through unchanged. Only characters the font cannot draw are
+/// treated: a short ASCII stand-in where one exists (`INR`), nothing for invisible/emoji code points, and
+/// otherwise the character itself, which the font paints as its visible "undefined glyph" box instead of
+/// silently turning the text into `?`.
 pub fn sanitize_text(input: &str) -> String {
     if input.is_ascii() {
         return String::from(input);
     }
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
-        if ch.is_ascii() {
-            out.push(ch);
-            continue;
-        }
-        if FONT_LATIN_EXT && is_latin_ext(ch) {
+        if ch.is_ascii() || crate::font_cov::has_glyph(ch) {
             out.push(ch);
             continue;
         }
         match fold_char(ch) {
             Some(mapped) => out.push_str(mapped),
             None => {
-                // Unknown letters become a visible placeholder instead of silently changing the text.
                 if !is_ignorable(ch) {
-                    out.push('?');
+                    out.push(ch);
                 }
             }
         }
     }
     out
-}
-
-fn is_latin_ext(ch: char) -> bool {
-    let c = ch as u32;
-    (0x00C0..=0x024F).contains(&c) && c != 0x00D7 && c != 0x00F7
 }
 
 /// Characters that carry no visible glyph of their own: dropped without a placeholder.
@@ -951,4 +797,85 @@ fn resolve_entity(entity: &str) -> Option<char> {
         _ => return None,
     };
     char::from_u32(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_tag(tree: &DomTree, tag: &str) -> Option<usize> {
+        tree.nodes.iter().map(|n| n.id).find(|&id| tree.tag(id) == Some(tag))
+    }
+
+    #[test]
+    fn unquoted_url_keeps_slashes() {
+        let t = HtmlParser::parse("<img src=https://example.com/a/b.png alt=x>");
+        let img = find_tag(&t, "img").unwrap();
+        assert_eq!(t.attr(img, "src"), Some("https://example.com/a/b.png"));
+        assert_eq!(t.attr(img, "alt"), Some("x"));
+    }
+
+    #[test]
+    fn unquoted_href_with_trailing_slash() {
+        let t = HtmlParser::parse("<a href=/path/ class=k>go</a>");
+        let a = find_tag(&t, "a").unwrap();
+        assert_eq!(t.attr(a, "href"), Some("/path/"));
+        assert_eq!(t.attr(a, "class"), Some("k"));
+    }
+
+    #[test]
+    fn quoted_and_self_closing_forms_still_work() {
+        let t = HtmlParser::parse("<p>a<br/>b</p><img src=\"x.png\"/><input value='v'>");
+        assert!(find_tag(&t, "br").is_some());
+        let img = find_tag(&t, "img").unwrap();
+        assert_eq!(t.attr(img, "src"), Some("x.png"));
+        let inp = find_tag(&t, "input").unwrap();
+        assert_eq!(t.attr(inp, "value"), Some("v"));
+    }
+
+    #[test]
+    fn youtube_scripts_do_not_rewrite_the_dom() {
+        let page = "<html><head><title>t</title><script>var ytInitialData={\"videoRenderer\":{\"videoId\":\"dQw4w9WgXcQ\"}};</script></head>\
+                    <body><div id=keep>This is real page content that must survive untouched.</div></body></html>";
+        let t = HtmlParser::parse(page);
+        let keep = find_tag(&t, "div").unwrap();
+        assert_eq!(t.attr(keep, "id"), Some("keep"));
+        assert!(!t.text_content(t.root).contains("YOUTUBE LIVE VIDEO STREAM"));
+        assert!(find_tag(&t, "form").is_none());
+    }
+
+    #[test]
+    fn empty_page_fallback_is_explicit_and_additive() {
+        let t = HtmlParser::parse("<html><head><title>Shell</title></head><body></body></html>");
+        assert!(t.diagnostics.iter().any(|d| d.contains("empty-page fallback")));
+    }
+
+    #[test]
+    fn unicode_is_preserved_in_the_dom() {
+        let t = HtmlParser::parse("<p>\u{11f}\u{fc}\u{15f}\u{131}\u{f6}\u{e7}\u{130}</p>");
+        assert!(t.text_content(t.root).contains("\u{11f}\u{fc}\u{15f}\u{131}\u{f6}\u{e7}\u{130}"));
+    }
+
+    #[test]
+    fn turkish_text_is_not_folded_to_ascii_for_display() {
+        let t = "\u{11f}\u{fc}\u{15f}\u{131}\u{f6}\u{e7}\u{130} \u{11e}\u{dc}\u{15e}\u{d6}\u{c7}";
+        assert_eq!(sanitize_text(t), t);
+    }
+
+    #[test]
+    fn decomposed_marks_and_currency_pass_through() {
+        assert_eq!(sanitize_text("e\u{301} \u{20ba}5 \u{20ac}3"), "e\u{301} \u{20ba}5 \u{20ac}3");
+    }
+
+    #[test]
+    fn undrawable_text_is_never_turned_into_question_marks() {
+        // Arabic alef is outside the font: it stays as itself so the font paints its "undefined" box.
+        let out = sanitize_text("a\u{627}b");
+        assert!(!out.contains('?'));
+        assert_eq!(out.chars().count(), 3);
+        // A currency sign with an ASCII stand-in still gets it.
+        assert_eq!(sanitize_text("\u{20b9}9"), "INR9");
+        // Emoji have no glyph and no stand-in: dropped, not '?'.
+        assert_eq!(sanitize_text("hi \u{1F600}"), "hi ");
+    }
 }

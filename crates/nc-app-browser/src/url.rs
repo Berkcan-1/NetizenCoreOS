@@ -19,10 +19,24 @@ impl ParsedUrl {
             return None;
         };
 
-        let (authority, path) = if let Some(slash) = rest.find('/') {
-            (&rest[..slash], &rest[slash..])
-        } else {
-            (rest, "/")
+        // The authority ends at the first '/', '?' or '#' (WHATWG URL). Searching only for '/'
+        // turned `https://example.com?x=1` into the host "example.com?x=1".
+        let (authority, path) = match rest.find(|c: char| c == '/' || c == '?' || c == '#') {
+            Some(i) => {
+                let tail = &rest[i..];
+                // The fragment never goes on the wire and is not part of the request path.
+                let tail = match tail.find('#') {
+                    Some(h) => &tail[..h],
+                    None => tail,
+                };
+                if tail.starts_with('/') {
+                    (&rest[..i], String::from(tail))
+                } else {
+                    // query-only: `host?x=1` -> path "/?x=1"
+                    (&rest[..i], alloc::format!("/{}", tail))
+                }
+            }
+            None => (rest, String::from("/")),
         };
 
         let (host, port) = if let Some(colon) = authority.rfind(':') {
@@ -50,7 +64,7 @@ impl ParsedUrl {
             scheme: scheme.to_ascii_lowercase(),
             host: String::from(host),
             port,
-            path: String::from(path),
+            path,
         })
     }
 
@@ -85,7 +99,9 @@ pub fn normalize_input_url(raw: &str) -> String {
     if trimmed.is_empty() {
         return String::from("http://info.cern.ch/hypertext/WWW/TheProject.html");
     }
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("data:") {
+    // Scheme names are case-insensitive: `HTTPS://Example.com` must not become `https://HTTPS://...`.
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("data:") {
         return String::from(trimmed);
     }
     if trimmed.contains('.') && !trimmed.contains(' ') {
@@ -193,4 +209,51 @@ pub fn build_form_url(base_url: &str, action: &str, param_name: &str, value: &st
     let sep = if target.contains('?') { '&' } else { '?' };
     let key = if param_name.trim().is_empty() { "q" } else { param_name.trim() };
     alloc::format!("{}{}{}={}", target, sep, key, encode_uri_component(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_url_with_query_keeps_host_clean() {
+        let u = ParsedUrl::parse("https://example.com?x=1").unwrap();
+        assert_eq!(u.host, "example.com");
+        assert_eq!(u.path, "/?x=1");
+    }
+
+    #[test]
+    fn fragment_is_not_part_of_request_path() {
+        assert_eq!(ParsedUrl::parse("https://example.com/a#frag").unwrap().path, "/a");
+        assert_eq!(ParsedUrl::parse("https://example.com#frag").unwrap().path, "/");
+        assert_eq!(ParsedUrl::parse("https://example.com/a?q=1#frag").unwrap().path, "/a?q=1");
+    }
+
+    #[test]
+    fn port_survives_query_only_url() {
+        let u = ParsedUrl::parse("http://h.test:8080?x=1").unwrap();
+        assert_eq!(u.host, "h.test");
+        assert_eq!(u.port, Some(8080));
+        assert_eq!(u.path, "/?x=1");
+    }
+
+    #[test]
+    fn relative_references() {
+        let base = "https://e.com/a/b/c.html?z=1";
+        assert_eq!(resolve_url(base, "?page=2"), "https://e.com/a/b/c.html?page=2");
+        assert_eq!(resolve_url(base, "../x"), "https://e.com/a/x");
+        assert_eq!(resolve_url(base, "/x"), "https://e.com/x");
+        assert_eq!(resolve_url(base, "//cdn.e.com/y.js"), "https://cdn.e.com/y.js");
+        assert_eq!(resolve_url(base, "d.png"), "https://e.com/a/b/d.png");
+    }
+
+    #[test]
+    fn address_bar_classification() {
+        assert_eq!(normalize_input_url("example.com?x=1"), "https://example.com?x=1");
+        assert_eq!(normalize_input_url("HTTPS://Example.com/"), "HTTPS://Example.com/");
+        let q = normalize_input_url("merhaba d\u{fc}nya");
+        assert!(q.starts_with("https://html.duckduckgo.com/html/?q="));
+        assert!(q.contains("d%C3%BCnya"));
+        assert!(q.contains("merhaba+"));
+    }
 }

@@ -248,7 +248,7 @@ pub fn draw_dock(canvas: &mut Canvas<'_>, state: &DesktopState, width: i32, heig
     };
     draw_tile(canvas, start_rect, start_top, start_bot, reveal, 0, &glyph, 66);
 
-    let mut hover_label = None;
+    let mut hover_label;
     let transitioning = dl.page_count > 1 && state.dock_page_anim < ONE;
     let clip = Rect::new(dl.app_viewport.x, 0, dl.app_viewport.width.max(1), height);
     canvas.set_clip(clip);

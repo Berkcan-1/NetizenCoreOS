@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
-use nc_app::text::Line;
+use nc_app::text::{draw_text_clipped, Line};
 use nc_app::{App, AppInfo, Context, Icon, Input, KeyCode, Update};
 use nc_app_settings::SettingsApp;
 use nc_app_stopwatch::StopwatchApp;
@@ -21,26 +21,28 @@ use nc_ui::{draw_dot, draw_panel, draw_shadow, draw_text_color, text_style};
 const MAX_BLUR_SPAN: usize = 2048;
 const VISIBLE_ROWS: usize = 7;
 
-const PORCELAIN_BG: u32 = rgb(245, 250, 253);
-const SIDEBAR_TOP: u32 = rgb(238, 246, 251);
-const SIDEBAR_BOT: u32 = rgb(228, 240, 247);
-const SURFACE_WHITE: u32 = rgb(253, 254, 255);
-const SURFACE_ALT: u32 = rgb(242, 248, 252);
-const SURFACE_HOVER: u32 = rgb(231, 243, 251);
-const SURFACE_SELECT: u32 = rgb(219, 239, 250);
-const BORDER_SOFT: u32 = rgb(210, 225, 236);
+const PORCELAIN_BG: u32 = rgb(232, 239, 248);
+const SIDEBAR_TOP: u32 = rgb(246, 250, 255);
+const SIDEBAR_BOT: u32 = rgb(239, 246, 254);
+const SURFACE_WHITE: u32 = rgb(252, 254, 255);
+const SURFACE_ALT: u32 = rgb(241, 246, 252);
+const SURFACE_HOVER: u32 = rgb(229, 240, 252);
+const SURFACE_SELECT: u32 = rgb(215, 232, 251);
+const BORDER_SOFT: u32 = rgb(199, 214, 232);
+const PANEL_SHADOW: u32 = rgb(38, 61, 91);
+const SHEEN: u32 = rgb(255, 255, 255);
 
-const AZURE_BRIGHT: u32 = rgb(46, 140, 244);
-const AZURE_DEEP: u32 = rgb(24, 102, 212);
-const AQUA_MINT: u32 = rgb(28, 190, 170);
-const AQUA_SOFT: u32 = rgb(156, 236, 224);
-const AQUA_DEEP: u32 = rgb(16, 146, 132);
-const DANGER_RED: u32 = rgb(228, 62, 58);
+const AZURE_BRIGHT: u32 = rgb(40, 121, 220);
+const AZURE_DEEP: u32 = rgb(25, 85, 167);
+const AQUA_MINT: u32 = rgb(30, 168, 160);
+const AQUA_SOFT: u32 = rgb(176, 226, 222);
+const AQUA_DEEP: u32 = rgb(21, 121, 121);
+const DANGER_RED: u32 = rgb(190, 55, 55);
 
-const INK_PRIMARY: u32 = rgb(18, 30, 46);
-const INK_SECONDARY: u32 = rgb(62, 80, 100);
-const INK_MUTED: u32 = rgb(118, 136, 156);
-const INK_DIM: u32 = rgb(158, 174, 192);
+const INK_PRIMARY: u32 = rgb(23, 38, 59);
+const INK_SECONDARY: u32 = rgb(72, 91, 116);
+const INK_MUTED: u32 = rgb(119, 137, 160);
+const INK_DIM: u32 = rgb(160, 176, 195);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClipboardOp {
@@ -116,6 +118,7 @@ enum ModalState {
         playing: bool,
         start_ms: u32,
         elapsed_ms: u32,
+        #[allow(dead_code)]
         frame_data: Vec<u8>,
     },
     CreateFolder {
@@ -144,6 +147,7 @@ pub struct FilesApp {
     selected_index: Option<usize>,
     hover_index: Option<usize>,
     hover_sidebar: Option<usize>,
+    sidebar_indicator_y: i32,
     hover_back: bool,
     hover_up_scroll: bool,
     hover_dn_scroll: bool,
@@ -173,6 +177,7 @@ impl FilesApp {
             selected_index: None,
             hover_index: None,
             hover_sidebar: None,
+            sidebar_indicator_y: -1,
             hover_back: false,
             hover_up_scroll: false,
             hover_dn_scroll: false,
@@ -181,10 +186,29 @@ impl FilesApp {
             hover_paste: false,
             clipboard: None,
             context_menu: None,
-            status_banner: String::from("Masaustu - Islem yapmak icin ogeye sag tiklayin"),
+            status_banner: String::from("Masaüstü · İşlemler için bir öğeye sağ tıklayın"),
             modal: ModalState::None,
             modal_hover_primary: false,
             modal_hover_secondary: false,
+        }
+    }
+
+    fn active_sidebar_index(&self) -> usize {
+        let path = self.current_path.as_str();
+        if path == "/" {
+            5
+        } else if path == "/usb" || path.starts_with("/usb/") {
+            4
+        } else if path == "/data/desktop" || path.starts_with("/data/desktop/") {
+            0
+        } else if path == "/data/documents" || path.starts_with("/data/documents/") {
+            1
+        } else if path == "/data/downloads" || path.starts_with("/data/downloads/") {
+            2
+        } else if path == "/data/media" || path.starts_with("/data/media/") {
+            3
+        } else {
+            5
         }
     }
 
@@ -203,32 +227,32 @@ impl FilesApp {
 
     fn friendly_path(&self) -> String {
         match self.current_path.as_str() {
-            "/" => String::from("Bu Bilgisayar"),
-            "/data" => String::from("Bu Bilgisayar > Kisisel Disk"),
-            "/data/desktop" => String::from("Bu Bilgisayar > Masaustu"),
-            "/data/documents" => String::from("Bu Bilgisayar > Belgelerim"),
-            "/data/downloads" => String::from("Bu Bilgisayar > Indirilenler"),
-            "/data/media" => String::from("Bu Bilgisayar > Medya ve Galeri"),
-            "/data/app" => String::from("Bu Bilgisayar > Uygulamalar"),
-            "/usb" => alloc::format!("Bu Bilgisayar > Harici USB ({})", self.vfs.usb_label()),
-            "/system" => String::from("Bu Bilgisayar > Sistem Dosyalari"),
-            "/system/app" => String::from("Bu Bilgisayar > Sistem Uygulamalari"),
-            "/ram" => String::from("Bu Bilgisayar > Gecici Bellek"),
+            "/" => String::from("Bu bilgisayar"),
+            "/data" => String::from("Bu bilgisayar › Kişisel depolama"),
+            "/data/desktop" => String::from("Bu bilgisayar › Masaüstü"),
+            "/data/documents" => String::from("Bu bilgisayar › Belgeler"),
+            "/data/downloads" => String::from("Bu bilgisayar › İndirilenler"),
+            "/data/media" => String::from("Bu bilgisayar › Medya ve galeri"),
+            "/data/app" => String::from("Bu bilgisayar › Uygulamalar"),
+            "/usb" => alloc::format!("Bu bilgisayar › Harici USB ({})", self.vfs.usb_label()),
+            "/system" => String::from("Bu bilgisayar › Sistem dosyaları"),
+            "/system/app" => String::from("Bu bilgisayar › Sistem uygulamaları"),
+            "/ram" => String::from("Bu bilgisayar › Geçici bellek"),
             other => {
                 if let Some(rest) = other.strip_prefix("/usb/") {
-                    alloc::format!("Harici USB > {}", rest.replace('/', " > "))
+                    alloc::format!("Harici USB › {}", rest.replace('/', " › "))
                 } else if let Some(rest) = other.strip_prefix("/data/desktop/") {
-                    alloc::format!("Masaustu > {}", rest.replace('/', " > "))
+                    alloc::format!("Masaüstü › {}", rest.replace('/', " › "))
                 } else if let Some(rest) = other.strip_prefix("/data/documents/") {
-                    alloc::format!("Belgelerim > {}", rest.replace('/', " > "))
+                    alloc::format!("Belgeler › {}", rest.replace('/', " › "))
                 } else if let Some(rest) = other.strip_prefix("/data/downloads/") {
-                    alloc::format!("Indirilenler > {}", rest.replace('/', " > "))
+                    alloc::format!("İndirilenler › {}", rest.replace('/', " › "))
                 } else if let Some(rest) = other.strip_prefix("/data/") {
-                    alloc::format!("Kisisel Disk > {}", rest.replace('/', " > "))
+                    alloc::format!("Kişisel depolama › {}", rest.replace('/', " › "))
                 } else {
                     alloc::format!(
-                        "Bu Bilgisayar > {}",
-                        other.trim_start_matches('/').replace('/', " > ")
+                        "Bu bilgisayar › {}",
+                        other.trim_start_matches('/').replace('/', " › ")
                     )
                 }
             }
@@ -238,21 +262,21 @@ impl FilesApp {
     fn friendly_entry_name<'a>(&self, raw: &'a str) -> &'a str {
         if self.current_path == "/" {
             match raw {
-                "data" => "Kisisel Disk (Dahili SSD/HDD)",
-                "usb" => "Harici USB / Tasinabilir SSD",
-                "system" => "Sistem Dosyalari (Korumali)",
-                "ram" => "Gecici Calisma Bellegi (RAM)",
+                "data" => "Kişisel depolama",
+                "usb" => "Harici sürücü",
+                "system" => "Sistem dosyaları",
+                "ram" => "Geçici bellek",
                 _ => raw,
             }
         } else if self.current_path == "/data" {
             match raw {
-                "desktop" => "Masaustu",
-                "documents" => "Belgelerim",
-                "downloads" => "Indirilenler",
-                "media" => "Medya ve Galeri",
+                "desktop" => "Masaüstü",
+                "documents" => "Belgeler",
+                "downloads" => "İndirilenler",
+                "media" => "Medya ve galeri",
                 "app" => "Uygulamalar",
-                "drivers" => "Donanim Suruculeri",
-                "system" => "Dil ve Sistem Ayarlari",
+                "drivers" => "Donanım sürücüleri",
+                "system" => "Sistem ayarları",
                 _ => raw,
             }
         } else {
@@ -564,7 +588,7 @@ impl FilesApp {
     fn execute_paste(&mut self) {
         if !self.is_writable_current() {
             self.status_banner = String::from(
-                "Bu klasor salt okunurdur. Masaustu, Belgelerim veya USB'ye yapistirin.",
+                "Bu klasör salt okunur. Masaüstü, Belgeler veya USB sürücüsüne yapıştırabilirsiniz.",
             );
             return;
         }
@@ -576,14 +600,14 @@ impl FilesApp {
         let dst_path = if clip.op == ClipboardOp::Cut {
             let direct_dst = Self::join_path(&self.current_path, &clip.name);
             if direct_dst == clip.source_path {
-                self.status_banner = String::from("Kaynak ve hedef ayni konumda.");
+                self.status_banner = String::from("Kaynak ve hedef aynı konumda.");
                 return;
             }
             if self.items.iter().any(|e| e.name.eq_ignore_ascii_case(&clip.name))
                 || self.path_exists(&direct_dst)
             {
                 self.status_banner = alloc::format!(
-                    "Hedefte '{}' zaten mevcut! Veri kaybini onlemek icin tasima iptal edildi.",
+                    "Hedefte '{}' zaten var. Veri kaybını önlemek için taşıma iptal edildi.",
                     clip.name
                 );
                 return;
@@ -593,14 +617,14 @@ impl FilesApp {
             match self.resolve_unique_dest(&clip.name) {
                 Some(p) => p,
                 None => {
-                    self.status_banner = String::from("Benzersiz kopya adi olusturulamadi.");
+                    self.status_banner = String::from("Benzersiz bir kopya adı oluşturulamadı.");
                     return;
                 }
             }
         };
 
         if clip.is_dir && Self::is_subpath(&clip.source_path, &dst_path) {
-            self.status_banner = String::from("Bir klasor kendi alt klasorunun icine kopyalanamaz.");
+            self.status_banner = String::from("Bir klasör kendi alt klasörünün içine kopyalanamaz.");
             return;
         }
 
@@ -608,16 +632,16 @@ impl FilesApp {
             if clip.op == ClipboardOp::Cut {
                 if self.remove_tree_recursive(&clip.source_path, clip.is_dir) {
                     self.clipboard = None;
-                    self.status_banner = alloc::format!("'{}' bu klasore tasindi", clip.name);
+                    self.status_banner = alloc::format!("'{}' bu klasöre taşındı", clip.name);
                 } else {
                     self.clipboard = None;
                     self.status_banner = alloc::format!(
-                        "'{}' hedefe kopyalandi fakat kaynak tamamen temizlenemedi",
+                        "'{}' hedefe kopyalandı ancak kaynak tamamen temizlenemedi",
                         clip.name
                     );
                 }
             } else {
-                self.status_banner = alloc::format!("'{}' bu klasore kopyalandi", clip.name);
+                self.status_banner = alloc::format!("'{}' bu klasöre kopyalandı", clip.name);
             }
             self.refresh();
         } else {
@@ -625,7 +649,7 @@ impl FilesApp {
             let _ = self.remove_tree_recursive(&dst_path, clip.is_dir);
             self.refresh();
             self.status_banner = String::from(
-                "Yapistirma basarisiz oldu; kaynak dosyalariniz guvenle korundu.",
+                "Yapıştırma başarısız oldu. Kaynak dosyalarınız korundu.",
             );
         }
     }
@@ -638,18 +662,18 @@ impl FilesApp {
         let has_clip = self.clipboard.is_some();
         if target_idx.is_some() {
             alloc::vec![
-                (ContextAction::Open, "Ac", true),
+                (ContextAction::Open, "Aç", true),
                 (ContextAction::Cut, "Kes", writable),
                 (ContextAction::Copy, "Kopyala", true),
-                (ContextAction::Paste, "Buraya Yapistir", writable && has_clip),
-                (ContextAction::Rename, "Yeniden Adlandir", writable),
+                (ContextAction::Paste, "Buraya yapıştır", writable && has_clip),
+                (ContextAction::Rename, "Yeniden adlandır", writable),
                 (ContextAction::Delete, "Sil", writable),
             ]
         } else {
             alloc::vec![
-                (ContextAction::NewFolder, "Yeni Klasor", writable),
-                (ContextAction::NewFile, "Yeni Metin Belgesi", writable),
-                (ContextAction::Paste, "Yapistir", writable && has_clip),
+                (ContextAction::NewFolder, "Yeni klasör", writable),
+                (ContextAction::NewFile, "Yeni metin belgesi", writable),
+                (ContextAction::Paste, "Yapıştır", writable && has_clip),
             ]
         }
     }
@@ -1363,7 +1387,7 @@ impl App for FilesApp {
             if self.vfs.write_file_path(&p, c.as_bytes()).is_ok() {
                 self.status_banner = alloc::format!("Kaydedildi: {}", p);
             } else {
-                self.status_banner = String::from("Uyari: Bu klasor salt okunurdur");
+                self.status_banner = String::from("Uyarı: Bu klasör salt okunur.");
             }
             self.refresh();
         }
@@ -1374,7 +1398,7 @@ impl App for FilesApp {
             if self.vfs.create_dir_path(&p).is_ok() {
                 self.status_banner = String::from("Yeni klasor olusturuldu");
             } else {
-                self.status_banner = String::from("Klasor olusturulamadi (zaten mevcut olabilir)");
+                self.status_banner = String::from("Klasör oluşturulamadı. Bu ad zaten kullanılıyor olabilir.");
             }
             self.refresh();
         }
@@ -1415,7 +1439,7 @@ impl App for FilesApp {
                 } else if self.copy_tree_recursive(&src, &dst, is_dir) {
                     if self.remove_tree_recursive(&src, is_dir) {
                         self.status_banner = alloc::format!(
-                            "'{}' -> '{}' olarak yeniden adlandirildi",
+                            "'{}' → '{}' olarak yeniden adlandırıldı",
                             old_name,
                             new_name
                         );
@@ -1429,7 +1453,7 @@ impl App for FilesApp {
                     let _ = self.remove_tree_recursive(&dst, is_dir);
                     self.refresh();
                     self.status_banner = String::from(
-                        "Yeniden adlandirma basarisiz oldu; mevcut oge korundu.",
+                        "Yeniden adlandırma başarısız oldu. Mevcut öğe korundu.",
                     );
                 }
             }
@@ -1522,12 +1546,12 @@ impl App for FilesApp {
                                             });
                                             self.status_banner = if act == ContextAction::Cut {
                                                 alloc::format!(
-                                                    "'{}' kesildi - Hedef klasore sag tiklayip Yapistir'i secin",
+                                                    "'{}' kesildi · Hedef klasöre sağ tıklayıp Yapıştır’ı seçin",
                                                     item.name
                                                 )
                                             } else {
                                                 alloc::format!(
-                                                    "'{}' kopyalandi - Hedef klasore sag tiklayip Yapistir'i secin",
+                                                    "'{}' kopyalandı · Hedef klasöre sağ tıklayıp Yapıştır’ı seçin",
                                                     item.name
                                                 )
                                             };
@@ -1760,7 +1784,7 @@ impl App for FilesApp {
                         self.selected_index = Some(idx);
                         if idx < self.items.len() {
                             self.status_banner = alloc::format!(
-                                "'{}' secildi - Acmak icin tekrar tiklayin, islemler icin sag tiklayin",
+                                "'{}' seçildi · Açmak için tekrar tıklayın, işlemler için sağ tıklayın",
                                 self.items[idx].name
                             );
                         }
@@ -1793,6 +1817,21 @@ impl App for FilesApp {
             redraw = true;
         }
 
+        let indicator_target = Self::sidebar_item_rect(input.area, unit, self.active_sidebar_index()).y;
+        if self.sidebar_indicator_y < 0 {
+            self.sidebar_indicator_y = indicator_target;
+            redraw = true;
+        } else if self.sidebar_indicator_y != indicator_target {
+            let delta = indicator_target - self.sidebar_indicator_y;
+            let step = if delta.abs() <= 3 {
+                delta
+            } else {
+                (delta / 3).clamp(-unit.max(1), unit.max(1))
+            };
+            self.sidebar_indicator_y += step;
+            redraw = true;
+        }
+
         Update {
             redraw,
             close: false,
@@ -1802,51 +1841,83 @@ impl App for FilesApp {
 
     fn draw(&self, canvas: &mut Canvas<'_>, area: Rect, ctx: &Context) {
         let unit = ctx.unit;
-        canvas.fill_rect(area.x, area.y, area.width, area.height, PORCELAIN_BG);
+        let bg_top = rgb(247, 250, 255);
+        let bands = area.height.min(64).max(1);
+        for band in 0..bands {
+            let y0 = band * area.height / bands;
+            let y1 = (band + 1) * area.height / bands;
+            let t = (band * 255 / bands) as u32;
+            canvas.fill_rect(
+                area.x,
+                area.y + y0,
+                area.width,
+                (y1 - y0).max(1),
+                lerp_color(bg_top, PORCELAIN_BG, t),
+            );
+        }
+        canvas.fill_rect(area.x, area.y, area.width, 1, SHEEN);
+        canvas.fill_rect(area.x, area.y + area.height - 1, area.width, 1, BORDER_SOFT);
 
         let side_rect = Self::sidebar_rect(area, unit);
+        draw_shadow(canvas, side_rect, unit / 2, 3, 9, PANEL_SHADOW, 24);
         draw_rounded_surface(
             canvas,
             side_rect,
             unit / 2,
             SIDEBAR_TOP,
             SIDEBAR_BOT,
-            255,
-            BORDER_SOFT,
+            250,
+            SHEEN,
             true,
         );
 
-        let title_style = text_style((unit * 82 / 100).max(11), 16);
-        let label_style = text_style((unit * 58 / 100).max(10), 15);
-        let cap_style = text_style((unit * 48 / 100).max(9), 18);
+        let title_style = text_style((unit * 76 / 100).max(11), 15);
+        let label_style = text_style((unit * 52 / 100).max(9), 14);
+        let cap_style = text_style((unit * 42 / 100).max(8), 14);
 
-        draw_dot(
-            canvas,
-            side_rect.x + unit,
-            side_rect.y + unit * 5 / 4,
-            5,
-            AQUA_MINT,
-            255,
+        let brand_mark = Rect::new(side_rect.x + unit / 2, side_rect.y + unit / 2, unit, unit);
+        draw_rounded_surface(canvas, brand_mark, unit / 4, AZURE_BRIGHT, AZURE_DEEP, 255, AZURE_DEEP, false);
+        canvas.fill_rect(
+            brand_mark.x + unit / 4,
+            brand_mark.y + unit / 4,
+            unit / 2,
+            (unit / 7).max(1),
+            rgb(220, 239, 255),
+        );
+        canvas.fill_rect(
+            side_rect.x + unit / 2,
+            side_rect.y + unit * 2,
+            side_rect.width - unit,
+            1,
+            BORDER_SOFT,
         );
         draw_text_color(
             canvas,
-            "Hizli Erisim",
+            "Dosyalar",
             side_rect.x + unit * 7 / 4,
-            side_rect.y + unit * 4 / 5,
-            &label_style,
+            side_rect.y + unit / 2,
+            &title_style,
             INK_PRIMARY,
+        );
+        draw_text_color(
+            canvas,
+            "Dosya ve klasörler",
+            side_rect.x + unit * 7 / 4,
+            side_rect.y + unit * 3 / 2,
+            &cap_style,
+            INK_MUTED,
         );
 
         let locations = [
-            ("Masaustu", "/data/desktop", AZURE_BRIGHT),
-            ("Belgelerim", "/data/documents", AQUA_MINT),
-            ("Indirilenler", "/data/downloads", AZURE_DEEP),
-            ("Medya & Galeri", "/data/media", AQUA_DEEP),
-            ("USB / Harici Disk", "/usb", AQUA_MINT),
-            ("Bu Bilgisayar", "/", INK_SECONDARY),
+            ("Masaüstü", "/data/desktop"),
+            ("Belgeler", "/data/documents"),
+            ("İndirilenler", "/data/downloads"),
+            ("Medya ve galeri", "/data/media"),
+            ("USB sürücüsü", "/usb"),
+            ("Bu bilgisayar", "/"),
         ];
 
-        for (i, (name, target, dot_col)) in locations.iter().enumerate() {
+        for (i, (name, target)) in locations.iter().enumerate() {
             let item_rect = Self::sidebar_item_rect(area, unit, i);
             let selected = self.current_path == *target;
             let hovered = self.hover_sidebar == Some(i);
@@ -1856,11 +1927,11 @@ impl App for FilesApp {
                     canvas,
                     item_rect,
                     unit / 3,
-                    AZURE_BRIGHT,
-                    AQUA_MINT,
-                    255,
-                    AZURE_DEEP,
-                    true,
+                    SURFACE_SELECT,
+                    SURFACE_SELECT,
+                    235,
+                    SURFACE_SELECT,
+                    false,
                 );
             } else if hovered {
                 draw_rounded_surface(
@@ -1868,41 +1939,71 @@ impl App for FilesApp {
                     item_rect,
                     unit / 3,
                     SURFACE_HOVER,
-                    SURFACE_ALT,
-                    255,
+                    SURFACE_HOVER,
+                    220,
                     BORDER_SOFT,
                     false,
                 );
             }
 
-            let dot_c = if selected {
-                rgb(255, 255, 255)
-            } else {
-                *dot_col
-            };
-            draw_dot(
-                canvas,
-                item_rect.x + unit * 3 / 4,
-                item_rect.y + item_rect.height / 2,
-                4,
-                dot_c,
-                255,
-            );
-            let fg = if selected {
-                rgb(255, 255, 255)
-            } else {
-                INK_PRIMARY
-            };
+            let glyph = Rect::new(item_rect.x + unit / 2, item_rect.y + unit / 2, unit / 2, unit / 2);
+            let glyph_color = if selected { AZURE_BRIGHT } else { INK_MUTED };
+            match i {
+                0 => {
+                    draw_rounded_surface(canvas, glyph, unit / 8, glyph_color, glyph_color, 255, glyph_color, false);
+                    canvas.fill_rect(glyph.x + unit / 8, glyph.y + unit / 8, unit / 4, (unit / 10).max(1), SHEEN);
+                    canvas.fill_rect(glyph.x + unit / 8, glyph.y + unit / 3, unit / 4, (unit / 10).max(1), SHEEN);
+                }
+                1 => {
+                    draw_rounded_surface(canvas, glyph, unit / 10, SURFACE_WHITE, SURFACE_WHITE, 255, glyph_color, false);
+                    canvas.fill_rect(glyph.x + unit / 8, glyph.y + unit / 5, unit / 4, 1, glyph_color);
+                    canvas.fill_rect(glyph.x + unit / 8, glyph.y + unit / 3, unit / 4, 1, glyph_color);
+                }
+                2 => {
+                    canvas.fill_rect(glyph.x + glyph.width / 2 - 1, glyph.y, 2, glyph.height * 2 / 3, glyph_color);
+                    canvas.fill_rect(glyph.x + glyph.width / 4, glyph.y + glyph.height / 2, glyph.width / 2, 2, glyph_color);
+                    canvas.fill_rect(glyph.x + glyph.width / 4, glyph.y + glyph.height * 2 / 3, glyph.width / 2, 2, glyph_color);
+                }
+                3 => {
+                    draw_dot(canvas, glyph.x + glyph.width / 3, glyph.y + glyph.height / 3, unit / 7, glyph_color, 255);
+                    draw_dot(canvas, glyph.x + glyph.width * 2 / 3, glyph.y + glyph.height / 3, unit / 7, glyph_color, 255);
+                    draw_dot(canvas, glyph.x + glyph.width / 2, glyph.y + glyph.height * 2 / 3, unit / 7, glyph_color, 255);
+                }
+                4 => {
+                    canvas.fill_rect(glyph.x + glyph.width / 2 - 1, glyph.y + unit / 8, 2, glyph.height / 2, glyph_color);
+                    canvas.fill_rect(glyph.x + glyph.width / 4, glyph.y + glyph.height / 2, glyph.width / 2, 2, glyph_color);
+                    draw_dot(canvas, glyph.x + glyph.width / 2, glyph.y + glyph.height / 2, unit / 8, glyph_color, 255);
+                }
+                _ => {
+                    draw_rounded_surface(canvas, glyph, unit / 8, SURFACE_WHITE, SURFACE_WHITE, 255, glyph_color, false);
+                    draw_dot(canvas, glyph.x + glyph.width / 2, glyph.y + glyph.height / 2, unit / 7, glyph_color, 255);
+                }
+            }
             let ty = item_rect.y + (item_rect.height - label_style.cap_height) / 2;
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
                 name,
                 item_rect.x + unit * 3 / 2,
                 ty,
+                item_rect.width - unit * 2,
                 &label_style,
-                fg,
+                INK_PRIMARY,
             );
         }
+
+        let active_item = Self::sidebar_item_rect(area, unit, self.active_sidebar_index());
+        let indicator_y = if self.sidebar_indicator_y < 0 {
+            active_item.y
+        } else {
+            self.sidebar_indicator_y
+        };
+        let indicator = Rect::new(
+            active_item.x + unit / 6,
+            indicator_y + unit / 2,
+            (unit / 7).max(2),
+            active_item.height - unit,
+        );
+        draw_rounded_surface(canvas, indicator, unit / 10, AZURE_BRIGHT, AZURE_BRIGHT, 255, AZURE_BRIGHT, false);
 
         let meter_card = Rect::new(
             side_rect.x + unit / 2,
@@ -1916,72 +2017,74 @@ impl App for FilesApp {
             unit / 3,
             SURFACE_WHITE,
             SURFACE_ALT,
-            245,
+            250,
             BORDER_SOFT,
             true,
         );
-        let mount_tag = if self.current_path.starts_with("/usb") {
+        draw_text_color(
+            canvas,
+            "Konum durumu",
+            meter_card.x + unit * 2 / 3,
+            meter_card.y + unit / 2,
+            &label_style,
+            INK_PRIMARY,
+        );
+        canvas.fill_rect(
+            meter_card.x + unit / 2,
+            meter_card.y + unit * 3 / 2,
+            meter_card.width - unit,
+            1,
+            BORDER_SOFT,
+        );
+        let (mount_tag, mount_detail, mount_color) = if self.current_path.starts_with("/usb") {
             if self.vfs.is_usb_online() {
-                "Harici USB (Takili)"
+                ("USB sürücüsü", "Bağlı", AQUA_DEEP)
             } else {
-                "USB Takili Degil"
+                ("USB sürücüsü", "Bağlı değil", DANGER_RED)
             }
         } else if self.current_path.starts_with("/data") {
-            "Kisisel Disk (Kalici)"
+            ("Kişisel depolama", "Yazılabilir", AZURE_DEEP)
         } else if self.current_path.starts_with("/system") {
-            "Sistem Bolumu"
+            ("Sistem alanı", "Salt okunur", INK_MUTED)
         } else if self.current_path.starts_with("/ram") {
-            "Gecici Bellek"
+            ("Geçici bellek", "Yazılabilir", AZURE_DEEP)
         } else {
-            "Tum Suruculer"
+            ("Tüm bilgisayar", "Gezinme görünümü", INK_MUTED)
         };
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             mount_tag,
             meter_card.x + unit * 2 / 3,
-            meter_card.y + unit * 2 / 3,
+            meter_card.y + unit * 7 / 4,
+            meter_card.width - unit,
             &cap_style,
-            AZURE_DEEP,
+            INK_SECONDARY,
         );
-
-        let bar_r = Rect::new(
-            meter_card.x + unit * 2 / 3,
-            meter_card.y + unit * 2,
-            meter_card.width - unit * 4 / 3,
-            unit / 2,
-        );
-        draw_rounded_surface(
+        draw_dot(
             canvas,
-            bar_r,
+            meter_card.x + unit * 3 / 4,
+            meter_card.y + unit * 11 / 4,
             3,
-            SURFACE_ALT,
-            BORDER_SOFT,
+            mount_color,
             255,
-            BORDER_SOFT,
-            false,
         );
-        let used_w = (bar_r.width * 36 / 100).max(6);
-        let fill_r = Rect::new(bar_r.x, bar_r.y, used_w, bar_r.height);
-        draw_rounded_surface(
+        draw_text_clipped(
             canvas,
-            fill_r,
-            3,
-            AZURE_BRIGHT,
-            AQUA_MINT,
-            255,
-            AQUA_DEEP,
-            false,
+            mount_detail,
+            meter_card.x + unit * 3 / 2,
+            meter_card.y + unit * 5 / 2,
+            meter_card.width - unit * 2,
+            &cap_style,
+            mount_color,
         );
-
         let mut count_line = Line::new();
-        count_line
-            .number(self.items.len() as u32, 1)
-            .text(" oge bu klasorde");
-        draw_text_color(
+        count_line.number(self.items.len() as u32, 1).text(" öğe");
+        draw_text_clipped(
             canvas,
             count_line.as_str(),
             meter_card.x + unit * 2 / 3,
-            meter_card.y + unit * 3,
+            meter_card.y + unit * 13 / 4,
+            meter_card.width - unit,
             &cap_style,
             INK_MUTED,
         );
@@ -1990,7 +2093,7 @@ impl App for FilesApp {
         draw_aero_pill_button(
             canvas,
             back_rect,
-            "< Geri",
+            "‹ Geri",
             self.hover_back,
             false,
             self.current_path != "/",
@@ -2000,7 +2103,7 @@ impl App for FilesApp {
             draw_aero_pill_button(
                 canvas,
                 Self::paste_btn_rect(area, unit),
-                "Yapistir",
+                "Yapıştır",
                 self.hover_paste,
                 false,
                 self.is_writable_current(),
@@ -2009,7 +2112,7 @@ impl App for FilesApp {
         draw_aero_pill_button(
             canvas,
             Self::new_folder_btn_rect(area, unit),
-            "+ Klasor",
+            "Yeni klasör",
             self.hover_new_folder,
             false,
             self.is_writable_current(),
@@ -2017,7 +2120,7 @@ impl App for FilesApp {
         draw_aero_pill_button(
             canvas,
             Self::new_file_btn_rect(area, unit),
-            "+ Belge",
+            "Yeni belge",
             self.hover_new_file,
             true,
             self.is_writable_current(),
@@ -2044,42 +2147,42 @@ impl App for FilesApp {
         );
         let path_ty = path_box.y + (path_box.height - label_style.cap_height) / 2;
         let friendly = self.friendly_path();
-        draw_text_color(
-            canvas,
-            &friendly,
-            path_box.x + unit * 3 / 2,
-            path_ty,
-            &label_style,
-            INK_PRIMARY,
-        );
-
         let mode_badge = Rect::new(
             path_box.x + path_box.width - unit * 6 - unit / 2,
             path_box.y + unit / 4,
             unit * 6,
             path_box.height - unit / 2,
         );
-        let (m_text, m_top, m_bot, m_fg) = if self.is_writable_current() {
-            ("KISISEL ALAN", SURFACE_SELECT, rgb(208, 242, 236), AQUA_DEEP)
+        draw_text_clipped(
+            canvas,
+            &friendly,
+            path_box.x + unit * 3 / 2,
+            path_ty,
+            (mode_badge.x - (path_box.x + unit * 3 / 2) - unit / 3).max(1),
+            &label_style,
+            INK_PRIMARY,
+        );
+        let (m_text, m_bg, m_fg) = if self.is_writable_current() {
+            ("Yazılabilir", SURFACE_SELECT, AZURE_DEEP)
         } else {
-            ("SISTEM ALANI", SURFACE_ALT, BORDER_SOFT, INK_MUTED)
+            ("Salt okunur", SURFACE_ALT, INK_MUTED)
         };
         draw_rounded_surface(
             canvas,
             mode_badge,
-            mode_badge.height / 2,
-            m_top,
-            m_bot,
+            unit / 4,
+            m_bg,
+            m_bg,
             255,
             BORDER_SOFT,
             false,
         );
-        let m_tw = text_width(m_text, &cap_style);
-        draw_text_color(
+        draw_text_clipped(
             canvas,
             m_text,
-            mode_badge.x + (mode_badge.width - m_tw) / 2,
+            mode_badge.x + unit / 3,
             mode_badge.y + (mode_badge.height - cap_style.cap_height) / 2,
+            mode_badge.width - unit * 2 / 3,
             &cap_style,
             m_fg,
         );
@@ -2107,7 +2210,7 @@ impl App for FilesApp {
         );
         draw_text_color(
             canvas,
-            "Tur",
+            "Tür",
             list_card.x + list_card.width - unit * 13,
             hdr_y,
             &cap_style,
@@ -2132,7 +2235,7 @@ impl App for FilesApp {
         if self.items.is_empty() {
             draw_text_color(
                 canvas,
-                "Bu klasor bos. Bos alana sag tiklayarak yeni klasor veya belge olusturabilirsiniz.",
+                "Bu klasör boş. Yeni bir klasör veya belge oluşturmak için üstteki araçları kullanın.",
                 list_card.x + unit * 3 / 2,
                 list_card.y + unit * 4,
                 &label_style,
@@ -2152,16 +2255,44 @@ impl App for FilesApp {
             let is_selected = self.selected_index == Some(idx);
             let is_hov = self.hover_index == Some(idx);
 
-            let (r_top, r_bot, r_brd) = if is_selected {
-                (SURFACE_SELECT, rgb(206, 234, 248), AZURE_BRIGHT)
+            if is_selected {
+                draw_rounded_surface(
+                    canvas,
+                    row,
+                    unit / 4,
+                    SURFACE_SELECT,
+                    SURFACE_SELECT,
+                    255,
+                    rgb(177, 205, 237),
+                    false,
+                );
+                canvas.fill_rect(
+                    row.x + 2,
+                    row.y + unit / 3,
+                    (unit / 8).max(2),
+                    row.height - unit * 2 / 3,
+                    AZURE_BRIGHT,
+                );
             } else if is_hov {
-                (SURFACE_HOVER, SURFACE_ALT, rgb(180, 212, 232))
-            } else if (slot & 1) == 1 {
-                (SURFACE_ALT, SURFACE_ALT, BORDER_SOFT)
+                draw_rounded_surface(
+                    canvas,
+                    row,
+                    unit / 4,
+                    SURFACE_HOVER,
+                    SURFACE_HOVER,
+                    235,
+                    SURFACE_HOVER,
+                    false,
+                );
             } else {
-                (SURFACE_WHITE, SURFACE_WHITE, BORDER_SOFT)
-            };
-            draw_rounded_surface(canvas, row, unit / 3, r_top, r_bot, 255, r_brd, false);
+                canvas.fill_rect(
+                    row.x + unit / 2,
+                    row.y + row.height - 1,
+                    row.width - unit,
+                    1,
+                    SURFACE_ALT,
+                );
+            }
 
             let is_dir = item.file_type == FileType::Directory;
             let is_pkg = item.name.ends_with(".ntzc");
@@ -2181,42 +2312,44 @@ impl App for FilesApp {
 
             let text_y = row.y + (row.height - label_style.cap_height) / 2;
             let display_name = self.friendly_entry_name(&item.name);
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
                 display_name,
                 row.x + unit * 2 + unit / 4,
                 text_y,
+                (list_card.x + list_card.width - unit * 14 - (row.x + unit * 2 + unit / 4)).max(1),
                 &label_style,
                 INK_PRIMARY,
             );
 
             let lower_item = item.name.to_ascii_lowercase();
             let (kind_str, kind_col) = if is_dir {
-                ("Klasor", AZURE_DEEP)
+                ("Klasör", AZURE_DEEP)
             } else if is_pkg {
-                ("Uygulama Paketi", AQUA_DEEP)
+                ("Uygulama paketi", AQUA_DEEP)
             } else if is_txt {
-                ("Metin Belgesi", INK_SECONDARY)
+                ("Metin belgesi", INK_SECONDARY)
             } else if lower_item.ends_with(".png") {
-                ("Gorsel (PNG)", AZURE_BRIGHT)
+                ("Görsel · PNG", AZURE_BRIGHT)
             } else if lower_item.ends_with(".jpg") || lower_item.ends_with(".jpeg") {
-                ("Fotograf (JPEG)", AZURE_BRIGHT)
+                ("Fotoğraf · JPEG", AZURE_BRIGHT)
             } else if lower_item.ends_with(".bmp") {
-                ("Bitmap Gorsel", AZURE_BRIGHT)
+                ("Görsel · BMP", AZURE_BRIGHT)
             } else if lower_item.ends_with(".mp3") || lower_item.ends_with(".wav") {
-                ("Ses Dosyasi (Audio)", AQUA_MINT)
+                ("Ses dosyası", AQUA_MINT)
             } else if lower_item.ends_with(".mp4") {
-                ("Video (MP4)", AQUA_MINT)
+                ("Video · MP4", AQUA_MINT)
             } else if lower_item.ends_with(".efra") {
-                ("Donanim Surucusu", AQUA_DEEP)
+                ("Donanım sürücüsü", AQUA_DEEP)
             } else {
-                ("Sistem Dosyasi", INK_MUTED)
+                ("Sistem dosyası", INK_MUTED)
             };
-            draw_text_color(
+            draw_text_clipped(
                 canvas,
                 kind_str,
                 list_card.x + list_card.width - unit * 13,
                 text_y,
+                unit * 6,
                 &cap_style,
                 kind_col,
             );
@@ -2237,7 +2370,7 @@ impl App for FilesApp {
             } else {
                 draw_text_color(
                     canvas,
-                    "--",
+                    "—",
                     list_card.x + list_card.width - unit * 6,
                     text_y,
                     &cap_style,
@@ -2285,16 +2418,16 @@ impl App for FilesApp {
 
         if let Some(ref menu) = self.context_menu {
             let menu_r = self.context_menu_rect(area, unit, menu);
-            draw_shadow(canvas, menu_r, unit / 3, 4, 12, rgb(18, 42, 68), 38);
-            blur_rect_in_place(canvas, menu_r, 6);
+            draw_shadow(canvas, menu_r, unit / 3, 3, 10, PANEL_SHADOW, 34);
+            blur_rect_in_place(canvas, menu_r, 5);
             draw_rounded_surface(
                 canvas,
                 menu_r,
                 unit / 3,
-                rgb(254, 255, 255),
-                rgb(242, 249, 253),
-                242,
-                AZURE_BRIGHT,
+                SURFACE_WHITE,
+                SURFACE_ALT,
+                246,
+                BORDER_SOFT,
                 true,
             );
             let actions = self.context_menu_actions(menu.target_index);
@@ -2308,17 +2441,15 @@ impl App for FilesApp {
                 );
                 let is_hov = menu.hover_item == Some(idx) && *enabled;
                 if is_hov {
-                    let (h_top, h_bot, h_brd) = if *act == ContextAction::Delete {
-                        (DANGER_RED, rgb(196, 44, 40), DANGER_RED)
+                    let (fill, border) = if *act == ContextAction::Delete {
+                        (rgb(255, 235, 234), rgb(242, 190, 188))
                     } else {
-                        (AZURE_BRIGHT, AQUA_MINT, AZURE_DEEP)
+                        (SURFACE_SELECT, rgb(190, 213, 241))
                     };
-                    draw_rounded_surface(canvas, item_r, unit / 4, h_top, h_bot, 255, h_brd, false);
+                    draw_rounded_surface(canvas, item_r, unit / 5, fill, fill, 255, border, false);
                 }
                 let fg = if !*enabled {
                     INK_DIM
-                } else if is_hov {
-                    rgb(255, 255, 255)
                 } else if *act == ContextAction::Delete {
                     DANGER_RED
                 } else {
@@ -2326,12 +2457,10 @@ impl App for FilesApp {
                 };
                 let dot_col = if !*enabled {
                     INK_DIM
-                } else if is_hov {
-                    rgb(255, 255, 255)
                 } else if *act == ContextAction::Delete {
                     DANGER_RED
                 } else {
-                    AQUA_MINT
+                    AZURE_BRIGHT
                 };
                 draw_dot(
                     canvas,
@@ -2479,7 +2608,7 @@ impl App for FilesApp {
                     INK_PRIMARY,
                 );
                 let status_msg = if !can_edit {
-                    "Salt Okunur Sistem Dosyasi"
+                    "Salt okunur sistem dosyası"
                 } else if modified {
                     "Degistirildi - Kaydetmeye Hazir"
                 } else {
@@ -2542,7 +2671,7 @@ impl App for FilesApp {
             } => {
                 let m_rect = Self::modal_rect(area, unit);
                 draw_frosted_modal(canvas, m_rect, unit);
-                let hdr = alloc::format!("Gorsel Goruntuleyici: {}", name);
+                let hdr = alloc::format!("Görsel görüntüleyici · {}", name);
                 draw_text_color(
                     canvas,
                     &hdr,
@@ -2911,7 +3040,7 @@ impl App for FilesApp {
                 draw_frosted_modal(canvas, m_rect, unit);
                 draw_text_color(
                     canvas,
-                    "Yeni Klasor Olustur",
+                    "Yeni klasör oluştur",
                     m_rect.x + unit * 2,
                     m_rect.y + unit * 2,
                     &title_style,
@@ -2919,7 +3048,7 @@ impl App for FilesApp {
                 );
                 draw_text_color(
                     canvas,
-                    "Klasor adini yazin ve Olustur dugmesine tiklayin:",
+                    "Klasör adını yazın ve Oluştur düğmesine tıklayın:",
                     m_rect.x + unit * 2,
                     m_rect.y + unit * 4,
                     &cap_style,
@@ -2949,7 +3078,7 @@ impl App for FilesApp {
                 draw_aero_pill_button(
                     canvas,
                     create_btn,
-                    "Olustur",
+                    "Oluştur",
                     self.modal_hover_primary,
                     true,
                     true,
@@ -2960,7 +3089,7 @@ impl App for FilesApp {
                 draw_frosted_modal(canvas, m_rect, unit);
                 draw_text_color(
                     canvas,
-                    "Yeni Metin Belgesi Olustur",
+                    "Yeni metin belgesi oluştur",
                     m_rect.x + unit * 2,
                     m_rect.y + unit * 2,
                     &title_style,
@@ -2998,7 +3127,7 @@ impl App for FilesApp {
                 draw_aero_pill_button(
                     canvas,
                     create_btn,
-                    "Olustur",
+                    "Oluştur",
                     self.modal_hover_primary,
                     true,
                     true,
@@ -3022,7 +3151,7 @@ impl App for FilesApp {
                 );
                 draw_text_color(
                     canvas,
-                    "Yeni adi girin ve Kaydet dugmesine tiklayin:",
+                    "Yeni adı girin ve Kaydet düğmesine tıklayın:",
                     m_rect.x + unit * 2,
                     m_rect.y + unit * 4,
                     &cap_style,
@@ -3555,16 +3684,16 @@ fn blur_rect_in_place(canvas: &mut Canvas<'_>, rect: Rect, radius: usize) {
 }
 
 fn draw_frosted_modal(canvas: &mut Canvas<'_>, rect: Rect, unit: i32) {
-    draw_shadow(canvas, rect, unit / 2, 5, 16, rgb(18, 42, 68), 44);
-    blur_rect_in_place(canvas, rect, 6);
+    draw_shadow(canvas, rect, unit / 2, 4, 13, PANEL_SHADOW, 42);
+    blur_rect_in_place(canvas, rect, 5);
     draw_rounded_surface(
         canvas,
         rect,
         unit / 2,
-        rgb(254, 255, 255),
-        rgb(241, 249, 253),
-        238,
-        AQUA_MINT,
+        SURFACE_WHITE,
+        rgb(242, 247, 253),
+        246,
+        BORDER_SOFT,
         true,
     );
 }
@@ -3577,7 +3706,7 @@ fn draw_aero_pill_button(
     primary: bool,
     enabled: bool,
 ) {
-    let radius = rect.height / 2;
+    let radius = (rect.height / 4).min(8).max(3);
     let st = text_style((rect.height * 42 / 100).max(9), 15);
     let tw = text_width(label, &st);
     let tx = rect.x + (rect.width - tw) / 2;
@@ -3599,20 +3728,21 @@ fn draw_aero_pill_button(
     }
 
     if primary {
-        let (top_c, bot_c) = if hovered {
-            (AZURE_DEEP, AQUA_DEEP)
-        } else {
-            (AZURE_BRIGHT, AQUA_MINT)
-        };
-        draw_rounded_surface(canvas, rect, radius, top_c, bot_c, 255, AZURE_DEEP, true);
+        let fill = if hovered { AZURE_DEEP } else { AZURE_BRIGHT };
+        draw_shadow(canvas, Rect::new(rect.x, rect.y + 1, rect.width, rect.height), radius, 2, 5, PANEL_SHADOW, 16);
+        draw_rounded_surface(canvas, rect, radius, fill, fill, 255, AZURE_DEEP, false);
+        if !hovered {
+            canvas.fill_rect(rect.x + radius, rect.y + 1, (rect.width - radius * 2).max(1), 1, rgb(116, 170, 235));
+        }
         draw_text_color(canvas, label, tx, ty, &st, rgb(255, 255, 255));
     } else {
-        let (top_c, bot_c, brd) = if hovered {
-            (SURFACE_HOVER, rgb(218, 238, 249), AZURE_BRIGHT)
+        let (fill, brd) = if hovered {
+            (SURFACE_HOVER, rgb(171, 199, 233))
         } else {
-            (SURFACE_WHITE, SURFACE_ALT, BORDER_SOFT)
+            (SURFACE_WHITE, BORDER_SOFT)
         };
-        draw_rounded_surface(canvas, rect, radius, top_c, bot_c, 250, brd, true);
+        draw_shadow(canvas, Rect::new(rect.x, rect.y + 1, rect.width, rect.height), radius, 2, 4, PANEL_SHADOW, 10);
+        draw_rounded_surface(canvas, rect, radius, fill, fill, 255, brd, false);
         draw_text_color(canvas, label, tx, ty, &st, INK_PRIMARY);
     }
 }

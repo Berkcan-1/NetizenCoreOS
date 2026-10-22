@@ -5,7 +5,7 @@ NetizenCore tarayici uygulamasi. HTML ayristirici, CSS motoru, yerlesim motoru v
 ## Dosyalar
 
 - lib.rs: modulleri baglar. BrowserApp, B/F/R gecmisi, ana belge + css + resim kuyrugu, form gonderimi, hata sayfasi, cizim
-- html.rs: tokenizer, DOM agaci, metin temizleme, YouTube ve meta yedek kartlari
+- html.rs: tokenizer, DOM agaci, metin temizleme, bos sayfa icin acikca isaretli meta yedek karti (siteye ozel yeniden yazim YOKTUR)
 - css.rs: stylesheet ayristirma, secici eslestirme, var() cozumleme, media sorgusu degerlendirme, SafeClamp
 - layout.rs: akis yerlesimi, satir ici yerlesim, tablo satiri, hesaplanan stiller
 - image.rs: PNG, JPEG, BMP, SVG cozucu
@@ -27,7 +27,10 @@ NetizenCore tarayici uygulamasi. HTML ayristirici, CSS motoru, yerlesim motoru v
 - Ana belge basarisiz olursa veya bos donerse hata sayfasi gosterilir, durum Idle'a doner ve dongu olusmaz.
 - Gorunum alani altina durum cubugu zemini cizilir, tasan kutular durum cubugunun ustune cikmaz.
 - Gorunum alani yuksekligi cizim, tiklama ve kaydirma icin ayni (area.height - unit * 7) degerini kullanir.
-- HTML ayristirma siniri 1 MB, yanit siniri 1 MB.
+- Sinirlar (kaynaktan dogrulandi): HTML 3 MiB (`MAX_HTML_BYTES`), 16.000 token, 6.000 DOM dugumu, 28 derinlik; CSS 256 KiB ve 1.500 kural; ag yanit tamponu 6 MiB (nc-net). Limit asilinca sayfa sessizce kesilmez, `about:debug` 'PARSER:' satiri gosterir.
+- Tirnaksiz oznitelik degerleri WHATWG kuralina uyar: yalnizca bosluk ve `>` degeri bitirir, `/` degerin parcasidir.
+- Gorsel formatlari: PNG, JPEG, BMP, SVG cozulur. GIF/WebP/AVIF/APNG/ICO henuz cozulmez; bu URL'ler indirilmez ve `about:debug` icinde 'IMAGE SKIPPED' olarak nedeniyle listelenir.
+- Siteye ozel DOM yeniden yazimi (eski YouTube karti) kaldirildi; gercek sayfa DOM'u degistirilmez.
 
 ## JavaScript koprusu (v6)
 - `jsdom.rs`: nc-js motorunu DOM'a baglar. Rust tarafi yalnizca ilkel dugum islemlerini (`__dom.*`) ve ag kuyrugunu saglar.
@@ -38,4 +41,37 @@ NetizenCore tarayici uygulamasi. HTML ayristirici, CSS motoru, yerlesim motoru v
   JS'in sonradan eklediği `<script src>`, `<link>`, `<img>` ogeleri de yuklenir.
 - Hata ayiklama: adres cubuguna `about:debug` yaz (script hatalari + console.log ciktilari), `view-source:URL` ham HTML'i gosterir.
   Durum cubugunda `JS ERR n` gorunur.
-- Sinirlar: yalnizca GET isteklerini yapabilir (fetch/XHR POST yok), cerez yok, `<script type=module>` atlanir.
+- Sinirlar: bkz. FEATURE_MATRIX.md (tek dogru kaynak). README ile matris celisirse matris gecerlidir.
+
+## Testler
+
+- `src/url.rs` ve `src/html.rs` icinde `#[cfg(test)]` birim testleri vardir.
+- Bu crate `no_std` ve nc-gfx/nc-ui/nc-font'a bagli oldugu icin testler ana makinede `host-tests/` ile calisir:
+  `cd nc-app-browser/host-tests && cargo test`
+
+## Adım 2 testleri
+
+- Rust (saf modüller): `cd nc-app-browser/host-tests && cargo test` (html, url, supports ve prelude/Rust liste eşitliği)
+- JS (prelude.js, Node/V8): `cd nc-app-browser/host-tests/js && node run_prelude_tests.js`
+- nc-js yorumlayıcısı: `cd nc-js && cargo test` (dom_prelude vakalarına 16 yeni vaka eklendi)
+- nc-font: `cd nc-font && cargo test` (`has_glyph_matches_the_drawn_repertoire`)
+
+## Adım 3a: CSS çekirdeği
+
+- `src/cssvalues.rs`: saf (nc-* bağımsız) değer katmanı: birimler, `calc/min/max/clamp`, `font-weight`, `line-height`, shorthand açıcılar (`border`, `font`, `background`, `overflow`, `inset`, `text-decoration`), gradyan renkleri.
+- `src/supports.rs`: `@supports` + `CSS.supports` için desteklenen özellik listesi (86). `prelude.js` kopyası `host-tests` ile eşitlik testinden geçer.
+- `layout.rs`: yeni `ComputedStyle` alanları, UA varsayılanları (b/strong/h1-h6 kalın, a/u altı çizili, s/del üstü çizili, mark, small...), `position`, kenar başına border, overflow kırpma, boş kutu düzeltmesi, uzun kelime bölme.
+- `lib.rs`: `page_text_style` ile ağırlık/aralık, `text-decoration` çizimi, kenar şeritleri, konumlu kutuların üstte boyanması.
+- Testler: `cd host-tests && cargo test` (cssvalues + html + url + supports). Düzen/çizim kodu (`layout.rs`, `lib.rs`) nc-gfx'e bağlı olduğundan ana makinede test edilemez; gerçek PC/QEMU/VBox üzerinde elle doğrulanmalı.
+
+## Adım 3b: tanılama
+
+- `about:compat` sayfasını açın (`src/compat_probe.html`): motorun içinde ES/DOM/Web API yoklaması yapar, eksikleri listeler.
+- `about:debug`: betik hataları artık `[receiver: …, value: …]` ile gelir; Türkçe karakterler doğru görünür.
+- Node'da: `cd host-tests/js && node run_prelude_tests.js` (71 vaka) ve `node run_compat_probe.js` (prelude'ün DOM/Web API eksik listesi).
+
+## Adım 4
+
+- `src/gif.rs`: saf GIF çözücü. Test: `cd host-tests && cargo test` + doğrulama betiği `python3 host-tests/tools/gif_port_check.py` (Pillow gerekir).
+- `nc-js`: destructuring ataması ve `new.target` (`cd nc-js && cargo test`).
+- prelude: `<style>.sheet` / CSSOM; Node testleri 74 vaka.

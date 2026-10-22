@@ -1,0 +1,202 @@
+<html><head><title>COMPAT</title></head><body style="background-color:#f8fafc"><div id="root" style="padding:16px"><h1>ENGINE COMPAT</h1><p id="status">running probes...</p></div>
+<script>
+(function () {
+  var results = [];
+  var cats = [];
+  function cat(name) { cats.push({ name: name, missing: [], total: 0 }); }
+  function cur() { return cats[cats.length - 1]; }
+  function rec(name, ok) {
+    var c = cur();
+    c.total++;
+    if (!ok) { c.missing.push(name); }
+  }
+  function test(name, fn) {
+    var ok = false;
+    try { ok = !!fn(); } catch (e) { ok = false; }
+    rec(name, ok);
+  }
+  function path(p) {
+    var parts = p.split('.');
+    var o = window;
+    for (var i = 0; i < parts.length; i++) {
+      if (o === undefined || o === null) { return undefined; }
+      try { o = o[parts[i]]; } catch (e) { return undefined; }
+    }
+    return o;
+  }
+  function paths(list) { for (var i = 0; i < list.length; i++) { (function (p) { test(p, function () { return path(p) !== undefined; }); })(list[i]); } }
+  function fns(list) { for (var i = 0; i < list.length; i++) { (function (p) { test(p, function () { return typeof path(p) === 'function'; }); })(list[i]); } }
+  function methods(obj, label, names) {
+    for (var i = 0; i < names.length; i++) {
+      (function (n) { test(label + '.' + n, function () { return obj !== undefined && obj !== null && obj[n] !== undefined; }); })(names[i]);
+    }
+  }
+  var canCompile = typeof Function === 'function';
+  function syn(name, code) {
+    test(name, function () { if (!canCompile) { return false; } new Function(code); return true; });
+  }
+  function run(name, code, expected) {
+    test(name, function () { if (!canCompile) { return false; } return String(new Function(code)()) === expected; });
+  }
+
+  cat('ES globals');
+  paths(['Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'Symbol', 'BigInt', 'Math', 'JSON', 'Date', 'RegExp', 'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet', 'WeakRef', 'FinalizationRegistry', 'Proxy', 'Reflect', 'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'Atomics', 'Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array', 'Intl', 'WebAssembly', 'globalThis', 'escape', 'unescape', 'encodeURIComponent', 'decodeURIComponent', 'encodeURI', 'decodeURI', 'isNaN', 'isFinite', 'parseInt', 'parseFloat', 'eval', 'structuredClone']);
+
+  cat('ES Object / Function / Symbol');
+  fns(['Object.assign', 'Object.entries', 'Object.values', 'Object.keys', 'Object.fromEntries', 'Object.getOwnPropertyNames', 'Object.getOwnPropertyDescriptor', 'Object.getOwnPropertyDescriptors', 'Object.getOwnPropertySymbols', 'Object.defineProperty', 'Object.defineProperties', 'Object.create', 'Object.freeze', 'Object.isFrozen', 'Object.seal', 'Object.isSealed', 'Object.preventExtensions', 'Object.isExtensible', 'Object.getPrototypeOf', 'Object.setPrototypeOf', 'Object.is', 'Object.hasOwn', 'Object.prototype.hasOwnProperty', 'Object.prototype.isPrototypeOf', 'Object.prototype.propertyIsEnumerable', 'Object.prototype.toString', 'Object.prototype.valueOf', 'Object.prototype.toLocaleString', 'Function.prototype.call', 'Function.prototype.apply', 'Function.prototype.bind', 'Function.prototype.toString', 'Symbol.for', 'Symbol.keyFor']);
+  paths(['Symbol.iterator', 'Symbol.asyncIterator', 'Symbol.hasInstance', 'Symbol.toPrimitive', 'Symbol.toStringTag', 'Symbol.species', 'Symbol.prototype.description']);
+  fns(['Reflect.apply', 'Reflect.construct', 'Reflect.defineProperty', 'Reflect.deleteProperty', 'Reflect.get', 'Reflect.getOwnPropertyDescriptor', 'Reflect.getPrototypeOf', 'Reflect.has', 'Reflect.isExtensible', 'Reflect.ownKeys', 'Reflect.preventExtensions', 'Reflect.set', 'Reflect.setPrototypeOf']);
+
+  cat('ES Array');
+  fns(['Array.isArray', 'Array.from', 'Array.of']);
+  var AP = Array.prototype;
+  methods(AP, 'Array.prototype', ['at', 'concat', 'copyWithin', 'entries', 'every', 'fill', 'filter', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'join', 'keys', 'lastIndexOf', 'map', 'pop', 'push', 'reduce', 'reduceRight', 'reverse', 'shift', 'slice', 'some', 'sort', 'splice', 'toLocaleString', 'toString', 'unshift', 'values', 'toSorted', 'toReversed', 'toSpliced', 'with']);
+
+  cat('ES String / Number / Math');
+  fns(['String.fromCharCode', 'String.fromCodePoint', 'String.raw', 'Number.isInteger', 'Number.isSafeInteger', 'Number.isFinite', 'Number.isNaN', 'Number.parseFloat', 'Number.parseInt']);
+  methods(String.prototype, 'String.prototype', ['at', 'charAt', 'charCodeAt', 'codePointAt', 'concat', 'endsWith', 'includes', 'indexOf', 'lastIndexOf', 'localeCompare', 'match', 'matchAll', 'normalize', 'padEnd', 'padStart', 'repeat', 'replace', 'replaceAll', 'search', 'slice', 'split', 'startsWith', 'substring', 'substr', 'toLowerCase', 'toUpperCase', 'toLocaleLowerCase', 'toLocaleUpperCase', 'trim', 'trimStart', 'trimEnd', 'trimLeft', 'trimRight', 'isWellFormed']);
+  methods(Number.prototype, 'Number.prototype', ['toFixed', 'toPrecision', 'toExponential', 'toLocaleString', 'toString']);
+  paths(['Number.EPSILON', 'Number.MAX_SAFE_INTEGER', 'Number.MIN_SAFE_INTEGER', 'Number.MAX_VALUE', 'Number.MIN_VALUE', 'Math.PI', 'Math.E']);
+  fns(['Math.abs', 'Math.ceil', 'Math.floor', 'Math.round', 'Math.trunc', 'Math.sign', 'Math.sqrt', 'Math.cbrt', 'Math.pow', 'Math.exp', 'Math.expm1', 'Math.log', 'Math.log2', 'Math.log10', 'Math.log1p', 'Math.sin', 'Math.cos', 'Math.tan', 'Math.asin', 'Math.acos', 'Math.atan', 'Math.atan2', 'Math.sinh', 'Math.cosh', 'Math.tanh', 'Math.hypot', 'Math.min', 'Math.max', 'Math.random', 'Math.fround', 'Math.imul', 'Math.clz32']);
+
+  cat('ES collections / Promise / Date / JSON / RegExp');
+  methods(Map.prototype, 'Map.prototype', ['get', 'set', 'has', 'delete', 'clear', 'forEach', 'keys', 'values', 'entries']);
+  methods(Set.prototype, 'Set.prototype', ['add', 'has', 'delete', 'clear', 'forEach', 'keys', 'values', 'entries']);
+  methods(WeakMap.prototype, 'WeakMap.prototype', ['get', 'set', 'has', 'delete']);
+  fns(['Promise.all', 'Promise.allSettled', 'Promise.any', 'Promise.race', 'Promise.resolve', 'Promise.reject', 'Promise.withResolvers', 'Promise.prototype.then', 'Promise.prototype.catch', 'Promise.prototype.finally', 'Date.now', 'Date.parse', 'Date.UTC', 'JSON.parse', 'JSON.stringify', 'RegExp.prototype.exec', 'RegExp.prototype.test']);
+  methods(Date.prototype, 'Date.prototype', ['getTime', 'getFullYear', 'getMonth', 'getDate', 'getDay', 'getHours', 'getMinutes', 'getSeconds', 'getMilliseconds', 'getUTCFullYear', 'getUTCMonth', 'getUTCDate', 'getUTCHours', 'getTimezoneOffset', 'toISOString', 'toJSON', 'toUTCString', 'toDateString', 'toTimeString', 'toLocaleDateString', 'toLocaleTimeString', 'toLocaleString', 'setFullYear', 'setMonth', 'setDate', 'setHours', 'setMinutes', 'setSeconds', 'setTime']);
+  fns(['Intl.NumberFormat', 'Intl.DateTimeFormat', 'Intl.Collator', 'Intl.PluralRules', 'Intl.RelativeTimeFormat', 'Intl.ListFormat', 'Intl.Segmenter', 'Intl.getCanonicalLocales']);
+  methods(Uint8Array.prototype, 'Uint8Array.prototype', ['set', 'subarray', 'slice', 'fill', 'map', 'join', 'values', 'keys', 'entries', 'forEach', 'indexOf', 'reverse', 'sort']);
+  fns(['Uint8Array.from', 'Uint8Array.of', 'ArrayBuffer.isView']);
+
+  cat('JS syntax');
+  syn('arrow functions', 'return (function () { var f = (a, b) => a + b; return f(1, 2); })();');
+  syn('let / const', 'let a = 1; const b = 2; return a + b;');
+  syn('template literals', 'var x = 1; return `a${x}b`;');
+  syn('tagged templates', 'function t(s) { return s[0]; } return t`x`;');
+  syn('destructuring', 'var { a, b = 2 } = { a: 1 }; var [c, ...d] = [1, 2, 3]; return a + b + c + d.length;');
+  syn('default / rest params', 'function f(a, b = 2, ...r) { return a + b + r.length; } return f(1);');
+  syn('spread', 'var a = [1, 2]; var o = { x: 1 }; return [...a, 3].length + Object.keys({ ...o }).length;');
+  syn('classes', 'class A { constructor() { this.x = 1; } get y() { return 2; } static s() { return 3; } } class B extends A {} return new B().x;');
+  syn('class fields', 'class A { x = 1; static y = 2; } return new A().x;');
+  syn('private fields (#x)', 'class A { #x = 1; get() { return this.#x; } } return new A().get();');
+  syn('private methods (#m)', 'class A { #m() { return 1; } get() { return this.#m(); } } return new A().get();');
+  syn('static blocks', 'class A { static { A.z = 1; } } return A.z;');
+  syn('generators', 'function* g() { yield 1; yield* [2]; } return Array.from(g()).length;');
+  syn('async / await', 'async function f() { return await 1; } return typeof f;');
+  syn('async arrow', 'var f = async () => 1; return typeof f;');
+  syn('async generators', 'async function* g() { yield 1; } return typeof g;');
+  syn('for await', 'async function f() { for await (var x of []) {} } return typeof f;');
+  syn('optional chaining ?.', 'var a = null; return a?.b?.c;');
+  syn('optional call ?.()', 'var a = null; return a?.();');
+  syn('nullish ??', 'return null ?? 1;');
+  syn('logical assignment', 'var a = null; a ??= 1; a ||= 2; a &&= 3; return a;');
+  syn('exponent **', 'return 2 ** 3;');
+  syn('numeric separators', 'return 1_000;');
+  syn('BigInt literals', 'return 10n;');
+  syn('optional catch binding', 'try { } catch { } return 1;');
+  syn('computed / shorthand props', 'var k = "a"; var o = { [k]: 1, k, m() { return 1; }, get g() { return 1; } }; return o.a;');
+  syn('labeled statements', 'a: for (;;) { break a; } return 1;');
+  syn('new.target', 'function F() { return new.target; } return typeof F;');
+  syn('regex lookbehind', 'return /(?<=a)b/.test("ab");');
+  syn('regex named groups', 'return /(?<x>a)/.exec("a").groups.x;');
+  syn('regex unicode property', 'return /\\p{L}/u.test("a");');
+  syn('regex sticky y', 'return /a/y.sticky;');
+  syn('regex dotAll s', 'return /./s.test("\\n");');
+  syn('regex d flag (indices)', 'return /a/d.hasIndices;');
+  syn('getter / setter in classes', 'class A { get x() { return 1; } set x(v) {} } return new A().x;');
+  syn('Symbol.iterator protocol', 'var o = { [Symbol.iterator]() { var i = 0; return { next() { return { done: i++ > 0, value: 1 }; } }; } }; return Array.from(o).length;');
+  syn('Function constructor', 'return new Function("return 1")();');
+  syn('eval()', 'return eval("1+1");');
+  syn('with statement', 'var o = { a: 1 }; with (o) { return a; }');
+  syn('import() expression', 'return function () { return import("x"); };');
+  run('closures / hoisting', 'var r = []; for (var i = 0; i < 3; i++) { (function (j) { r.push(function () { return j; }); })(i); } return r[2]();', '2');
+  run('let per-iteration binding', 'var r = []; for (let i = 0; i < 3; i++) { r.push(function () { return i; }); } return r[0]() + "" + r[2]();', '02');
+  run('array sort comparator', 'return [3, 1, 2].sort(function (a, b) { return a - b; }).join();', '1,2,3');
+  run('JSON roundtrip', 'return JSON.stringify(JSON.parse(\'{"a":[1,{"b":null}]}\'));', '{"a":[1,{"b":null}]}');
+  run('JSON.stringify indent', 'return JSON.stringify({ a: 1 }, null, 2);', '{\n  "a": 1\n}');
+  run('toFixed rounding', 'return (1.005).toFixed(2) + (0.1 + 0.2).toFixed(2);', '1.000.30');
+  run('replace with function', 'return "a-b".replace(/-(\\w)/g, function (m, c) { return c.toUpperCase(); });', 'aB');
+  run('Date ISO parse', 'return new Date("2020-01-02T03:04:05Z").getTime();', '1577934245000');
+  run('Map insertion order', 'var m = new Map(); m.set("b", 1); m.set("a", 2); return Array.from(m.keys()).join();', 'b,a');
+  run('string unicode length', 'return "\\u{1F600}".length + "" + Array.from("\\u{1F600}").length;', '21');
+  run('Turkish case mapping', 'return "i".toLocaleUpperCase("tr") + "I".toLocaleLowerCase("tr");', '\u0130\u0131');
+  run('Intl.NumberFormat', 'return new Intl.NumberFormat("en-US").format(1234.5);', '1,234.5');
+
+  cat('DOM: Element');
+  var E = document.createElement('div');
+  methods(E, 'Element', ['matches', 'closest', 'querySelector', 'querySelectorAll', 'getAttribute', 'setAttribute', 'removeAttribute', 'hasAttribute', 'hasAttributes', 'toggleAttribute', 'getAttributeNames', 'getAttributeNode', 'append', 'prepend', 'before', 'after', 'replaceWith', 'remove', 'replaceChildren', 'insertAdjacentHTML', 'insertAdjacentElement', 'insertAdjacentText', 'cloneNode', 'contains', 'getBoundingClientRect', 'getClientRects', 'scrollIntoView', 'scrollTo', 'scrollBy', 'focus', 'blur', 'click', 'animate', 'getAnimations', 'attachShadow', 'classList', 'dataset', 'style', 'innerHTML', 'outerHTML', 'textContent', 'innerText', 'children', 'childNodes', 'firstChild', 'lastChild', 'firstElementChild', 'lastElementChild', 'nextElementSibling', 'previousElementSibling', 'nextSibling', 'previousSibling', 'childElementCount', 'parentElement', 'parentNode', 'offsetWidth', 'offsetHeight', 'offsetTop', 'offsetLeft', 'offsetParent', 'clientWidth', 'clientHeight', 'scrollTop', 'scrollLeft', 'scrollHeight', 'scrollWidth', 'getElementsByClassName', 'getElementsByTagName', 'attributes', 'localName', 'tagName', 'nodeName', 'nodeType', 'nodeValue', 'namespaceURI', 'ownerDocument', 'isConnected', 'getRootNode', 'compareDocumentPosition', 'isEqualNode', 'isSameNode', 'normalize', 'hasChildNodes', 'appendChild', 'removeChild', 'insertBefore', 'replaceChild', 'requestFullscreen', 'checkVisibility', 'hidden', 'tabIndex', 'id', 'className', 'title', 'lang', 'dir', 'slot', 'addEventListener', 'removeEventListener', 'dispatchEvent', 'setPointerCapture', 'releasePointerCapture']);
+  methods(E.classList, 'classList', ['add', 'remove', 'toggle', 'contains', 'replace', 'item', 'length', 'value', 'forEach', 'entries', 'keys', 'values', 'supports']);
+  methods(E.style, 'style', ['setProperty', 'getPropertyValue', 'removeProperty', 'cssText', 'getPropertyPriority', 'length', 'item']);
+  var I = document.createElement('input');
+  methods(I, 'input', ['value', 'checked', 'type', 'name', 'placeholder', 'disabled', 'select', 'setSelectionRange', 'selectionStart', 'files', 'form', 'validity', 'checkValidity', 'reportValidity', 'setCustomValidity', 'valueAsNumber', 'defaultValue', 'required', 'maxLength', 'indeterminate']);
+  methods(document.createElement('form'), 'form', ['submit', 'reset', 'elements', 'requestSubmit', 'checkValidity', 'action', 'method']);
+  methods(document.createElement('canvas'), 'canvas', ['getContext', 'toDataURL', 'toBlob', 'width', 'height']);
+  methods(document.createElement('img'), 'img', ['src', 'complete', 'naturalWidth', 'naturalHeight', 'decode', 'srcset', 'alt', 'loading']);
+  methods(document.createElement('a'), 'a', ['href', 'hostname', 'pathname', 'search', 'hash', 'origin', 'protocol', 'port', 'target', 'rel']);
+  methods(document.createElement('script'), 'script', ['src', 'async', 'defer', 'type', 'text']);
+  methods(document.createElement('template'), 'template', ['content']);
+  methods(document.createElement('video'), 'video', ['play', 'pause', 'currentTime', 'duration', 'canPlayType', 'load']);
+  methods(document.createElement('dialog'), 'dialog', ['showModal', 'close', 'open']);
+  methods(document.createElement('details'), 'details', ['open']);
+
+  cat('DOM: Document');
+  methods(document, 'document', ['createElement', 'createElementNS', 'createTextNode', 'createComment', 'createDocumentFragment', 'createEvent', 'createRange', 'createTreeWalker', 'createNodeIterator', 'getElementById', 'getElementsByName', 'getElementsByClassName', 'getElementsByTagName', 'querySelector', 'querySelectorAll', 'elementFromPoint', 'elementsFromPoint', 'hasFocus', 'execCommand', 'getSelection', 'write', 'writeln', 'open', 'close', 'cookie', 'referrer', 'readyState', 'hidden', 'visibilityState', 'title', 'body', 'head', 'documentElement', 'currentScript', 'scripts', 'forms', 'images', 'links', 'styleSheets', 'adoptedStyleSheets', 'fonts', 'defaultView', 'location', 'domain', 'characterSet', 'compatMode', 'contentType', 'activeElement', 'implementation', 'designMode', 'dir', 'lang', 'URL', 'addEventListener', 'importNode', 'adoptNode', 'startViewTransition', 'exitFullscreen', 'fullscreenElement', 'scrollingElement', 'timeline']);
+  test('document.implementation.createHTMLDocument', function () { return typeof document.implementation.createHTMLDocument === 'function' && document.implementation.createHTMLDocument('x').body !== undefined; });
+  test('template.content is a fragment you can append to', function () { var t = document.createElement('template'); t.innerHTML = '<b>x</b>'; return t.content && t.content.firstChild && t.content.firstChild.tagName === 'B'; });
+  test('innerHTML roundtrip', function () { var d = document.createElement('div'); d.innerHTML = '<p class="a">x</p><span>y</span>'; return d.children.length === 2 && d.firstChild.className === 'a'; });
+  test('querySelector combinators', function () { var d = document.createElement('div'); d.innerHTML = '<ul><li class="a"><b>1</b></li><li>2</li></ul>'; return d.querySelector('ul > li.a b') !== null && d.querySelectorAll('li:not(.a)').length === 1 && d.querySelector('li:first-child') !== null; });
+  test('matches / closest', function () { var d = document.createElement('div'); d.innerHTML = '<p><b id="x">1</b></p>'; var b = d.querySelector('#x'); return b.matches('p > b') && b.closest('p') !== null; });
+  test('events bubble + stopPropagation', function () { var d = document.createElement('div'); var c = document.createElement('span'); d.appendChild(c); var n = 0; d.addEventListener('x', function () { n++; }); c.dispatchEvent(new Event('x', { bubbles: true })); return n === 1; });
+  test('addEventListener once + signal', function () { var d = document.createElement('div'); var n = 0; d.addEventListener('x', function () { n++; }, { once: true }); d.dispatchEvent(new Event('x')); d.dispatchEvent(new Event('x')); return n === 1; });
+  test('CustomEvent detail', function () { var e = new CustomEvent('x', { detail: 5 }); return e.detail === 5; });
+
+  cat('Web APIs: globals');
+  paths(['window', 'self', 'top', 'parent', 'frames', 'navigator', 'location', 'history', 'screen', 'performance', 'console', 'localStorage', 'sessionStorage', 'indexedDB', 'caches', 'crypto', 'crypto.subtle', 'visualViewport', 'devicePixelRatio', 'innerWidth', 'innerHeight', 'outerWidth', 'outerHeight', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset', 'isSecureContext', 'origin', 'name', 'closed', 'opener', 'frameElement', 'customElements', 'speechSynthesis', 'getSelection', 'Image', 'Audio', 'Option', 'FontFace', 'Notification', 'Worker', 'SharedWorker', 'BroadcastChannel', 'MessageChannel', 'MessagePort', 'MessageEvent']);
+  fns(['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'queueMicrotask', 'getComputedStyle', 'matchMedia', 'scrollTo', 'scrollBy', 'scroll', 'open', 'close', 'postMessage', 'structuredClone', 'btoa', 'atob', 'fetch', 'addEventListener', 'removeEventListener', 'dispatchEvent', 'alert', 'confirm', 'prompt', 'focus', 'blur', 'print', 'stop', 'reportError', 'createImageBitmap']);
+  test('globalThis === window', function () { return globalThis === window; });
+  test('window.window === window', function () { return window.window === window; });
+
+  cat('Web APIs: events');
+  paths(['Event', 'CustomEvent', 'UIEvent', 'MouseEvent', 'KeyboardEvent', 'FocusEvent', 'InputEvent', 'PointerEvent', 'TouchEvent', 'WheelEvent', 'ErrorEvent', 'ProgressEvent', 'StorageEvent', 'HashChangeEvent', 'PopStateEvent', 'AnimationEvent', 'TransitionEvent', 'ClipboardEvent', 'DragEvent', 'SubmitEvent', 'PageTransitionEvent', 'CloseEvent', 'BeforeUnloadEvent', 'EventTarget', 'AbortController', 'AbortSignal', 'AbortSignal.timeout', 'AbortSignal.any', 'AbortSignal.abort']);
+  test('Event.prototype methods', function () { var e = new Event('x', { cancelable: true }); return typeof e.preventDefault === 'function' && typeof e.stopPropagation === 'function' && typeof e.stopImmediatePropagation === 'function' && typeof e.composedPath === 'function'; });
+
+  cat('Web APIs: DOM types');
+  paths(['Node', 'Element', 'HTMLElement', 'Document', 'DocumentFragment', 'Text', 'Comment', 'CharacterData', 'Attr', 'NodeList', 'HTMLCollection', 'NamedNodeMap', 'DOMTokenList', 'DOMStringMap', 'DOMException', 'DOMParser', 'XMLSerializer', 'DOMRect', 'DOMRectReadOnly', 'DOMPoint', 'DOMMatrix', 'Range', 'Selection', 'ShadowRoot', 'TreeWalker', 'NodeFilter', 'MutationObserver', 'IntersectionObserver', 'ResizeObserver', 'PerformanceObserver', 'CSS', 'CSS.supports', 'CSS.escape', 'CSSStyleSheet', 'CSSStyleDeclaration', 'StyleSheet', 'MediaQueryList', 'Storage', 'HTMLInputElement', 'HTMLFormElement', 'HTMLCanvasElement', 'HTMLTemplateElement', 'HTMLScriptElement', 'SVGElement']);
+
+  cat('Web APIs: network / data');
+  paths(['fetch', 'Request', 'Response', 'Headers', 'FormData', 'Blob', 'File', 'FileReader', 'URL', 'URLSearchParams', 'URL.createObjectURL', 'URL.canParse', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'ReadableStream', 'WritableStream', 'TransformStream', 'TextEncoder', 'TextDecoder', 'TextDecoderStream', 'CompressionStream', 'DecompressionStream', 'navigator.sendBeacon', 'navigator.serviceWorker', 'navigator.clipboard', 'navigator.mediaDevices', 'navigator.geolocation', 'navigator.permissions', 'navigator.userAgentData', 'navigator.connection', 'navigator.storage', 'navigator.languages', 'navigator.language', 'navigator.userAgent', 'navigator.platform', 'navigator.onLine', 'navigator.cookieEnabled', 'navigator.hardwareConcurrency', 'navigator.maxTouchPoints', 'navigator.webdriver', 'crypto.getRandomValues', 'crypto.randomUUID', 'crypto.subtle.digest', 'performance.now', 'performance.mark', 'performance.measure', 'performance.getEntries', 'performance.getEntriesByType', 'performance.timeOrigin', 'performance.timing', 'performance.memory', 'PerformanceObserver.supportedEntryTypes']);
+  test('Headers iteration (values/entries/keys)', function () { var h = new Headers(); h.set('a', 'b'); return typeof h.values === 'function' && typeof h.entries === 'function' && typeof h.keys === 'function' && typeof h.forEach === 'function'; });
+  test('FormData iteration', function () { var f = new FormData(); f.append('a', 'b'); return typeof f.values === 'function' && typeof f.entries === 'function' && f.get('a') === 'b'; });
+  test('URLSearchParams iteration', function () { var p = new URLSearchParams('a=1'); return typeof p.values === 'function' && typeof p.entries === 'function' && typeof p.keys === 'function' && p.get('a') === '1'; });
+  test('URL parsing', function () { var u = new URL('/x?y=1#z', 'https://a.b'); return u.href === 'https://a.b/x?y=1#z' && u.searchParams.get('y') === '1'; });
+  test('Response.json / text', function () { var r = new Response('{"a":1}'); return typeof r.json === 'function' && typeof r.text === 'function' && typeof r.arrayBuffer === 'function' && typeof r.clone === 'function'; });
+  test('Blob size / slice / text', function () { var b = new Blob(['abc']); return b.size === 3 && typeof b.slice === 'function' && typeof b.text === 'function'; });
+  test('TextEncoder / TextDecoder roundtrip', function () { var e = new TextEncoder().encode('\u00e7a'); return new TextDecoder().decode(e) === '\u00e7a'; });
+  test('localStorage get/set/remove/length/key/clear', function () { localStorage.setItem('__c', '1'); var ok = localStorage.getItem('__c') === '1' && localStorage.length >= 1 && typeof localStorage.key === 'function' && typeof localStorage.clear === 'function'; localStorage.removeItem('__c'); return ok; });
+  test('canvas 2d context', function () { var c = document.createElement('canvas'); var x = c.getContext('2d'); return x && typeof x.fillRect === 'function' && typeof x.measureText === 'function'; });
+  test('getComputedStyle().getPropertyValue', function () { var d = document.createElement('div'); document.body.appendChild(d); var v = getComputedStyle(d).getPropertyValue('display'); document.body.removeChild(d); return typeof v === 'string'; });
+  test('matchMedia().matches', function () { return typeof matchMedia('(min-width: 1px)').matches === 'boolean'; });
+
+  var total = 0, missing = 0, root = document.getElementById('root') || document.body;
+  var summary = document.getElementById('status');
+  if (!summary) { summary = document.createElement('p'); root.appendChild(summary); }
+  for (var i = 0; i < cats.length; i++) { total += cats[i].total; missing += cats[i].missing.length; }
+  summary.textContent = 'PASS ' + (total - missing) + ' / ' + total + ' - missing ' + missing + (canCompile ? '' : ' - NOTE: Function constructor is missing so syntax probes cannot run');
+  function para(text, color) {
+    var p = document.createElement('p');
+    p.setAttribute('style', 'color:' + color);
+    p.textContent = text;
+    root.appendChild(p);
+  }
+  for (var j = 0; j < cats.length; j++) {
+    var c = cats[j];
+    var h = document.createElement('h3');
+    h.textContent = c.name + ': ' + (c.total - c.missing.length) + '/' + c.total;
+    root.appendChild(h);
+    if (c.missing.length) { para('MISSING: ' + c.missing.join(', '), '#b91c1c'); }
+  }
+  para('Send a screenshot of this page to get exactly these gaps fixed. Raw result: window.__compat', '#64748b');
+  window.__compat = { total: total, missing: missing, categories: cats };
+})();
+</script></body></html>

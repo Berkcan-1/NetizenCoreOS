@@ -4,7 +4,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use nc_font::{text_width, Style};
 use nc_gfx::{rgb, Rect};
-use nc_ui::{text_style, ACCENT_LINE, PANEL_BORDER, TEXT_MUTED, TEXT_PRIMARY, WHITE};
+use nc_ui::{ACCENT_LINE, PANEL_BORDER, TEXT_MUTED, TEXT_PRIMARY, WHITE};
+use core::sync::atomic::{AtomicI32, Ordering};
+use crate::cssvalues::{self, LenCtx};
 use crate::css::{parse_css_color, parse_css_font_size, parse_css_px, parse_declarations, parse_float_i32, Declaration, SafeClamp, Stylesheet};
 use crate::dom::{DomTree, NodeType};
 use crate::html::sanitize_text;
@@ -14,8 +16,49 @@ use crate::image::{rasterize_svg_tree, DecodedImage};
 /// (`build_node_box` + `layout_flow_children`), so 60 allows about 30 nested elements.
 /// It used to be 22 (about 11 elements deep), which silently dropped deeply nested content.
 const MAX_LAYOUT_DEPTH: usize = 60;
-const MAX_MARGIN: i32 = 96;
-const MAX_PADDING: i32 = 64;
+// Old caps (96 / 64 / 200 / 600) silently flattened real designs; these only guard against absurd values.
+const MAX_MARGIN: i32 = 480;
+const MAX_PADDING: i32 = 320;
+const MAX_HEIGHT: i32 = 4000;
+
+static VIEWPORT_W: AtomicI32 = AtomicI32::new(1280);
+static VIEWPORT_H: AtomicI32 = AtomicI32::new(720);
+
+/// Tells the style engine the real viewport so `vw`, `vh`, `vmin`, `vmax` resolve correctly.
+pub fn set_viewport(w: i32, h: i32) {
+    VIEWPORT_W.store(w.max(1), Ordering::Relaxed);
+    VIEWPORT_H.store(h.max(1), Ordering::Relaxed);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+    Sticky,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextTransform {
+    None,
+    Upper,
+    Lower,
+    Capitalize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WhiteSpace {
+    Normal,
+    NoWrap,
+    Pre,
+    PreWrap,
+    PreLine,
+}
+
+pub const DECO_UNDERLINE: u8 = 1;
+pub const DECO_LINE_THROUGH: u8 = 2;
+pub const DECO_OVERLINE: u8 = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DisplayType {
@@ -112,8 +155,122 @@ pub struct ComputedStyle {
     pub min_height: Option<i32>,
     pub margin_left_auto: bool,
     pub margin_right_auto: bool,
+    /// 100..900 (400 normal, 700 bold). Inherited.
+    pub font_weight: i32,
+    /// Stored for completeness; nc-font has no slanted glyphs yet. Inherited.
+    pub italic: bool,
+    /// Multiplier x100 of the font size (150 = 1.5). `None` = `normal`. Inherited.
+    pub line_height: Option<i32>,
+    /// Bit set of `DECO_*`. Propagates to descendants.
+    pub text_decoration: u8,
+    pub text_transform: TextTransform,
+    /// Extra advance per glyph in layout units (CSS px * 3/4). Inherited.
+    pub letter_spacing: i32,
+    pub white_space: WhiteSpace,
+    pub position: Position,
+    pub top: Option<i32>,
+    pub right: Option<i32>,
+    pub bottom: Option<i32>,
+    pub left: Option<i32>,
+    pub z_index: i32,
+    /// `overflow: hidden | clip` (auto/scroll are not clipped because nothing can scroll yet).
+    pub overflow_clip: bool,
+    pub max_height: Option<i32>,
+    /// Parsed `box-sizing: border-box`; sizing still follows the engine's border-box convention.
+    pub border_box: bool,
+    /// Cascade state for the four border sides (top, right, bottom, left).
+    pub bw: [i32; 4],
+    pub bs: [bool; 4],
+    pub bc: [Option<u32>; 4],
+    /// Effective per-side widths/colours, valid when `sides_custom`.
+    pub border_sides: [i32; 4],
+    pub border_side_colors: [Option<u32>; 4],
+    pub sides_custom: bool,
 }
 
+impl ComputedStyle {
+    /// Effective border widths as [top, right, bottom, left].
+    pub fn eff_borders(&self) -> [i32; 4] {
+        if self.sides_custom {
+            self.border_sides
+        } else {
+            [self.border_width; 4]
+        }
+    }
+
+    pub fn is_out_of_flow(&self) -> bool {
+        matches!(self.position, Position::Absolute | Position::Fixed)
+    }
+}
+
+/// Text style for page content: weight -> stroke thickness, `letter-spacing` -> tracking.
+/// Page text uses normal spacing (0); the 30% tracking is browser chrome styling only.
+pub fn page_text_style(st: &ComputedStyle) -> Style {
+    let cap = st.font_size;
+    let mut stroke = (cap * 16 / 18).max(22);
+    if st.font_weight >= 600 {
+        stroke = stroke * 13 / 10 + 2;
+    } else if st.font_weight <= 300 {
+        stroke = (stroke * 85 / 100).max(18);
+    }
+    Style { cap_height: cap, stroke_sixteenths: stroke, tracking: st.letter_spacing }
+}
+
+/// Line box height for text of this style.
+pub fn line_height_px(st: &ComputedStyle) -> i32 {
+    match st.line_height {
+        Some(m) => (st.font_size * m / 100).max(8),
+        None => (st.font_size * 15 / 10).max(16),
+    }
+}
+
+fn apply_text_transform(text: &str, mode: TextTransform) -> String {
+    match mode {
+        TextTransform::None => String::from(text),
+        TextTransform::Upper => text.to_uppercase(),
+        TextTransform::Lower => text.to_lowercase(),
+        TextTransform::Capitalize => {
+            let mut out = String::with_capacity(text.len());
+            let mut start = true;
+            for ch in text.chars() {
+                if start && ch.is_alphabetic() {
+                    out.extend(ch.to_uppercase());
+                    start = false;
+                } else {
+                    out.push(ch);
+                    if ch.is_whitespace() || ch == '-' {
+                        start = true;
+                    } else if ch.is_alphanumeric() {
+                        start = false;
+                    }
+                }
+            }
+            out
+        }
+    }
+}
+
+fn len_ctx(style: &ComputedStyle, container_width: i32) -> LenCtx {
+    LenCtx {
+        font_px: style.font_size * 4 / 3,
+        root_px: 16,
+        percent_base: container_width,
+        viewport_w: VIEWPORT_W.load(Ordering::Relaxed),
+        viewport_h: VIEWPORT_H.load(Ordering::Relaxed),
+    }
+}
+
+/// Resolves a CSS length (all units, `calc()`, `min()`, `max()`, `clamp()`).
+/// `auto` / `none` / `normal` keep the legacy meaning "0 / unset" so existing arms behave as before.
+fn css_len(val: &str, style: &ComputedStyle, container_width: i32) -> Option<i32> {
+    let t = val.trim();
+    if t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("normal") {
+        return Some(0);
+    }
+    let ctx = len_ctx(style, container_width);
+    let first = if t.contains('(') { t } else { t.split_whitespace().next()? };
+    cssvalues::eval_length(first, &ctx).or_else(|| parse_css_px(val, style.font_size, container_width))
+}
 #[derive(Clone, Debug)]
 pub enum WidgetKind {
     None,
@@ -335,7 +492,7 @@ impl LayoutEngine {
         let mut committed: Vec<LayoutBox> = Vec::new();
         let mut line_items: Vec<LayoutBox> = Vec::new();
         let mut line_w = 0i32;
-        let mut line_h = (parent_style.font_size * 15 / 10).max(16);
+        let mut line_h = line_height_px(parent_style);
 
         let flush_line = |line_items: &mut Vec<LayoutBox>,
                           committed: &mut Vec<LayoutBox>,
@@ -362,7 +519,7 @@ impl LayoutEngine {
             }
             *cursor_y += *line_h + 4;
             *line_w = 0;
-            *line_h = (parent_style.font_size * 15 / 10).max(16);
+            *line_h = line_height_px(parent_style);
         };
 
         for item in items {
@@ -408,20 +565,36 @@ impl LayoutEngine {
                     st.color = ensure_contrast(st.color, effective_bg, inherited_link.is_some());
                     st.is_link = inherited_link.is_some();
                     st.margin_right = (st.font_size / 2).max(5);
-                    let font = text_style(st.font_size, 30);
-                    let lh = (st.font_size * 15 / 10).max(15);
-                    let shown_text = sanitize_text(raw_text);
-                    for word in shown_text.split_whitespace() {
-                        let ww = text_width(word, &font).sclamp(6, max_width);
-                        out.push(LayoutBox {
-                            node_id: nid,
-                            rect: Rect::new(0, 0, ww, lh),
-                            text: Some(String::from(word)),
-                            style: st.clone(),
-                            link_url: inherited_link.clone(),
-                            widget: WidgetKind::None,
-                            children: Vec::new(),
-                        });
+                    let font = page_text_style(&st);
+                    let lh = line_height_px(&st);
+                    let shown_text = apply_text_transform(&sanitize_text(raw_text), st.text_transform);
+                    let keep_newlines = matches!(st.white_space, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine);
+                    let pieces: Vec<&str> = if keep_newlines { shown_text.split('\n').collect() } else { alloc::vec![shown_text.as_str()] };
+                    for (pi, piece) in pieces.iter().enumerate() {
+                        if pi > 0 {
+                            // same zero-width marker a <br> produces: forces a new line
+                            out.push(LayoutBox {
+                                node_id: nid,
+                                rect: Rect::new(0, 0, -1, 0),
+                                text: None,
+                                style: parent_style.clone(),
+                                link_url: None,
+                                widget: WidgetKind::None,
+                                children: Vec::new(),
+                            });
+                        }
+                        for word in piece.split_whitespace() {
+                            let ww = text_width(word, &font).sclamp(6, max_width);
+                            out.push(LayoutBox {
+                                node_id: nid,
+                                rect: Rect::new(0, 0, ww, lh),
+                                text: Some(String::from(word)),
+                                style: st.clone(),
+                                link_url: inherited_link.clone(),
+                                widget: WidgetKind::None,
+                                children: Vec::new(),
+                            });
+                        }
                     }
                 }
                 NodeType::Element { tag, .. } => {
@@ -442,7 +615,7 @@ impl LayoutEngine {
                     }
 
                     let mut st = compute_node_style(tree, stylesheet, nid, Some(parent_style), max_width);
-                    if st.display == DisplayType::None {
+                    if st.display == DisplayType::None || is_visually_hidden(&st) {
                         continue;
                     }
                     let cur_bg = st.bg_color.unwrap_or(effective_bg);
@@ -460,6 +633,7 @@ impl LayoutEngine {
                         || st.display == DisplayType::InlineBlock
                         || st.bg_color.is_some()
                         || st.border_width > 0
+                        || st.sides_custom
                     {
                         let mut dummy_y = 0i32;
                         let mut dummy_mb = 0i32;
@@ -540,7 +714,7 @@ impl LayoutEngine {
                     available_width,
                 );
 
-                if style.display == DisplayType::None {
+                if style.display == DisplayType::None || is_visually_hidden(&style) {
                     return None;
                 }
 
@@ -688,7 +862,7 @@ impl LayoutEngine {
 
                     if input_type == "submit" || input_type == "button" {
                         let label = if val.is_empty() { String::from("SEARCH") } else { val };
-                        let font = text_style(style.font_size, 30);
+                        let font = page_text_style(&style);
                         let bw = (text_width(&label, &font) + 28).sclamp(88, available_width);
                         let bh = 30;
                         let bx = align_box_x(&style, x, available_width, bw);
@@ -756,7 +930,7 @@ impl LayoutEngine {
                     if label.is_empty() {
                         return None;
                     }
-                    let font = text_style(style.font_size, 30);
+                    let font = page_text_style(&style);
                     let bw = (text_width(&label, &font) + 28).sclamp(72, available_width);
                     let bh = 30;
                     let bx = align_box_x(&style, x, available_width, bw);
@@ -801,11 +975,14 @@ impl LayoutEngine {
                     }
                 }
 
+                let saved_y = *cursor_y;
+                let saved_prev = *prev_margin_bottom;
+                let [b_top, b_right, b_bottom, b_left] = style.eff_borders();
                 let box_x = align_box_x(&style, x + style.margin_left, avail_after_margin, box_w);
                 let start_y = *cursor_y + collapsed_top;
-                let inner_x = box_x + style.padding_left + style.border_width;
-                let inner_w = (box_w - style.padding_left - style.padding_right - style.border_width * 2).max(24);
-                let mut inner_y = start_y + style.padding_top + style.border_width;
+                let inner_x = box_x + style.padding_left + b_left;
+                let inner_w = (box_w - style.padding_left - style.padding_right - b_left - b_right).max(24);
+                let mut inner_y = start_y + style.padding_top + b_top;
 
                 let is_row = (style.display == DisplayType::Flex && style.flex_row) || tag == "tr";
                 let child_boxes = if tag != "tr" && style.kind == ContainerKind::Flex && !node.children.is_empty() {
@@ -870,23 +1047,38 @@ impl LayoutEngine {
                     self.active_form_action = prev_form_action;
                 }
 
-                if child_boxes.is_empty() {
+                // A box with no children is still real when it has a size, a background or a border
+                // (spacers, colour bars, dividers). Dropping it used to collapse many layouts.
+                let has_presence = style.height.is_some()
+                    || style.min_height.is_some()
+                    || style.bg_color.is_some()
+                    || style.border_width > 0
+                    || style.sides_custom;
+                if child_boxes.is_empty() && !has_presence {
                     return None;
                 }
 
-                let natural_h = inner_y - start_y + style.padding_bottom + style.border_width;
-                // `height` / `min-height` act as a minimum so content can never overflow into following boxes.
+                let natural_h = inner_y - start_y + style.padding_bottom + b_bottom;
                 let mut block_h = natural_h;
                 if let Some(mh) = style.min_height {
                     block_h = block_h.max(mh);
                 }
                 if let Some(h) = style.height {
-                    block_h = block_h.max(h);
+                    // `overflow: hidden` makes the height exact; otherwise it is a minimum so content
+                    // can never spill into the boxes that follow.
+                    block_h = if style.overflow_clip { h } else { block_h.max(h) };
+                }
+                if let Some(mx) = style.max_height {
+                    if style.overflow_clip {
+                        block_h = block_h.min(mx.max(style.min_height.unwrap_or(0)));
+                    }
                 }
                 *cursor_y = start_y + block_h + style.margin_bottom;
                 *prev_margin_bottom = style.margin_bottom;
 
-                Some(LayoutBox {
+                let pos = style.position;
+                let (off_l, off_r, off_t, off_b) = (style.left, style.right, style.top, style.bottom);
+                let mut result = LayoutBox {
                     node_id: node_id,
                     rect: Rect::new(box_x, start_y, box_w, block_h),
                     text: None,
@@ -894,18 +1086,56 @@ impl LayoutEngine {
                     link_url,
                     widget: WidgetKind::None,
                     children: child_boxes,
-                })
+                };
+                match pos {
+                    Position::Relative => {
+                        let dx = off_l.unwrap_or_else(|| -off_r.unwrap_or(0));
+                        let dy = off_t.unwrap_or_else(|| -off_b.unwrap_or(0));
+                        if dx != 0 || dy != 0 {
+                            offset_box_tree(&mut result, dx, dy);
+                        }
+                    }
+                    Position::Absolute | Position::Fixed => {
+                        // Out of flow: takes no space. Placement is approximate: `absolute` is measured from
+                        // where it would have flowed, `fixed` from the top of the page (no scroll awareness).
+                        *cursor_y = saved_y;
+                        *prev_margin_bottom = saved_prev;
+                        let fixed = pos == Position::Fixed;
+                        let w = result.rect.width;
+                        let h = result.rect.height;
+                        let tx = if let Some(l) = off_l {
+                            x + l
+                        } else if let Some(r) = off_r {
+                            x + available_width - w - r
+                        } else {
+                            result.rect.x
+                        };
+                        let ty = if let Some(t) = off_t {
+                            if fixed { t } else { saved_y + t }
+                        } else if let Some(bt) = off_b {
+                            if fixed { VIEWPORT_H.load(Ordering::Relaxed) - h - bt } else { saved_y }
+                        } else {
+                            result.rect.y
+                        };
+                        let (dx, dy) = (tx - result.rect.x, ty - result.rect.y);
+                        if dx != 0 || dy != 0 {
+                            offset_box_tree(&mut result, dx, dy);
+                        }
+                    }
+                    _ => {}
+                }
+                Some(result)
             }
             NodeType::Text(text) => {
                 let mut st = parent_style.clone();
                 st.color = ensure_contrast(st.color, parent_bg, inherited_link.is_some());
-                let font = text_style(st.font_size, 30);
-                let lines = wrap_text(&sanitize_text(text), &font, available_width);
+                let font = page_text_style(&st);
+                let lines = wrap_text(&apply_text_transform(&sanitize_text(text), st.text_transform), &font, available_width);
                 if lines.is_empty() {
                     return None;
                 }
                 let start_y = *cursor_y;
-                let line_h = (st.font_size * 15 / 10).max(16);
+                let line_h = line_height_px(&st);
                 let mut children = Vec::new();
                 for l in lines {
                     let lw = text_width(&l, &font).min(available_width);
@@ -1655,7 +1885,7 @@ fn measure_intrinsic_width(
     };
     match &node.node_type {
         NodeType::Text(t) => {
-            let font = text_style(parent_style.font_size, 30);
+            let font = page_text_style(parent_style);
             (text_width(&sanitize_text(t.trim()), &font) + 12).sclamp(24, max_width)
         }
         NodeType::Element { tag, .. } => {
@@ -1667,7 +1897,7 @@ fn measure_intrinsic_width(
                 let itype = tree.attr(node_id, "type").unwrap_or("text").to_ascii_lowercase();
                 if itype == "submit" || itype == "button" {
                     let val = sanitize_text(tree.attr(node_id, "value").unwrap_or("SEARCH"));
-                    let font = text_style(st.font_size, 30);
+                    let font = page_text_style(&st);
                     return (text_width(&val, &font) + 32).sclamp(88, max_width);
                 }
                 return (max_width * 3 / 5).sclamp(180, 380);
@@ -1676,7 +1906,7 @@ fn measure_intrinsic_width(
                 return st.width.unwrap_or(96).min(max_width);
             }
             let text = tree.text_content(node_id);
-            let font = text_style(st.font_size, 30);
+            let font = page_text_style(&st);
             let tw = text_width(&sanitize_text(text.trim()), &font);
             let pad = st.padding_left + st.padding_right + st.border_width * 2 + 16;
             if tw > 0 {
@@ -1776,6 +2006,28 @@ fn default_computed_style() -> ComputedStyle {
         min_height: None,
         margin_left_auto: false,
         margin_right_auto: false,
+        font_weight: 400,
+        italic: false,
+        line_height: None,
+        text_decoration: 0,
+        text_transform: TextTransform::None,
+        letter_spacing: 0,
+        white_space: WhiteSpace::Normal,
+        position: Position::Static,
+        top: None,
+        right: None,
+        bottom: None,
+        left: None,
+        z_index: 0,
+        overflow_clip: false,
+        max_height: None,
+        border_box: false,
+        bw: [3; 4],
+        bs: [false; 4],
+        bc: [None; 4],
+        border_sides: [0; 4],
+        border_side_colors: [None; 4],
+        sides_custom: false,
     }
 }
 
@@ -1792,6 +2044,13 @@ fn compute_node_style(
         style.font_size = p.font_size;
         style.text_align = p.text_align;
         style.is_link = p.is_link;
+        style.font_weight = p.font_weight;
+        style.italic = p.italic;
+        style.line_height = p.line_height;
+        style.text_decoration = p.text_decoration;
+        style.text_transform = p.text_transform;
+        style.letter_spacing = p.letter_spacing;
+        style.white_space = p.white_space;
     }
 
     let tag = tree.tag(node_id).unwrap_or("");
@@ -1800,33 +2059,72 @@ fn compute_node_style(
             style.display = DisplayType::None;
             return style;
         }
-        "span" | "b" | "strong" | "i" | "em" | "u" | "small" | "label" | "font" | "sub" | "sup" => {
+        "span" | "label" | "font" | "abbr" | "cite" | "dfn" | "var" | "time" | "q" | "bdi" | "bdo" | "data" => {
             style.display = DisplayType::Inline;
+        }
+        "b" | "strong" => {
+            style.display = DisplayType::Inline;
+            style.font_weight = 700;
+        }
+        "i" | "em" => {
+            style.display = DisplayType::Inline;
+            style.italic = true;
+        }
+        "u" | "ins" => {
+            style.display = DisplayType::Inline;
+            style.text_decoration |= DECO_UNDERLINE;
+        }
+        "s" | "strike" | "del" => {
+            style.display = DisplayType::Inline;
+            style.text_decoration |= DECO_LINE_THROUGH;
+        }
+        "small" => {
+            style.display = DisplayType::Inline;
+            style.font_size = (style.font_size * 5 / 6).max(8);
+        }
+        "sub" | "sup" => {
+            style.display = DisplayType::Inline;
+            style.font_size = (style.font_size * 3 / 4).max(8);
+        }
+        "mark" => {
+            style.display = DisplayType::Inline;
+            style.bg_color = Some(rgb(255, 235, 59));
+            style.color = rgb(17, 24, 39);
+        }
+        "kbd" | "samp" | "tt" => {
+            style.display = DisplayType::Inline;
+            style.font_size = (style.font_size * 11 / 12).max(8);
         }
         "a" => {
             style.display = DisplayType::Inline;
             style.color = ACCENT_LINE;
             style.is_link = true;
+            style.text_decoration |= DECO_UNDERLINE;
         }
         "img" | "svg" | "button" | "input" | "select" | "textarea" => {
             style.display = DisplayType::InlineBlock;
+            style.border_box = true;
         }
         "h1" => {
+            style.font_weight = 700;
             style.font_size = 20;
             style.margin_top = 8;
             style.margin_bottom = 8;
         }
         "h2" => {
+            style.font_weight = 700;
             style.font_size = 16;
             style.margin_top = 6;
             style.margin_bottom = 6;
         }
         "h3" => {
+            style.font_weight = 700;
             style.font_size = 14;
             style.margin_top = 4;
             style.margin_bottom = 4;
         }
         "h4" | "h5" | "h6" => {
+            style.font_weight = 700;
             style.font_size = 13;
             style.margin_bottom = 4;
         }
@@ -1839,6 +2137,9 @@ fn compute_node_style(
             style.margin_bottom = 6;
         }
         "pre" | "code" => {
+            if tag == "pre" {
+                style.white_space = WhiteSpace::Pre;
+            }
             style.font_size = 11;
             style.bg_color = Some(rgb(241, 245, 249));
             style.border_color = Some(PANEL_BORDER);
@@ -1882,6 +2183,9 @@ fn compute_node_style(
             style.padding_bottom = 2;
         }
         "td" | "th" => {
+            if tag == "th" {
+                style.font_weight = 700;
+            }
             style.padding_left = 4;
             style.padding_right = 4;
             style.padding_top = 2;
@@ -1940,24 +2244,118 @@ fn compute_node_style(
         None => Vec::new(),
     };
     for d in sheet_decls.iter().filter(|d| !d.important) {
-        apply_declaration(&mut style, d, container_width);
+        apply_expanded(&mut style, d, container_width);
     }
     for d in inline_decls.iter().filter(|d| !d.important) {
-        apply_declaration(&mut style, d, container_width);
+        apply_expanded(&mut style, d, container_width);
     }
     for d in sheet_decls.iter().filter(|d| d.important) {
-        apply_declaration(&mut style, d, container_width);
+        apply_expanded(&mut style, d, container_width);
     }
     for d in inline_decls.iter().filter(|d| d.important) {
-        apply_declaration(&mut style, d, container_width);
+        apply_expanded(&mut style, d, container_width);
     }
 
     style
 }
 
+/// Expands shorthands (`border`, `font`, `background`, `overflow`, `inset`, `text-decoration`, ...)
+/// into longhands first, then applies each one.
+fn apply_expanded(style: &mut ComputedStyle, decl: &Declaration, container_width: i32) {
+    match cssvalues::expand(decl.property.as_str(), decl.value.as_str()) {
+        Some(list) => {
+            for (p, v) in list {
+                let d = Declaration { property: p, value: v, important: decl.important };
+                apply_declaration(style, &d, container_width);
+            }
+        }
+        None => apply_declaration(style, decl, container_width),
+    }
+}
+
+fn sync_borders(s: &mut ComputedStyle) {
+    let mut eff = [0i32; 4];
+    for i in 0..4 {
+        eff[i] = if s.bs[i] { s.bw[i] } else { 0 };
+    }
+    s.border_sides = eff;
+    s.border_side_colors = s.bc;
+    let same_w = eff[0] == eff[1] && eff[1] == eff[2] && eff[2] == eff[3];
+    let same_c = s.bc[0] == s.bc[1] && s.bc[1] == s.bc[2] && s.bc[2] == s.bc[3];
+    if same_w && same_c {
+        s.sides_custom = false;
+        s.border_width = eff[0];
+        s.border_color = if eff[0] > 0 { s.bc[0].or(Some(s.color)) } else { None };
+    } else {
+        s.sides_custom = true;
+        s.border_width = 0;
+    }
+}
+
+/// `border-width|style|color` (1-4 values) and `border-<side>-width|style|color`.
+fn apply_border(style: &mut ComputedStyle, prop: &str, val: &str, container_width: i32) -> bool {
+    let rest = match prop.strip_prefix("border-") {
+        Some(r) => r,
+        None => return false,
+    };
+    let (kind, sides): (&str, [Option<&str>; 4]) = if matches!(rest, "width" | "style" | "color") {
+        let toks = cssvalues::tokens(val);
+        let pick = |i: usize| toks.get(i).copied();
+        let t = match toks.len() {
+            1 => [pick(0), pick(0), pick(0), pick(0)],
+            2 => [pick(0), pick(1), pick(0), pick(1)],
+            3 => [pick(0), pick(1), pick(2), pick(1)],
+            _ => [pick(0), pick(1), pick(2), pick(3)],
+        };
+        (rest, t)
+    } else {
+        let mut it = rest.splitn(2, '-');
+        let side = it.next().unwrap_or("");
+        let kind = it.next().unwrap_or("");
+        let idx = match side {
+            "top" => 0,
+            "right" => 1,
+            "bottom" => 2,
+            "left" => 3,
+            _ => return false,
+        };
+        if !matches!(kind, "width" | "style" | "color") {
+            return false;
+        }
+        let mut t = [None; 4];
+        t[idx] = Some(val.trim());
+        (kind, t)
+    };
+    for i in 0..4 {
+        let tok = match sides[i] {
+            Some(t) => t,
+            None => continue,
+        };
+        let l = tok.to_ascii_lowercase();
+        match kind {
+            "width" => {
+                style.bw[i] = match l.as_str() {
+                    "thin" => 1,
+                    "medium" => 3,
+                    "thick" => 5,
+                    _ => css_len(tok, style, container_width).unwrap_or(0).sclamp(0, 16),
+                };
+            }
+            "style" => style.bs[i] = l != "none" && l != "hidden" && !l.is_empty(),
+            _ => style.bc[i] = parse_css_color(tok),
+        }
+    }
+    sync_borders(style);
+    true
+}
+
 fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_width: i32) {
     let prop = decl.property.as_str();
     let val = decl.value.trim();
+
+    if prop.starts_with("border-") && apply_border(style, prop, val, container_width) {
+        return;
+    }
 
     match prop {
         "display" => {
@@ -2102,7 +2500,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
         "flex-basis" => {
             if val.trim().eq_ignore_ascii_case("auto") || val.trim().eq_ignore_ascii_case("content") {
                 style.flex_basis = None;
-            } else if let Some(px) = parse_css_px(val, style.font_size, container_width) {
+            } else if let Some(px) = css_len(val, style, container_width) {
                 style.flex_basis = Some(px.max(0));
             }
         }
@@ -2127,13 +2525,13 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             }
         }
         "min-width" => {
-            if let Some(w) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(w) = css_len(val, style, container_width) {
                 style.min_width = if w > 0 { Some(w) } else { None };
             }
         }
-        "min-height" => {
-            if let Some(h) = parse_css_px(val, style.font_size, container_width) {
-                style.min_height = if h > 0 { Some(h.sclamp(0, 600)) } else { None };
+        "min-height" if !val.contains('%') => {
+            if let Some(h) = css_len(val, style, container_width) {
+                style.min_height = if h > 0 { Some(h.sclamp(0, MAX_HEIGHT)) } else { None };
             }
         }
         "text-align" | "float" => {
@@ -2161,12 +2559,12 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             }
         }
         "row-gap" | "grid-row-gap" => {
-            if let Some(px) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(px) = css_len(val, style, container_width) {
                 style.row_gap = px.sclamp(0, 64);
             }
         }
         "column-gap" | "grid-column-gap" => {
-            if let Some(px) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(px) = css_len(val, style, container_width) {
                 style.col_gap = px.sclamp(0, 64);
                 style.gap = px.sclamp(0, 32);
             }
@@ -2189,7 +2587,9 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             if v == "0" || v == "0px" || v == "0em" || v == "0rem" || v == "0pt" {
                 style.font_size = 2;
             } else if let Some(p) = parse_css_font_size(val, style.font_size) {
-                style.font_size = p.sclamp(8, 48);
+                style.font_size = p.sclamp(6, 72);
+            } else if let Some(px) = cssvalues::eval_length(val, &len_ctx(style, container_width)) {
+                style.font_size = (px * 3 / 4).sclamp(6, 72);
             }
         }
         "padding" => {
@@ -2200,22 +2600,22 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             style.padding_left = l;
         }
         "padding-top" => {
-            if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(p) = css_len(val, style, container_width) {
                 style.padding_top = p.sclamp(0, MAX_PADDING);
             }
         }
         "padding-bottom" => {
-            if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(p) = css_len(val, style, container_width) {
                 style.padding_bottom = p.sclamp(0, MAX_PADDING);
             }
         }
         "padding-left" => {
-            if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(p) = css_len(val, style, container_width) {
                 style.padding_left = p.sclamp(0, MAX_PADDING);
             }
         }
         "padding-right" => {
-            if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(p) = css_len(val, style, container_width) {
                 style.padding_right = p.sclamp(0, MAX_PADDING);
             }
         }
@@ -2230,12 +2630,12 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             style.margin_left = l;
         }
         "margin-top" => {
-            if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(p) = css_len(val, style, container_width) {
                 style.margin_top = p.sclamp(0, MAX_MARGIN);
             }
         }
         "margin-bottom" => {
-            if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(p) = css_len(val, style, container_width) {
                 style.margin_bottom = p.sclamp(0, MAX_MARGIN);
             }
         }
@@ -2243,7 +2643,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             if val.trim().eq_ignore_ascii_case("auto") {
                 style.margin_left_auto = true;
                 style.margin_left = 0;
-            } else if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            } else if let Some(p) = css_len(val, style, container_width) {
                 style.margin_left_auto = false;
                 style.margin_left = p.sclamp(0, MAX_MARGIN);
             }
@@ -2252,7 +2652,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             if val.trim().eq_ignore_ascii_case("auto") {
                 style.margin_right_auto = true;
                 style.margin_right = 0;
-            } else if let Some(p) = parse_css_px(val, style.font_size, container_width) {
+            } else if let Some(p) = css_len(val, style, container_width) {
                 style.margin_right_auto = false;
                 style.margin_right = p.sclamp(0, MAX_MARGIN);
             }
@@ -2274,26 +2674,126 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             }
         }
         "border-width" => {
-            if let Some(w) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(w) = css_len(val, style, container_width) {
                 style.border_width = w.sclamp(0, 4);
             }
         }
         "border-radius" => {
-            if let Some(r) = parse_css_px(val, style.font_size, container_width) {
-                style.border_radius = r.sclamp(0, 16);
+            if let Some(r) = css_len(val, style, container_width) {
+                style.border_radius = r.sclamp(0, 64);
             }
         }
         "width" => {
-            if let Some(w) = parse_css_px(val, style.font_size, container_width) {
+            if let Some(w) = css_len(val, style, container_width) {
                 if w > 0 {
                     style.width = Some(w.min(container_width));
                 }
             }
         }
-        "height" => {
-            if let Some(h) = parse_css_px(val, style.font_size, container_width) {
+        "height" if !val.contains('%') => {
+            if let Some(h) = css_len(val, style, container_width) {
                 if h > 0 {
-                    style.height = Some(h.min(200));
+                    style.height = Some(h.min(MAX_HEIGHT));
+                }
+            }
+        }
+        "font-weight" => {
+            if let Some(w) = cssvalues::font_weight(val, style.font_weight) {
+                style.font_weight = w;
+            }
+        }
+        "font-style" => {
+            let v = val.to_ascii_lowercase();
+            style.italic = v.starts_with("italic") || v.starts_with("oblique");
+        }
+        "line-height" => {
+            let ctx = len_ctx(style, container_width);
+            style.line_height = cssvalues::line_height_x100(val, &ctx);
+        }
+        "text-decoration-line" => {
+            let v = val.to_ascii_lowercase();
+            let mut bits = 0u8;
+            if v.contains("underline") {
+                bits |= DECO_UNDERLINE;
+            }
+            if v.contains("line-through") {
+                bits |= DECO_LINE_THROUGH;
+            }
+            if v.contains("overline") {
+                bits |= DECO_OVERLINE;
+            }
+            style.text_decoration = bits;
+        }
+        "text-transform" => {
+            style.text_transform = match val.to_ascii_lowercase().as_str() {
+                "uppercase" => TextTransform::Upper,
+                "lowercase" => TextTransform::Lower,
+                "capitalize" => TextTransform::Capitalize,
+                _ => TextTransform::None,
+            };
+        }
+        "letter-spacing" => {
+            let px = css_len(val, style, container_width).unwrap_or(0);
+            style.letter_spacing = (px * 3 / 4).sclamp(-3, 24);
+        }
+        "white-space" => {
+            style.white_space = match val.to_ascii_lowercase().as_str() {
+                "nowrap" => WhiteSpace::NoWrap,
+                "pre" => WhiteSpace::Pre,
+                "pre-wrap" | "break-spaces" => WhiteSpace::PreWrap,
+                "pre-line" => WhiteSpace::PreLine,
+                _ => WhiteSpace::Normal,
+            };
+        }
+        "position" => {
+            style.position = match val.to_ascii_lowercase().as_str() {
+                "relative" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
+                "sticky" | "-webkit-sticky" => Position::Sticky,
+                _ => Position::Static,
+            };
+        }
+        "top" | "right" | "bottom" | "left" => {
+            let v = if val.eq_ignore_ascii_case("auto") { None } else { css_len(val, style, container_width) };
+            match prop {
+                "top" => style.top = v,
+                "right" => style.right = v,
+                "bottom" => style.bottom = v,
+                _ => style.left = v,
+            }
+        }
+        "z-index" => {
+            let ctx = len_ctx(style, container_width);
+            style.z_index = cssvalues::eval_number(val, &ctx).map(|n| (n / 1000) as i32).unwrap_or(0);
+        }
+        "overflow-y" => {
+            let v = val.to_ascii_lowercase();
+            style.overflow_clip = v == "hidden" || v == "clip";
+        }
+        "max-height" if !val.contains('%') => {
+            style.max_height = match css_len(val, style, container_width) {
+                Some(h) if h > 0 && !val.eq_ignore_ascii_case("none") => Some(h.min(MAX_HEIGHT)),
+                _ => None,
+            };
+        }
+        "box-sizing" => {
+            style.border_box = val.to_ascii_lowercase().starts_with("border");
+        }
+        "background-image" => {
+            // Gradients are approximated by the mean of their first and last stop; url() images are not drawn yet.
+            let cols = cssvalues::gradient_colors(val);
+            if cols.len() >= 2 {
+                if let (Some(a), Some(b)) = (parse_css_color(&cols[0]), parse_css_color(&cols[cols.len() - 1])) {
+                    let mix = |sa: u32, sb: u32| ((sa + sb) / 2) & 0xFF;
+                    let r = mix((a >> 16) & 0xFF, (b >> 16) & 0xFF);
+                    let g = mix((a >> 8) & 0xFF, (b >> 8) & 0xFF);
+                    let bl = mix(a & 0xFF, b & 0xFF);
+                    style.bg_color = Some(rgb(r as u8, g as u8, bl as u8));
+                }
+            } else if cols.len() == 1 {
+                if let Some(a) = parse_css_color(&cols[0]) {
+                    style.bg_color = Some(a);
                 }
             }
         }
@@ -2304,9 +2804,24 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
 }
 
 fn parse_box_shorthand(val: &str, base_font: i32, container_width: i32, max: i32) -> (i32, i32, i32, i32) {
-    let vals: Vec<i32> = val
-        .split_whitespace()
-        .map(|part| parse_css_px(part, base_font, container_width).unwrap_or(0).sclamp(0, max))
+    let ctx = LenCtx {
+        font_px: base_font * 4 / 3,
+        root_px: 16,
+        percent_base: container_width,
+        viewport_w: VIEWPORT_W.load(Ordering::Relaxed),
+        viewport_h: VIEWPORT_H.load(Ordering::Relaxed),
+    };
+    let vals: Vec<i32> = cssvalues::tokens(val)
+        .into_iter()
+        .map(|part| {
+            if part.eq_ignore_ascii_case("auto") {
+                return 0;
+            }
+            cssvalues::eval_length(part, &ctx)
+                .or_else(|| parse_css_px(part, base_font, container_width))
+                .unwrap_or(0)
+                .sclamp(0, max)
+        })
         .collect();
     match vals.len() {
         1 => (vals[0], vals[0], vals[0], vals[0]),
@@ -2458,11 +2973,49 @@ fn parse_grid_span(val: &str) -> Option<i32> {
     None
 }
 
+/// Off-screen / 1px "screen-reader only" boxes are invisible to sighted users; drawing them in flow
+/// leaked skip links and accessibility labels into the page.
+fn is_visually_hidden(st: &ComputedStyle) -> bool {
+    st.is_out_of_flow()
+        && (st.left.map_or(false, |v| v <= -100)
+            || st.top.map_or(false, |v| v <= -100)
+            || (st.width == Some(1) && st.height == Some(1)))
+}
+
+/// Breaks a single over-long word into chunks that fit `max_width` (CSS `overflow-wrap: anywhere`).
+fn break_long_word(word: &str, style: &Style, max_width: i32) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    for ch in word.chars() {
+        let mut probe = cur.clone();
+        probe.push(ch);
+        if !cur.is_empty() && text_width(&probe, style) > max_width {
+            parts.push(core::mem::take(&mut cur));
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts
+}
+
 fn wrap_text(text: &str, style: &Style, max_width: i32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current_line = String::new();
 
     for word in text.split_whitespace() {
+        if max_width > 24 && text_width(word, style) > max_width {
+            if !current_line.is_empty() {
+                lines.push(core::mem::take(&mut current_line));
+            }
+            let mut chunks = break_long_word(word, style, max_width);
+            if let Some(last) = chunks.pop() {
+                lines.extend(chunks);
+                current_line = last;
+            }
+            continue;
+        }
         let test_line = if current_line.is_empty() {
             String::from(word)
         } else {

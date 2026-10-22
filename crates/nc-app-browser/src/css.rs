@@ -259,8 +259,10 @@ impl Stylesheet {
                         next.push(String::from(safe_slice(header, 6, header.len()).trim()));
                         self.parse_blocks(inner, depth_level + 1, &next);
                     } else if lower.starts_with("@supports") {
-                        // Modern feature queries are assumed satisfied; unsupported properties inside are ignored later.
-                        if !lower.contains(" not ") && !lower.contains("not(") {
+                        // Evaluated against the properties the engine really applies (supports.rs),
+                        // so pages fall back to their older CSS instead of getting a false "yes".
+                        let cond = safe_slice(header, 9, header.len());
+                        if crate::supports::evaluate(cond) {
                             self.parse_blocks(inner, depth_level + 1, conds);
                         }
                     } else if lower.starts_with("@layer") {

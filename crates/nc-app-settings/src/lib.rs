@@ -22,23 +22,25 @@ use nc_ui::{draw_dot, draw_panel, draw_text_color, text_style, WHITE};
 
 const PAGE_COUNT: usize = 6;
 
-const PORCELAIN_BG: u32 = rgb(244, 249, 253);
-const CARD_WHITE: u32 = rgb(253, 254, 255);
-const CARD_ALT: u32 = rgb(238, 246, 251);
-const CARD_HOVER: u32 = rgb(228, 241, 250);
-const CARD_SELECT: u32 = rgb(216, 238, 249);
-const BORDER_LIGHT: u32 = rgb(208, 224, 236);
+const PORCELAIN_BG: u32 = rgb(232, 239, 248);
+const CARD_WHITE: u32 = rgb(252, 254, 255);
+const CARD_ALT: u32 = rgb(241, 246, 252);
+const CARD_HOVER: u32 = rgb(229, 240, 252);
+const CARD_SELECT: u32 = rgb(215, 232, 251);
+const BORDER_LIGHT: u32 = rgb(199, 214, 232);
+const PANEL_SHADOW: u32 = rgb(38, 61, 91);
+const SIDEBAR_GLASS: u32 = rgb(244, 249, 255);
+const SHEEN: u32 = rgb(255, 255, 255);
 
-const AZURE_BRIGHT: u32 = rgb(44, 138, 242);
-const AZURE_DEEP: u32 = rgb(24, 98, 206);
-const AQUA_MINT: u32 = rgb(26, 188, 168);
-const AQUA_SOFT: u32 = rgb(156, 236, 222);
-const AQUA_DEEP: u32 = rgb(16, 144, 130);
-const WARN_AMBER: u32 = rgb(238, 154, 24);
+const AZURE_BRIGHT: u32 = rgb(40, 121, 220);
+const AZURE_DEEP: u32 = rgb(25, 85, 167);
+const AQUA_MINT: u32 = rgb(30, 168, 160);
+const AQUA_DEEP: u32 = rgb(21, 121, 121);
+const WARN_AMBER: u32 = rgb(220, 143, 30);
 
-const INK_DARK: u32 = rgb(16, 28, 44);
-const INK_BODY: u32 = rgb(58, 76, 96);
-const INK_MUTED: u32 = rgb(116, 134, 154);
+const INK_DARK: u32 = rgb(23, 38, 59);
+const INK_BODY: u32 = rgb(72, 91, 116);
+const INK_MUTED: u32 = rgb(119, 137, 160);
 
 #[derive(Clone, Copy)]
 struct PciNicProbe {
@@ -92,6 +94,7 @@ pub struct SettingsApp {
     efra_compile_prompt: Option<String>,
     efra_status_note: String,
     compiled_counter: u32,
+    sidebar_indicator_y: i32,
 }
 
 fn pci_read_32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
@@ -188,6 +191,7 @@ impl SettingsApp {
             efra_compile_prompt: None,
             efra_status_note: String::from("Generic .efra surucu tabani ve PAT Write-Combining aktif."),
             compiled_counter: 0,
+            sidebar_indicator_y: -1,
         }
     }
 
@@ -857,6 +861,21 @@ impl App for SettingsApp {
             }
         }
 
+        let indicator_target = Self::sidebar_item(input.area, self.page, ctx.unit).y;
+        if self.sidebar_indicator_y < 0 {
+            self.sidebar_indicator_y = indicator_target;
+            redraw = true;
+        } else if self.sidebar_indicator_y != indicator_target {
+            let delta = indicator_target - self.sidebar_indicator_y;
+            let step = if delta.abs() <= 3 {
+                delta
+            } else {
+                (delta / 3).clamp(-ctx.unit.max(1), ctx.unit.max(1))
+            };
+            self.sidebar_indicator_y += step;
+            redraw = true;
+        }
+
         Update {
             redraw,
             close: false,
@@ -867,24 +886,56 @@ impl App for SettingsApp {
     fn draw(&self, canvas: &mut Canvas<'_>, area: Rect, ctx: &Context) {
         let unit = ctx.unit;
         let lang = ctx.settings.language;
-        canvas.fill_rect(area.x, area.y, area.width, area.height, PORCELAIN_BG);
+        let bg_top = rgb(247, 250, 255);
+        let bands = area.height.min(64).max(1);
+        for band in 0..bands {
+            let y0 = band * area.height / bands;
+            let y1 = (band + 1) * area.height / bands;
+            let t = (band * 255 / bands) as u32;
+            canvas.fill_rect(
+                area.x,
+                area.y + y0,
+                area.width,
+                (y1 - y0).max(1),
+                lerp_color(bg_top, PORCELAIN_BG, t),
+            );
+        }
+        canvas.fill_rect(area.x, area.y, area.width, 1, SHEEN);
+        canvas.fill_rect(area.x, area.y + area.height - 1, area.width, 1, BORDER_LIGHT);
 
         let side = Self::sidebar_rect(area, unit);
-        draw_panel(canvas, side, unit / 2, CARD_ALT, 255, BORDER_LIGHT, 255);
+        let side_shadow = Rect::new(side.x + 3, side.y + 4, side.width, side.height);
+        draw_panel(canvas, side_shadow, unit / 2, PANEL_SHADOW, 24, PANEL_SHADOW, 0);
+        draw_panel(canvas, side, unit / 2, SIDEBAR_GLASS, 250, SHEEN, 230);
 
         let title_st = text_style((unit * 76 / 100).max(11), 15);
         let label_st = text_style((unit * 52 / 100).max(9), 14);
         let sub_st = text_style((unit * 42 / 100).max(8), 14);
 
-        draw_dot(canvas, side.x + unit, side.y + unit, 5, AQUA_MINT, 255);
+        let brand_mark = Rect::new(side.x + unit / 2, side.y + unit / 2, unit, unit);
+        draw_panel(canvas, brand_mark, unit / 4, AZURE_BRIGHT, 255, AZURE_DEEP, 255);
+        canvas.fill_rect(
+            brand_mark.x + unit / 4,
+            brand_mark.y + unit / 4,
+            unit / 2,
+            (unit / 7).max(1),
+            rgb(220, 239, 255),
+        );
         draw_text_clipped(
             canvas,
             tr(lang, TextId::SettingsTitle),
             side.x + unit * 7 / 4,
-            side.y + unit * 3 / 5,
+            side.y + (unit - label_st.cap_height) / 2 + unit / 2,
             side.width - unit * 2,
             &label_st,
             INK_DARK,
+        );
+        canvas.fill_rect(
+            side.x + unit / 2,
+            side.y + unit * 2,
+            side.width - unit,
+            1,
+            BORDER_LIGHT,
         );
 
         for i in 0..PAGE_COUNT {
@@ -893,59 +944,183 @@ impl App for SettingsApp {
             let hovered = self.hover == HoverTarget::Sidebar(i);
 
             if selected {
-                draw_panel(canvas, item, unit / 3, AZURE_BRIGHT, 255, AZURE_DEEP, 255);
+                draw_panel(canvas, item, unit / 3, CARD_SELECT, 235, CARD_SELECT, 0);
             } else if hovered {
-                draw_panel(canvas, item, unit / 3, CARD_HOVER, 255, BORDER_LIGHT, 255);
-            } else {
-                draw_panel(canvas, item, unit / 3, CARD_WHITE, 220, BORDER_LIGHT, 180);
+                draw_panel(canvas, item, unit / 3, CARD_HOVER, 215, BORDER_LIGHT, 100);
             }
 
-            let fg_main = if selected { WHITE } else { INK_DARK };
-            let fg_sub = if selected { AQUA_SOFT } else { INK_MUTED };
-            let (p_title, p_sub) = page_titles(lang, i);
-            let max_tw = item.width - unit * 5 / 4;
+            let glyph = Rect::new(item.x + unit / 2, item.y + unit / 2, unit / 2, unit / 2);
+            let glyph_color = if selected { AZURE_BRIGHT } else { INK_MUTED };
+            match i {
+                0 => {
+                    draw_panel(canvas, glyph, unit / 8, glyph_color, 255, glyph_color, 0);
+                    canvas.fill_rect(
+                        glyph.x + unit / 8,
+                        glyph.y + unit / 8,
+                        unit / 4,
+                        unit / 4,
+                        SHEEN,
+                    );
+                }
+                1 => {
+                    draw_dot(
+                        canvas,
+                        glyph.x + glyph.width / 2,
+                        glyph.y + glyph.height / 2,
+                        unit / 5,
+                        glyph_color,
+                        255,
+                    );
+                    canvas.fill_rect(
+                        glyph.x + glyph.width / 2 - 1,
+                        glyph.y,
+                        2,
+                        glyph.height,
+                        SIDEBAR_GLASS,
+                    );
+                }
+                2 => {
+                    draw_dot(
+                        canvas,
+                        glyph.x + glyph.width / 2,
+                        glyph.y + glyph.height / 2,
+                        unit / 5,
+                        glyph_color,
+                        255,
+                    );
+                    draw_dot(
+                        canvas,
+                        glyph.x + glyph.width / 2,
+                        glyph.y + glyph.height / 2,
+                        unit / 9,
+                        SIDEBAR_GLASS,
+                        255,
+                    );
+                }
+                3 => {
+                    draw_dot(
+                        canvas,
+                        glyph.x + glyph.width / 2,
+                        glyph.y + glyph.height / 2,
+                        unit / 5,
+                        glyph_color,
+                        255,
+                    );
+                    draw_dot(
+                        canvas,
+                        glyph.x + glyph.width / 2 + unit / 4,
+                        glyph.y + glyph.height / 2 - unit / 4,
+                        unit / 9,
+                        glyph_color,
+                        255,
+                    );
+                }
+                4 => {
+                    for bar in 0..3 {
+                        let bh = (unit / 5) * (bar + 1) as i32;
+                        canvas.fill_rect(
+                            glyph.x + bar as i32 * (unit / 5),
+                            glyph.y + glyph.height - bh,
+                            (unit / 8).max(1),
+                            bh,
+                            glyph_color,
+                        );
+                    }
+                }
+                _ => {
+                    draw_panel(canvas, glyph, unit / 8, CARD_WHITE, 0, glyph_color, 255);
+                    draw_dot(
+                        canvas,
+                        glyph.x + glyph.width / 2,
+                        glyph.y + glyph.height / 2,
+                        unit / 9,
+                        glyph_color,
+                        255,
+                    );
+                }
+            }
 
+            let (p_title, p_sub) = page_titles(lang, i);
+            let text_x = item.x + unit * 3 / 2;
+            let max_tw = item.width - unit * 2;
             draw_text_clipped(
                 canvas,
                 p_title,
-                item.x + unit * 2 / 3,
+                text_x,
                 item.y + unit / 4,
                 max_tw,
                 &label_st,
-                fg_main,
+                INK_DARK,
             );
             draw_text_clipped(
                 canvas,
                 p_sub,
-                item.x + unit * 2 / 3,
+                text_x,
                 item.y + unit * 4 / 3,
                 max_tw,
                 &sub_st,
-                fg_sub,
+                INK_MUTED,
             );
         }
 
+        let indicator_item = Self::sidebar_item(area, self.page, unit);
+        let indicator_y = if self.sidebar_indicator_y < 0 {
+            indicator_item.y
+        } else {
+            self.sidebar_indicator_y
+        };
+        let indicator = Rect::new(
+            indicator_item.x + unit / 5,
+            indicator_y + unit / 2,
+            (unit / 7).max(2),
+            indicator_item.height - unit,
+        );
+        draw_panel(canvas, indicator, unit / 8, AZURE_BRIGHT, 255, AZURE_BRIGHT, 0);
+
         let pane = Self::main_pane(area, unit);
-        draw_panel(canvas, pane, unit / 2, CARD_WHITE, 255, BORDER_LIGHT, 255);
+        let pane_shadow = Rect::new(pane.x + 3, pane.y + 4, pane.width, pane.height);
+        draw_panel(canvas, pane_shadow, unit / 2, PANEL_SHADOW, 28, PANEL_SHADOW, 0);
+        draw_panel(canvas, pane, unit / 2, CARD_WHITE, 255, SHEEN, 230);
 
         let (cur_title, cur_sub) = page_titles(lang, self.page);
+        draw_panel(
+            canvas,
+            Rect::new(
+                pane.x + unit,
+                pane.y + unit * 3 / 4,
+                (unit / 7).max(2),
+                unit * 3 / 2,
+            ),
+            unit / 12,
+            ctx.settings.accent_color(),
+            255,
+            ctx.settings.accent_color(),
+            0,
+        );
         draw_text_clipped(
             canvas,
             cur_title,
-            pane.x + unit,
+            pane.x + unit * 3 / 2,
             pane.y + unit * 3 / 4,
-            pane.width - unit * 2,
+            pane.width - unit * 5 / 2,
             &title_st,
             INK_DARK,
         );
         draw_text_clipped(
             canvas,
             cur_sub,
-            pane.x + unit,
+            pane.x + unit * 3 / 2,
             pane.y + unit * 2,
-            pane.width - unit * 2,
+            pane.width - unit * 5 / 2,
             &sub_st,
             INK_MUTED,
+        );
+        canvas.fill_rect(
+            pane.x + unit,
+            pane.y + unit * 3,
+            pane.width - unit * 2,
+            1,
+            BORDER_LIGHT,
         );
 
         match self.page {
@@ -2039,11 +2214,17 @@ impl SettingsApp {
 }
 
 fn draw_switch(canvas: &mut Canvas<'_>, x: i32, y: i32, on: bool) {
-    let pill = Rect::new(x, y, 36, 18);
-    let fill = if on { AQUA_MINT } else { BORDER_LIGHT };
-    draw_panel(canvas, pill, 9, fill, 255, fill, 0);
+    let pill = Rect::new(x, y + 1, 36, 18);
+    let fill = if on { AZURE_BRIGHT } else { rgb(204, 216, 230) };
+    let border = if on { AZURE_DEEP } else { rgb(184, 198, 214) };
+    draw_panel(canvas, pill, 9, PANEL_SHADOW, 18, PANEL_SHADOW, 0);
+    draw_panel(canvas, pill, 9, fill, 255, border, 255);
+    if on {
+        canvas.fill_rect(pill.x + 8, pill.y + 2, 17, 1, rgb(127, 183, 245));
+    }
     let kx = if on { x + 26 } else { x + 10 };
-    draw_dot(canvas, kx, y + 9, 6, WHITE, 255);
+    draw_dot(canvas, kx, y + 9, 6, rgb(226, 233, 242), 170);
+    draw_dot(canvas, kx, y + 8, 5, WHITE, 255);
 }
 
 fn draw_pill_btn(
@@ -2065,7 +2246,28 @@ fn draw_pill_btn(
     } else {
         (CARD_WHITE, BORDER_LIGHT, INK_BODY)
     };
+    if !active {
+        let shadow = Rect::new(rect.x, rect.y + 1, rect.width, rect.height);
+        draw_panel(canvas, shadow, rect.height / 2, PANEL_SHADOW, 14, PANEL_SHADOW, 0);
+    }
     draw_panel(canvas, rect, rect.height / 2, fill, 255, brd, 255);
+    if active {
+        let shine = Rect::new(
+            rect.x + 2,
+            rect.y + 2,
+            (rect.width - 4).max(1),
+            (rect.height / 3).max(1),
+        );
+        draw_panel(
+            canvas,
+            shine,
+            (rect.height / 5).max(1),
+            SHEEN,
+            22,
+            SHEEN,
+            0,
+        );
+    }
     let max_tw = (rect.width - 8).max(8);
     let tw = text_width(text, style).min(max_tw);
     draw_text_clipped(
