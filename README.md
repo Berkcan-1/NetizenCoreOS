@@ -187,7 +187,3 @@ The build script passes the selected profile to Cargo using `--features qemu` or
 - The scheduler provides context-switching infrastructure for kernel tasks. This README does not claim full virtual address-space support or Ring 3 isolation for general-purpose user processes.
 - The complete network protocol scope cannot be established from the kernel files alone; consult `nc-net` and the platform drivers for details.
 - Security and boot-integrity behavior must be evaluated alongside the implementations in `nc-storage`, the package manager, and other connected components.
-
-## License
-
-No license information was specified in the inspected kernel archive, so this README does not declare a license. Add an appropriate `LICENSE` file to the repository root and update this section to match the selected license before publishing.
