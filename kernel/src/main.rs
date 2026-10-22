@@ -8,6 +8,7 @@ mod entry;
 mod platform;
 mod prepare;
 mod process;
+mod syscall;
 
 use alloc::boxed::Box;
 use core::fmt::Write;
@@ -42,11 +43,30 @@ const TRANSITION_MS: u32 = 600;
 // PAIR-028: Checked arithmetic ile guvenli Canvas olusturma
 fn new_canvas(arena: &mut Arena, width: usize, height: usize) -> Option<Canvas<'static>> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
+        nc_arch::serial::write_str("[new_canvas HATA] Gecersiz genislik/yukseklik siniri\n");
         return None;
     }
-    let count = width.checked_mul(height)?;
-    let pixels = arena.alloc_pixels(count)?;
-    Canvas::new(pixels, width, height)
+    let count = match width.checked_mul(height) {
+        Some(c) => c,
+        None => {
+            nc_arch::serial::write_str("[new_canvas HATA] count carpim tasmasi\n");
+            return None;
+        }
+    };
+    let pixels = match arena.alloc_pixels(count) {
+        Some(p) => p,
+        None => {
+            nc_arch::serial::write_str("[new_canvas HATA] alloc_pixels None dondu (Arena kapasitesi asti)\n");
+            return None;
+        }
+    };
+    match Canvas::new(pixels, width, height) {
+        Some(c) => Some(c),
+        None => {
+            nc_arch::serial::write_str("[new_canvas HATA] Canvas::new dahili kontrolu basarisiz\n");
+            None
+        }
+    }
 }
 
 // PAIR-008 & PAIR-034: Sahte RAM tahminini kaldir, gercek kullanilabilir RAM'i dogrula
@@ -181,14 +201,25 @@ pub extern "C" fn kernel_main() -> ! {
         Some(b) if b > 0 => b,
         _ => halt_forever(),
     };
-    let arena_target = canvas_bytes.saturating_mul(8).max(24 * 1024 * 1024);
-    let arena_size = arena_target.min(total_avail / 2);
-    let heap_size = total_avail.saturating_sub(arena_size);
-    let heap_base = usable_base + arena_size;
 
-    let mut arena = unsafe { Arena::new(usable_base, arena_size) };
+    // Belleği UEFI'nin bildirdiği garantili kullanılabilir tabandan (usable_base) başlat
+    let arena_target = canvas_bytes.saturating_mul(12).max(64 * 1024 * 1024);
+    let arena_size = arena_target.min(total_avail / 2);
+    let arena_base = usable_base;
+
+    // PMM için tam 16 MiB (4096 adet 4 KiB çerçeve)
+    let pmm_base = ((usable_base + arena_size + 0xFFF) & !0xFFF) as u64;
+    let pmm_size = 16 * 1024 * 1024u64;
+    let pmm_end  = pmm_base + pmm_size;
+
+    let heap_base = pmm_end as usize;
+    let heap_size = usable_limit.saturating_sub(heap_base);
+
+    let mut arena = unsafe { Arena::new(arena_base, arena_size) };
     unsafe {
         ALLOCATOR.init(heap_base, heap_size);
+        nc_mem::init_pmm(pmm_base, pmm_end);
+
         for region in boot.memory_regions() {
             if region.is_usable() {
                 let r_start = (region.base as usize).max(ARENA_BASE);
@@ -201,32 +232,97 @@ pub extern "C" fn kernel_main() -> ! {
     }
 
     nc_arch::idt::init();
+
+    // Faz 1: Sayfa tablosu, W^X, U/S=0 ve TSS.RSP0 doğrulama testleri
+    match nc_mem::run_phase1_vm_self_test() {
+        Ok(()) => log!(
+            &active,
+            "[Faz 1 OK] PMM/VMM (Boş 4K Frame: {}), W^X, U/S=0 ve Ring-3 GDT/TSS hazir.",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 1 KRITIK HATA] Bellek koruma testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    // Faz 2: Ring 3 CPL=3 çalıştırma, int 0x80 Syscall ABI ve ud2/EFAULT izolasyon testi
+    let mut phase2_pm = ProcessManager::new();
+    match syscall::run_phase2_ring3_smoke_tests(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 2 OK] Ring-3 CPL=3 yurutme, int 0x80 Syscall ABI, EFAULT/ud2 izolasyonu ve bellek geri alimi dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 2 KRITIK HATA] Ring-3 duman testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    // Faz 3: Handle tablosu, süreç bazlı capability doğrulaması ve GUI command buffer testi
+    match syscall::run_phase3_isolation_tests(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 3 OK] Handle tablosu, per-process yetki denetimi (EACCES) ve GUI batch cizim ABI dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 3 KRITIK HATA] Faz 3 yetki testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    match syscall::run_phase4_hardening_and_benchmarks(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 4 OK] TSC Benchmark, CR0.WP/SMEP/IOPL=0 sertlestirmesi, 2-surec bellek gizliligi ve #GP (cli) engeli dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 4 KRITIK HATA] Faz 4 sertlestirme testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
     let drv_reg = nc_driver::init();
     log!(&active, "{}", drv_reg.status_log);
     log!(&active, "[DysonSphere] Headless yetki ve politika motoru aktif (Default-Deny)");
 
-    let drv_reg = nc_driver::init();
-    log!(&active, "{}", drv_reg.status_log);
-
-    // Eksik olan satır:
     let is_installed = nc_storage::find_installed_disk().is_some();
 
-    // 4 yerine 3 tampon: wallpaper hem gecis snapshot'i hem duvar kagidi olarak kullanilir
+    log!(
+        &active,
+        "[GOP TAMPON] Çözünürlük: {}x{}, Kare Boyutu: {} KB, Boş Arena: {} KB",
+        width,
+        height,
+        canvas_bytes / 1024,
+        arena.remaining() / 1024
+    );
+
     let mut screen = match new_canvas(&mut arena, width, height) {
         Some(canvas) => canvas,
-        None => halt_forever(),
+        None => {
+            log!(&active, "Kritik Hata: 'screen' tamponu icin arena yetersiz!");
+            halt_forever();
+        }
     };
     let mut work_screen = match new_canvas(&mut arena, width, height) {
         Some(canvas) => canvas,
-        None => halt_forever(),
+        None => {
+            log!(&active, "Kritik Hata: 'work_screen' tamponu icin arena yetersiz!");
+            halt_forever();
+        }
     };
-    // Mevcut kodun:
     let mut wallpaper = match new_canvas(&mut arena, width, height) {
         Some(canvas) => canvas,
-        None => halt_forever(),
+        None => {
+            log!(&active, "Kritik Hata: 'wallpaper' tamponu icin arena yetersiz!");
+            halt_forever();
+        }
     };
 
-    // --- YENİ EKLENECEK DYSONSPHERE FAZ 5: TRUSTED BOOT KİLİDİ ---
+    // --- YENİ EKLENEN DYSONSPHERE FAZ 5: TRUSTED BOOT KİLİDİ ---
     if is_installed {
         if let Err(reason) = nc_storage::verify_boot_integrity() {
             log!(&active, "[FATAL BOOTLOADER LOCK] THE SYSTEM HAS BEEN DESTROYED: {}", reason);
@@ -287,7 +383,7 @@ pub extern "C" fn kernel_main() -> ! {
         }
         log!(&active, "[DysonSphere] Verified Boot OK: /boot, /system ve /security muhurleri dogrulandi.");
     }
-    
+    //Azrayı özledim.. ciddiyim..
 
     nc_ui::draw_backdrop(&mut screen);
     unsafe {
@@ -534,12 +630,13 @@ pub extern "C" fn kernel_main() -> ! {
     }
 
     let mut process_manager = ProcessManager::new();
-    let mut last_cursor = (first_mouse.x, first_mouse.y);
+    process_manager.init_system_services();
 
+    let mut last_cursor = (first_mouse.x, first_mouse.y);
     loop {
         let now = clock.now_ms();
         process_manager.poll_all();
-
+        
         let (mouse, key) = device_manager.poll_input(width as i32, height as i32);
         let uptime_ms = now.wrapping_sub(desktop_start_time);
         let action = desktop_state.update(&mouse, key, width as i32, height as i32, uptime_ms);

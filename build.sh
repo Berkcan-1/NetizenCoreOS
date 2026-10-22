@@ -521,7 +521,7 @@ run_vbox() {
 
     if ! VBoxManage showvminfo "$VM_NAME" >/dev/null 2>&1; then
         VBoxManage createvm --name "$VM_NAME" --ostype Other_64 --register
-        VBoxManage modifyvm "$VM_NAME" --memory 512 --vram 64 --firmware "$fw_mode" \
+        VBoxManage modifyvm "$VM_NAME" --memory 2048 --vram 256 --firmware "$fw_mode" \
             --graphicscontroller vboxvga --nic1 nat --nictype1 82540EM \
             --boot1 dvd --boot2 disk --boot3 none --boot4 none
         VBoxManage storagectl "$VM_NAME" --name IDE --add ide
