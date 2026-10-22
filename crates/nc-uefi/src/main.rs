@@ -446,11 +446,11 @@ pub unsafe extern "efiapi" fn efi_main(
             continue;
         }
         // EfiLoaderCode(1), EfiLoaderData(2), EfiBootServicesCode(3), EfiBootServicesData(4), EfiConventionalMemory(7)
-        let r_type = if matches!(d.r#type, 1 | 2 | 3 | 4 | 7) {
-            1
-        } else {
-            2
-        };
+        let r_type = if matches!(d.r#type, 4 | 7) {
+        1
+    } else {
+        2
+    };
         core::ptr::write(
             raw_regions_ptr.add(raw_count),
             MemoryRegion {

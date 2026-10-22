@@ -1,7 +1,14 @@
+// crates/nc-mem/src/lib.rs
 #![no_std]
 
 pub mod heap;
+pub mod paging;
+
 pub use heap::LockedHeap;
+pub use paging::{
+    alloc_frame, free_frame, free_frame_count, init_pmm, run_phase1_vm_self_test, AddressSpace,
+    PagePermissions, VmError, PAGE_SIZE, PTE_USER, PTE_WRITABLE, USER_SPACE_END, USER_SPACE_START,
+};
 
 pub struct Arena {
     next: usize,

@@ -141,11 +141,25 @@ impl TcpHttpClient {
             clean
         };
 
-        let (authority, path) = if let Some(slash_idx) = without_proto.find('/') {
-            (&without_proto[..slash_idx], &without_proto[slash_idx..])
-        } else {
-            (without_proto, "/")
-        };
+        // Authority ends at the first '/', '?' or '#'. A '/'-only search broke `https://host?x=1`
+        // (host became "host?x=1"). The fragment is never sent to the server.
+        let (authority, path_owned): (&str, String) =
+            match without_proto.find(|c: char| c == '/' || c == '?' || c == '#') {
+                Some(i) => {
+                    let tail = &without_proto[i..];
+                    let tail = match tail.find('#') {
+                        Some(h) => &tail[..h],
+                        None => tail,
+                    };
+                    if tail.starts_with('/') {
+                        (&without_proto[..i], String::from(tail))
+                    } else {
+                        (&without_proto[..i], alloc::format!("/{}", tail))
+                    }
+                }
+                None => (without_proto, String::from("/")),
+            };
+        let path: &str = &path_owned;
 
         let (host_raw, custom_port) = if let Some(colon) = authority.rfind(':') {
             let p_str = &authority[colon + 1..];
