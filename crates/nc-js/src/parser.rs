@@ -89,6 +89,10 @@ pub enum Expr {
     Binary(String, Box<Expr>, Box<Expr>),
     Logical(String, Box<Expr>, Box<Expr>),
     Assign { op: String, target: Box<Expr>, value: Box<Expr> },
+    /// `[a, b] = v` / `({ x, y: z } = v)`: destructuring assignment to existing bindings.
+    DestructAssign { pat: Rc<Pattern>, value: Box<Expr> },
+    /// `new.target`: the constructor invoked with `new`, or undefined for a plain call.
+    NewTarget,
     Cond(Box<Expr>, Box<Expr>, Box<Expr>),
     Call { callee: Box<Expr>, args: Vec<Expr>, optional: bool },
     New { callee: Box<Expr>, args: Vec<Expr> },
@@ -956,6 +960,19 @@ impl Parser {
         if let Some(f) = self.try_arrow()? {
             return Ok(f);
         }
+        // Destructuring assignment: try to read `[..]` / `{..}` as a pattern followed by a plain `=`.
+        // Tokens are pre-lexed, so rewinding `pos` is safe; on any mismatch it is an ordinary literal.
+        if self.is_p("[") || self.is_p("{") {
+            let save = self.pos;
+            if let Ok(pat) = self.binding_pattern() {
+                if self.is_p("=") {
+                    self.advance();
+                    let right = self.assign_expr()?;
+                    return Ok(Expr::DestructAssign { pat: Rc::new(pat), value: Box::new(right) });
+                }
+            }
+            self.pos = save;
+        }
         let left = self.conditional()?;
         if let Tok::Punct(p) = self.peek().clone() {
             if is_assign_op(&p) {
@@ -1130,7 +1147,12 @@ impl Parser {
     fn new_expr(&mut self) -> Result<Expr, String> {
         self.advance();
         if self.is_p(".") {
-            return self.err("new.target is not supported");
+            self.advance();
+            let name = self.ident_name()?;
+            if name != "target" {
+                return self.err("expected 'target' after 'new.'");
+            }
+            return Ok(Expr::NewTarget);
         }
         let mut callee = if self.is_kw("new") { self.new_expr()? } else { self.primary()? };
         loop {

@@ -104,6 +104,14 @@ fn layout(text: &str, cap: i32, tracking: i32, visit: &mut dyn FnMut(&'static En
     }
 }
 
+/// `true` when `ch` is drawn as a real glyph, composed from a combining sequence, or deliberately
+/// invisible (zero-width / spacing). `false` means `draw_text` would paint the "undefined" box.
+/// Callers use this to decide whether a character needs a fallback before measuring or painting.
+pub fn has_glyph(ch: char) -> bool {
+    let code = ch as u32;
+    data::find(code).is_some() || data::is_combining(code) || is_zero_width(code) || is_space(code)
+}
+
 pub fn text_width(text: &str, style: &Style) -> i32 {
     let cap = clamp_cap(style.cap_height);
     layout(text, cap, style.tracking, &mut |_, _| {})

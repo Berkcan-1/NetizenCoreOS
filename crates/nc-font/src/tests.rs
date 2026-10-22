@@ -73,3 +73,14 @@ fn baseline_and_cap_line_are_crisp() {
     let (_, _, min_y, max_y, _) = ink("H", 12);
     assert!(min_y >= -1 && max_y <= 12);
 }
+
+#[test]
+fn has_glyph_matches_the_drawn_repertoire() {
+    for ch in "çğıöşüÇĞİÖŞÜ₺€éñΩЖ".chars() {
+        assert!(has_glyph(ch), "should be drawable: {}", ch);
+    }
+    assert!(has_glyph('\u{0301}'), "combining acute is composed, not undefined");
+    assert!(has_glyph('\u{200B}'), "zero-width space is intentionally invisible");
+    assert!(!has_glyph('\u{0627}'), "Arabic alef has no glyph yet");
+    assert!(!has_glyph('\u{4E2D}'), "CJK has no glyph yet");
+}

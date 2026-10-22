@@ -279,6 +279,8 @@ pub struct Interp {
     /// Called by `await` when a promise is still pending and no timer can run.
     /// Returns true if it made (or may still make) progress, false if nothing is pending.
     pub pump: Option<fn(&mut Interp) -> bool>,
+    /// `new.target` hand-over from `construct` / `super()` to the closure that is about to run.
+    pub pending_nt: Option<Value>,
 }
 
 impl Interp {
@@ -320,6 +322,7 @@ impl Interp {
             regex_cache: Vec::new(),
             host: None,
             pump: None,
+            pending_nt: None,
         };
         crate::builtins::setup(&mut it);
         it
@@ -537,6 +540,25 @@ impl Interp {
         }
         self.run_microtasks();
         Ok(self.last.clone())
+    }
+
+    /// Short human description of a value for diagnostics: `undefined`, `string`, `Headers`, `Array`...
+    pub fn describe_value_kind(&mut self, v: &Value) -> String {
+        if let Value::Obj(o) = v {
+            if let Some(ctor) = self.get_own_chain(o, "constructor") {
+                if let Value::Obj(c) = &ctor {
+                    if let Some(n) = self.get_own_chain(c, "name") {
+                        if let Ok(ns) = self.to_str(&n) {
+                            if !ns.is_empty() {
+                                return ns;
+                            }
+                        }
+                    }
+                }
+            }
+            return String::from("object");
+        }
+        String::from(self.typeof_str(v))
     }
 
     pub fn describe_error(&mut self, v: &Value) -> String {
@@ -1374,6 +1396,8 @@ impl Interp {
             fscope.borrow_mut().vars.push((String::from("@@func"), fval.clone()));
         }
         if !def.is_arrow {
+            let nt = self.pending_nt.take().unwrap_or(Value::Undefined);
+            fscope.borrow_mut().vars.push((String::from("@@nt"), nt));
             fscope.borrow_mut().this_val = Some(this.clone());
             let arr = self.new_array(args.to_vec());
             fscope.borrow_mut().vars.push((String::from("arguments"), arr));
@@ -1471,7 +1495,13 @@ impl Interp {
             _ => self.protos.object.clone(),
         };
         let this = self.alloc(Kind::Plain, Some(proto));
-        let r = self.call(f, &Value::Obj(this.clone()), args)?;
+        // Only a script closure observes new.target; a native constructor may call back into script
+        // (e.g. a Promise executor) and must not leak it.
+        let is_closure = matches!(&f, Value::Obj(fo) if matches!(fo.borrow().kind, Kind::Closure(_)));
+        self.pending_nt = if is_closure { Some(f.clone()) } else { None };
+        let r = self.call(f, &Value::Obj(this.clone()), args);
+        self.pending_nt = None;
+        let r = r?;
         match r {
             Value::Obj(_) => Ok(r),
             _ => Ok(Value::Obj(this)),
@@ -1579,7 +1609,16 @@ impl Interp {
                 }
                 let argv = self.eval_args(args, scope)?;
                 if !func.is_callable() {
-                    return Err(self.type_err(&format!("{} is not a function", describe_callee(callee))));
+                    // Name the receiver's constructor and what the property really is, so a missing
+                    // builtin / DOM method can be identified from one log line.
+                    let recv = self.describe_value_kind(&this);
+                    let got = self.describe_value_kind(&func);
+                    return Err(self.type_err(&format!(
+                        "{} is not a function [receiver: {}, value: {}]",
+                        describe_callee(callee),
+                        recv,
+                        got
+                    )));
                 }
                 Ok(Some(self.call(&func, &this, &argv)?))
             }
@@ -1737,6 +1776,7 @@ impl Interp {
             Expr::Null => Ok(Value::Null),
             Expr::Hole => Ok(Value::Undefined),
             Expr::This => Ok(self.lookup_this(scope)),
+            Expr::NewTarget => Ok(self.lookup(scope, "@@nt").unwrap_or(Value::Undefined)),
             Expr::Ident(n) => match self.lookup(scope, n) {
                 Some(v) => Ok(v),
                 None => Err(self.throw_err("ReferenceError", &format!("{} is not defined", n))),
@@ -1873,6 +1913,12 @@ impl Interp {
                     Ok(a)
                 }
             }
+            Expr::DestructAssign { pat, value } => {
+                let v = self.eval_expr(value, scope)?;
+                // `Var` mode assigns to an existing binding and only declares when none is visible.
+                self.bind_pattern(pat, v.clone(), scope, BindMode::Var)?;
+                Ok(v)
+            }
             Expr::Assign { op, target, value } => {
                 if op == "=" {
                     let v = self.eval_expr(value, scope)?;
@@ -1946,7 +1992,11 @@ impl Interp {
                     return Err(self.type_err("Super constructor is not a constructor"));
                 }
                 let this = self.lookup_this(scope);
-                let r = self.call(&parent, &this, &argv)?;
+                let parent_is_closure = matches!(&parent, Value::Obj(po) if matches!(po.borrow().kind, Kind::Closure(_)));
+                self.pending_nt = if parent_is_closure { self.lookup(scope, "@@nt") } else { None };
+                let r = self.call(&parent, &this, &argv);
+                self.pending_nt = None;
+                let r = r?;
                 let new_this = match &r {
                     Value::Obj(_) if !strict_eq(&r, &this) => r.clone(),
                     _ => this,
@@ -2452,11 +2502,24 @@ impl Interp {
     }
 }
 
+/// Source-like name of a callee for error messages (`a.b.c`, `x[...]`, `f(...)`, `new X`, ...).
+/// "expression" alone told us nothing when a bundled script failed 2 MB into a minified file.
 fn describe_callee(e: &Expr) -> String {
     match e {
         Expr::Ident(n) => n.clone(),
         Expr::Member { obj, prop, .. } => format!("{}.{}", describe_callee(obj), prop),
+        Expr::Index { obj, .. } => format!("{}[...]", describe_callee(obj)),
+        Expr::Call { callee, .. } => format!("{}(...)", describe_callee(callee)),
+        Expr::New { callee, .. } => format!("new {}", describe_callee(callee)),
         Expr::This => String::from("this"),
+        Expr::Str(_) => String::from("<string>"),
+        Expr::Num(_) => String::from("<number>"),
+        Expr::Array(_) => String::from("[...]"),
+        Expr::Object(_) => String::from("{...}"),
+        Expr::Func(_) => String::from("(function)"),
+        Expr::Class(_) => String::from("(class)"),
+        Expr::Tpl(..) => String::from("<template>"),
+        Expr::Logical(..) | Expr::Cond(..) | Expr::Seq(_) => String::from("(...)"),
         _ => String::from("expression"),
     }
 }
