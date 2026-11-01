@@ -10,7 +10,9 @@ use core::cell::Cell;
 
 pub type Caps = Vec<Option<(usize, usize)>>;
 
-const STEP_LIMIT: usize = 4_000_000;
+pub const EXECUTION_STEP_LIMIT: usize = 250_000;
+const MAX_REGEX_PATTERN_BYTES: usize = 4 * 1024;
+const MAX_REGEX_INPUT_CHARS: usize = 1_000_000;
 
 #[derive(Clone)]
 enum ClassItem {
@@ -123,7 +125,7 @@ impl P {
 
     fn alt(&mut self) -> Result<Node, String> {
         self.depth += 1;
-        if self.depth > 200 {
+        if self.depth > 96 {
             return Err(String::from("regex nesting too deep"));
         }
         let mut alts = vec![self.concat()?];
@@ -451,6 +453,9 @@ impl P {
 }
 
 pub fn compile(pattern: &str, flags: &str) -> Result<Regex, String> {
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err(String::from("regex pattern exceeds 4096-byte limit"));
+    }
     for f in flags.chars() {
         if !matches!(f, 'g' | 'i' | 'm' | 's' | 'u' | 'y' | 'd' | 'v') {
             return Err(format!("Invalid flags supplied to RegExp constructor '{}'", flags));
@@ -488,7 +493,7 @@ impl<'a> M<'a> {
     fn over(&self) -> bool {
         let n = self.steps.get() + 1;
         self.steps.set(n);
-        n > STEP_LIMIT
+        n > EXECUTION_STEP_LIMIT
     }
 
     fn eq(&self, a: char, b: char) -> bool {
@@ -506,7 +511,7 @@ impl<'a> M<'a> {
 
     fn m(&self, node: &Node, i: usize, caps: &mut Caps, k: K) -> bool {
         let d = self.depth.get();
-        if d > 2500 {
+        if d > 512 {
             return false;
         }
         self.depth.set(d + 1);
@@ -707,7 +712,17 @@ impl Regex {
     /// Searches for the first match starting at or after `start`
     /// (only exactly at `start` for sticky regexes).
     pub fn exec_at(&self, s: &[char], start: usize) -> Option<Caps> {
-        let m = M { re: self, s, steps: Cell::new(0), depth: Cell::new(0) };
+        let mut budget = EXECUTION_STEP_LIMIT;
+        self.exec_at_with_budget(s, start, &mut budget)
+    }
+
+    pub fn exec_at_with_budget(&self, s: &[char], start: usize, budget: &mut usize) -> Option<Caps> {
+        if s.len() > MAX_REGEX_INPUT_CHARS || *budget == 0 {
+            return None;
+        }
+        let used = EXECUTION_STEP_LIMIT.saturating_sub((*budget).min(EXECUTION_STEP_LIMIT));
+        let m = M { re: self, s, steps: Cell::new(used), depth: Cell::new(0) };
+        let mut result = None;
         let mut st = start;
         while st <= s.len() {
             let mut caps: Caps = vec![None; self.ngroups + 1];
@@ -719,14 +734,16 @@ impl Regex {
             });
             if ok {
                 caps[0] = Some((st, end_pos));
-                return Some(caps);
+                result = Some(caps);
+                break;
             }
-            if self.sticky || m.steps.get() > STEP_LIMIT {
-                return None;
+            if self.sticky || m.steps.get() > EXECUTION_STEP_LIMIT {
+                break;
             }
             st += 1;
         }
-        None
+        *budget = EXECUTION_STEP_LIMIT.saturating_sub(m.steps.get().min(EXECUTION_STEP_LIMIT));
+        result
     }
 
     pub fn group_name(&self, idx: usize) -> Option<&str> {

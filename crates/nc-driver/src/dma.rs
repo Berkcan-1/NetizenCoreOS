@@ -34,18 +34,33 @@ pub enum DmaError {
     AddressExceedsMask { phys_end: u64, mask_max: u64 },
 }
 
-/// CPU sanal adresini aktif CR3 (PML4) sayfa tablolarını yürüyerek gerçek fiziksel adrese çevirir.
-/// Stage2 (2 MiB HugePage) ve UEFI (4 KiB / 2 MiB / 1 GiB) sayfa tablolarının tamamıyla uyumludur.
+/// Translate an x86-64 virtual address through the active four- or five-level page tables.
+/// The kernel MUST map every page-table frame at its physical address (identity/direct map)
+/// before calling this function. The walker dereferences those physical frame addresses;
+/// it cannot independently prove that the direct map exists. Supports 4 KiB, 2 MiB and 1 GiB
+/// leaves and never assumes that the target virtual address itself is identity mapped.
 pub fn virt_to_phys(virt: usize) -> Option<u64> {
+    const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
     let vaddr = virt as u64;
     let cr3: u64;
+    let cr4: u64;
     unsafe {
         asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
     }
 
-    let pml4_base = cr3 & 0x000F_FFFF_FFFF_F000;
-    if pml4_base == 0 {
-        return Some(vaddr);
+    // Platform invariant: all paging-structure frames are reachable via physical identity map.
+    // A missing mapping can fault here; the page-table access contract is documented above.
+    let mut table_base = cr3 & ADDRESS_MASK;
+    if table_base == 0 { return None; }
+
+    // Support both four-level paging and Intel/AMD five-level paging (LA57).
+    if (cr4 & (1 << 12)) != 0 {
+        let pml5_idx = ((vaddr >> 48) & 0x1FF) as usize;
+        let pml5e = unsafe { core::ptr::read_volatile((table_base as *const u64).add(pml5_idx)) };
+        if (pml5e & 1) == 0 || (pml5e & 0x80) != 0 { return None; }
+        table_base = pml5e & ADDRESS_MASK;
+        if table_base == 0 { return None; }
     }
 
     let pml4_idx = ((vaddr >> 39) & 0x1FF) as usize;
@@ -54,45 +69,57 @@ pub fn virt_to_phys(virt: usize) -> Option<u64> {
     let pt_idx = ((vaddr >> 12) & 0x1FF) as usize;
 
     unsafe {
-        // 1. PML4 Girişi
-        let pml4e = core::ptr::read_volatile((pml4_base as *const u64).add(pml4_idx));
-        if (pml4e & 1) == 0 {
-            return None;
-        }
+        let pml4e = core::ptr::read_volatile((table_base as *const u64).add(pml4_idx));
+        if (pml4e & 1) == 0 { return None; }
 
-        // 2. PDPT Girişi
-        let pdpt_base = pml4e & 0x000F_FFFF_FFFF_F000;
+        let pdpt_base = pml4e & ADDRESS_MASK;
+        if pdpt_base == 0 { return None; }
         let pdpte = core::ptr::read_volatile((pdpt_base as *const u64).add(pdpt_idx));
-        if (pdpte & 1) == 0 {
-            return None;
-        }
-        // 1 GiB Huge Page kontrolü (PS biti = bit 7)
+        if (pdpte & 1) == 0 { return None; }
         if (pdpte & 0x80) != 0 {
             let page_base = pdpte & 0x000F_FFFF_C000_0000;
             return Some(page_base | (vaddr & 0x3FFF_FFFF));
         }
 
-        // 3. Page Directory (PD) Girişi
-        let pd_base = pdpte & 0x000F_FFFF_FFFF_F000;
+        let pd_base = pdpte & ADDRESS_MASK;
+        if pd_base == 0 { return None; }
         let pde = core::ptr::read_volatile((pd_base as *const u64).add(pd_idx));
-        if (pde & 1) == 0 {
-            return None;
-        }
-        // 2 MiB Huge Page kontrolü (Stage2 bootloader varsayılanı: PS biti = bit 7)
+        if (pde & 1) == 0 { return None; }
         if (pde & 0x80) != 0 {
             let page_base = pde & 0x000F_FFFF_FFE0_0000;
             return Some(page_base | (vaddr & 0x001F_FFFF));
         }
 
-        // 4. 4 KiB Page Table (PT) Girişi
-        let pt_base = pde & 0x000F_FFFF_FFFF_F000;
+        let pt_base = pde & ADDRESS_MASK;
+        if pt_base == 0 { return None; }
         let pte = core::ptr::read_volatile((pt_base as *const u64).add(pt_idx));
-        if (pte & 1) == 0 {
-            return None;
-        }
-        let page_base = pte & 0x000F_FFFF_FFFF_F000;
+        if (pte & 1) == 0 { return None; }
+        let page_base = pte & ADDRESS_MASK;
         Some(page_base | (vaddr & 0xFFF))
     }
+}
+
+
+/// Returns the physical base only when every virtual page in the range maps to the
+/// immediately following physical page. DMA engines are not allowed to follow CPU
+/// page tables, so a virtually contiguous allocation is insufficient by itself.
+pub fn virt_range_to_phys_contiguous(virt: usize, size: usize) -> Option<u64> {
+    if size == 0 {
+        return None;
+    }
+    let last = virt.checked_add(size - 1)?;
+    let first_phys = virt_to_phys(virt)?;
+    let first_virtual_page_end = (virt | 0xFFF).checked_add(1)?;
+    let mut cursor = first_virtual_page_end;
+    while cursor <= last {
+        let mapped = virt_to_phys(cursor)?;
+        let expected = first_phys.checked_add((cursor - virt) as u64)?;
+        if mapped != expected {
+            return None;
+        }
+        cursor = cursor.checked_add(4096)?;
+    }
+    Some(first_phys)
 }
 
 /// Ömrü, hizalaması ve fiziksel DMA adresi garanti altına alınmış donanım tamponu.
@@ -105,8 +132,9 @@ pub struct DmaBuffer {
     mask: DmaMask,
 }
 
+// Moving an owned DMA allocation is safe because its backing address does not move.
+// Sharing it through `&DmaBuffer` is intentionally not Sync: a device may write it.
 unsafe impl Send for DmaBuffer {}
-unsafe impl Sync for DmaBuffer {}
 
 impl DmaBuffer {
     /// Belirtilen boyut, hizalama ve DMA maskesine uygun sıfırlanmış DMA belleği ayırır.
@@ -125,12 +153,15 @@ impl DmaBuffer {
         let raw_ptr = unsafe { alloc_zeroed(layout) };
         let cpu_ptr = NonNull::new(raw_ptr).ok_or(DmaError::OutOfMemory)?;
 
-        let Some(phys_addr) = virt_to_phys(cpu_ptr.as_ptr() as usize) else {
+        let Some(phys_addr) = virt_range_to_phys_contiguous(cpu_ptr.as_ptr() as usize, size) else {
             unsafe { dealloc(cpu_ptr.as_ptr(), layout) };
             return Err(DmaError::UnmappedVirtualAddress);
         };
 
-        let phys_end = phys_addr.saturating_add((size - 1) as u64);
+        let Some(phys_end) = phys_addr.checked_add((size - 1) as u64) else {
+            unsafe { dealloc(cpu_ptr.as_ptr(), layout) };
+            return Err(DmaError::InvalidParameters);
+        };
         let mask_max = mask.max_phys_addr();
         if phys_end > mask_max {
             unsafe { dealloc(cpu_ptr.as_ptr(), layout) };
@@ -162,7 +193,7 @@ impl DmaBuffer {
     /// Yalnızca 32-bit DMA destekleyen aygıtlar için taşma kontrollü 32-bit fiziksel adres
     #[inline]
     pub fn phys_addr_u32(&self) -> Result<u32, DmaError> {
-        let end = self.phys_addr.saturating_add((self.size.saturating_sub(1)) as u64);
+        let end = self.phys_addr.checked_add((self.size.saturating_sub(1)) as u64).ok_or(DmaError::InvalidParameters)?;
         if end > 0xFFFF_FFFF {
             Err(DmaError::AddressExceedsMask {
                 phys_end: end,

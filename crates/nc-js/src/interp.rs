@@ -10,6 +10,18 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 pub const MAX_DEPTH: usize = 90;
+const MAX_SCRIPT_BYTES: usize = 512 * 1024;
+const MAX_RUNTIME_STRING_BYTES: usize = 1024 * 1024;
+const MAX_RUNTIME_ARGUMENTS: usize = 16_384;
+const MAX_RUNTIME_OBJECT_PROPERTIES: usize = 16_384;
+const MAX_RUNTIME_PROPERTY_KEY_BYTES: usize = 4_096;
+const MAX_EXECUTION_STEPS: usize = 100_000;
+const MAX_MICROTASKS_PER_TURN: usize = 64;
+const MAX_MICROTASK_QUEUE: usize = 2_048;
+const MAX_PROMISE_REACTIONS: usize = 256;
+const MAX_TIMERS: usize = 256;
+const MAX_ITERABLE_ITEMS: usize = 16_384;
+const MAX_AWAIT_PUMP_STEPS: usize = 2;
 
 pub type ObjRef = Rc<RefCell<Obj>>;
 pub type ScopeRef = Rc<RefCell<Scope>>;
@@ -281,6 +293,7 @@ pub struct Interp {
     pub pump: Option<fn(&mut Interp) -> bool>,
     /// `new.target` hand-over from `construct` / `super()` to the closure that is about to run.
     pub pending_nt: Option<Value>,
+    execution_steps_left: usize,
 }
 
 impl Interp {
@@ -323,9 +336,31 @@ impl Interp {
             host: None,
             pump: None,
             pending_nt: None,
+            execution_steps_left: MAX_EXECUTION_STEPS,
         };
         crate::builtins::setup(&mut it);
         it
+    }
+
+    fn reset_execution_budget(&mut self) {
+        self.execution_steps_left = MAX_EXECUTION_STEPS;
+    }
+
+    pub(crate) fn consume_execution_step(&mut self) -> Res<()> {
+        self.consume_execution_steps(1)
+    }
+
+    pub(crate) fn consume_execution_steps(&mut self, steps: usize) -> Res<()> {
+        if steps > self.execution_steps_left {
+            self.execution_steps_left = 0;
+            return Err(self.throw_err("RangeError", "Script execution budget exhausted"));
+        }
+        self.execution_steps_left -= steps;
+        Ok(())
+    }
+
+    pub fn microtasks_pending(&self) -> bool {
+        !self.microtasks.is_empty()
     }
 
     // ---------- allocation helpers ----------
@@ -528,6 +563,10 @@ impl Interp {
     // ---------- program entry ----------
 
     pub fn run(&mut self, src: &str) -> Result<Value, String> {
+        if src.len() > MAX_SCRIPT_BYTES {
+            return Err(String::from("RangeError: script exceeds the source-size limit"));
+        }
+        self.reset_execution_budget();
         let prog = parse_program(src)?;
         let scope = self.global_scope.clone();
         self.hoist_vars(&prog, &scope);
@@ -666,6 +705,7 @@ impl Interp {
     }
 
     fn exec_stmt(&mut self, s: &Stmt, scope: &ScopeRef, label: Option<&str>) -> Res<()> {
+        self.consume_execution_step()?;
         match s {
             Stmt::Empty => Ok(()),
             Stmt::Expr(e) => {
@@ -1138,6 +1178,16 @@ impl Interp {
                     }
                     cur = next;
                 }
+                if key.len() > MAX_RUNTIME_PROPERTY_KEY_BYTES {
+                    return Err(self.throw_err("RangeError", "Object property key exceeds 4096 bytes"));
+                }
+                let (exists, count) = {
+                    let b = o.borrow();
+                    (b.props.iter().any(|(k, _)| k == key), b.props.len())
+                };
+                if !exists && count >= MAX_RUNTIME_OBJECT_PROPERTIES {
+                    return Err(self.throw_err("RangeError", "Object property limit exceeded"));
+                }
                 self.set_own(o, key, val);
                 Ok(())
             }
@@ -1149,7 +1199,10 @@ impl Interp {
     pub fn to_key(&mut self, v: &Value) -> Res<String> {
         match v {
             Value::Num(n) => Ok(num_to_str(*n)),
-            Value::Str(s) => Ok(String::from(&**s)),
+            Value::Str(s) => {
+                self.consume_execution_steps(s.len().saturating_add(255) / 256)?;
+                Ok(String::from(&**s))
+            }
             other => self.to_str(other),
         }
     }
@@ -1224,7 +1277,10 @@ impl Interp {
             Value::Null => Ok(0.0),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
             Value::Num(n) => Ok(*n),
-            Value::Str(s) => Ok(str_to_num(s)),
+            Value::Str(s) => {
+                self.consume_execution_steps(s.len().saturating_add(255) / 256)?;
+                Ok(str_to_num(s))
+            }
             Value::Obj(o) => {
                 if let Kind::Date(t) = &o.borrow().kind {
                     return Ok(*t);
@@ -1298,14 +1354,36 @@ impl Interp {
 
     pub fn iterate(&mut self, v: &Value) -> Res<Vec<Value>> {
         match v {
-            Value::Str(s) => Ok(s.chars().map(|c| Value::string(c.to_string())).collect()),
+            Value::Str(s) => {
+                self.consume_execution_steps((s.len().saturating_add(255) / 256).max(1))?;
+                if s.chars().count() > MAX_ITERABLE_ITEMS {
+                    return Err(self.throw_err("RangeError", "String iteration limit exceeded"));
+                }
+                Ok(s.chars().map(|c| Value::string(c.to_string())).collect())
+            }
             Value::Obj(o) => {
                 {
                     let b = o.borrow();
                     match &b.kind {
-                        Kind::Array(a) => return Ok(a.clone()),
-                        Kind::Set(s) => return Ok(s.clone()),
+                        Kind::Array(a) => {
+                            if a.len() > MAX_ITERABLE_ITEMS {
+                                return Err(self.throw_err("RangeError", "Iterable item limit exceeded"));
+                            }
+                            self.consume_execution_steps((a.len().saturating_add(255) / 256).max(1))?;
+                            return Ok(a.clone());
+                        }
+                        Kind::Set(set) => {
+                            if set.len() > MAX_ITERABLE_ITEMS {
+                                return Err(self.throw_err("RangeError", "Iterable item limit exceeded"));
+                            }
+                            self.consume_execution_steps((set.len().saturating_add(255) / 256).max(1))?;
+                            return Ok(set.clone());
+                        }
                         Kind::Map(m) => {
+                            if m.len() > MAX_ITERABLE_ITEMS {
+                                return Err(self.throw_err("RangeError", "Iterable item limit exceeded"));
+                            }
+                            self.consume_execution_steps(m.len())?;
                             let pairs: Vec<(Value, Value)> = m.clone();
                             drop(b);
                             return Ok(pairs.into_iter().map(|(k, v)| self.new_array(vec![k, v])).collect());
@@ -1319,14 +1397,15 @@ impl Interp {
                         let iter = self.call(&f, v, &[])?;
                         let next = self.get_prop(&iter, "next")?;
                         let mut out = Vec::new();
-                        for _ in 0..200_000 {
+                        for _ in 0..MAX_ITERABLE_ITEMS {
+                            self.consume_execution_step()?;
                             let r = self.call(&next, &iter, &[])?;
                             if self.get_prop(&r, "done")?.truthy() {
                                 return Ok(out);
                             }
                             out.push(self.get_prop(&r, "value")?);
                         }
-                        return Ok(out);
+                        return Err(self.throw_err("RangeError", "Iterator item limit exceeded"));
                     }
                 }
                 Err(self.type_err("object is not iterable"))
@@ -1511,12 +1590,19 @@ impl Interp {
     // ---------- expressions ----------
 
     fn eval_args(&mut self, args: &[Expr], scope: &ScopeRef) -> Res<Vec<Value>> {
+        if args.len() > MAX_RUNTIME_ARGUMENTS {
+            return Err(self.throw_err("RangeError", "Call argument limit exceeded"));
+        }
         let mut out = Vec::with_capacity(args.len());
         for a in args {
+            self.consume_execution_step()?;
             match a {
                 Expr::Spread(inner) => {
                     let v = self.eval_expr(inner, scope)?;
                     let items = self.iterate(&v)?;
+                    if out.len().saturating_add(items.len()) > MAX_RUNTIME_ARGUMENTS {
+                        return Err(self.throw_err("RangeError", "Call argument limit exceeded"));
+                    }
                     out.extend(items);
                 }
                 other => out.push(self.eval_expr(other, scope)?),
@@ -1646,6 +1732,14 @@ impl Interp {
         }
     }
 
+    fn append_string_limited(&self, out: &mut String, value: &str) -> Res<()> {
+        if out.len().saturating_add(value.len()) > MAX_RUNTIME_STRING_BYTES {
+            return Err(self.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+        }
+        out.push_str(value);
+        Ok(())
+    }
+
     pub fn binary_op(&mut self, op: &str, a: &Value, b: &Value) -> Res<Value> {
         match op {
             "+" => {
@@ -1656,7 +1750,8 @@ impl Interp {
                 let pb = self.to_prim(b)?;
                 if matches!(pa, Value::Str(_)) || matches!(pb, Value::Str(_)) {
                     let mut s = self.to_str(&pa)?;
-                    s.push_str(&self.to_str(&pb)?);
+                    let rhs = self.to_str(&pb)?;
+                    self.append_string_limited(&mut s, &rhs)?;
                     Ok(Value::string(s))
                 } else {
                     Ok(Value::Num(self.to_num(&pa)? + self.to_num(&pb)?))
@@ -1769,6 +1864,7 @@ impl Interp {
     }
 
     pub fn eval_expr(&mut self, e: &Expr, scope: &ScopeRef) -> Res<Value> {
+        self.consume_execution_step()?;
         match e {
             Expr::Num(n) => Ok(Value::Num(*n)),
             Expr::Str(s) => Ok(Value::str(s)),
@@ -1784,10 +1880,11 @@ impl Interp {
             Expr::Tpl(strs, exprs) => {
                 let mut out = String::new();
                 for (i, s) in strs.iter().enumerate() {
-                    out.push_str(s);
+                    self.append_string_limited(&mut out, s)?;
                     if i < exprs.len() {
                         let v = self.eval_expr(&exprs[i], scope)?;
-                        out.push_str(&self.to_str(&v)?);
+                        let text = self.to_str(&v)?;
+                        self.append_string_limited(&mut out, &text)?;
                     }
                 }
                 Ok(Value::string(out))
@@ -1798,8 +1895,12 @@ impl Interp {
                 Ok(self.new_array(v))
             }
             Expr::Object(props) => {
+                if props.len() > MAX_RUNTIME_OBJECT_PROPERTIES {
+                    return Err(self.throw_err("RangeError", "Object property limit exceeded"));
+                }
                 let o = self.new_plain();
                 for p in props {
+                    self.consume_execution_step()?;
                     match p {
                         PropDef::KeyVal(k, ve) => {
                             let key = match k {
@@ -1809,22 +1910,39 @@ impl Interp {
                                     self.to_key(&kv)?
                                 }
                             };
+                            if key.len() > MAX_RUNTIME_PROPERTY_KEY_BYTES {
+                                return Err(self.throw_err("RangeError", "Object property key exceeds 4096 bytes"));
+                            }
                             let v = self.eval_expr(ve, scope)?;
                             self.set_own(&o, &key, v);
                         }
                         PropDef::Getter(k, f) => {
                             let key = self.eval_prop_key(k, scope)?;
+                            if key.len() > MAX_RUNTIME_PROPERTY_KEY_BYTES {
+                                return Err(self.throw_err("RangeError", "Object property key exceeds 4096 bytes"));
+                            }
                             let c = self.make_closure(f, scope);
                             self.define_accessor(&o, &key, Some(c), None);
                         }
                         PropDef::Setter(k, f) => {
                             let key = self.eval_prop_key(k, scope)?;
+                            if key.len() > MAX_RUNTIME_PROPERTY_KEY_BYTES {
+                                return Err(self.throw_err("RangeError", "Object property key exceeds 4096 bytes"));
+                            }
                             let c = self.make_closure(f, scope);
                             self.define_accessor(&o, &key, None, Some(c));
                         }
                         PropDef::Spread(se) => {
                             let sv = self.eval_expr(se, scope)?;
                             for k in self.own_keys(&sv) {
+                                self.consume_execution_step()?;
+                                if k.len() > MAX_RUNTIME_PROPERTY_KEY_BYTES {
+                                    return Err(self.throw_err("RangeError", "Object property key exceeds 4096 bytes"));
+                                }
+                                let is_new = !o.borrow().props.iter().any(|(existing, _)| existing == &k);
+                                if is_new && o.borrow().props.len() >= MAX_RUNTIME_OBJECT_PROPERTIES {
+                                    return Err(self.throw_err("RangeError", "Object property limit exceeded"));
+                                }
                                 let v = self.get_prop(&sv, &k)?;
                                 self.set_own(&o, &k, v);
                             }
@@ -2254,7 +2372,7 @@ impl Interp {
                 _ => return,
             }
         };
-        for r in reactions {
+        for r in reactions.into_iter().take(MAX_MICROTASK_QUEUE.saturating_sub(self.microtasks.len())) {
             self.microtasks.push_back(Job::React(r, state, value.clone()));
         }
     }
@@ -2289,10 +2407,16 @@ impl Interp {
             }
         };
         match settled {
-            Some((st, val)) => self.microtasks.push_back(Job::React(r, st, val)),
+            Some((st, val)) => {
+                if self.microtasks.len() < MAX_MICROTASK_QUEUE {
+                    self.microtasks.push_back(Job::React(r, st, val));
+                }
+            }
             None => {
                 if let Kind::Promise(d) = &mut p.borrow_mut().kind {
-                    d.reactions.push(r);
+                    if d.reactions.len() < MAX_PROMISE_REACTIONS {
+                        d.reactions.push(r);
+                    }
                 }
             }
         }
@@ -2319,12 +2443,12 @@ impl Interp {
     }
 
     pub fn run_microtasks(&mut self) {
-        let mut guard = 0;
-        while let Some(job) = self.microtasks.pop_front() {
-            guard += 1;
-            if guard > 100_000 {
+        let mut processed = 0usize;
+        while processed < MAX_MICROTASKS_PER_TURN && self.execution_steps_left > 0 {
+            let Some(job) = self.microtasks.pop_front() else {
                 break;
-            }
+            };
+            processed += 1;
             match job {
                 Job::React(r, st, v) => self.run_reaction(r, st, v),
                 Job::Call(f, args) => {
@@ -2335,8 +2459,11 @@ impl Interp {
     }
 
     pub fn add_timer(&mut self, f: Value, delay: f64, repeat: bool, args: Vec<Value>) -> u32 {
+        if self.timers.len() >= MAX_TIMERS {
+            return 0;
+        }
         let id = self.next_timer_id;
-        self.next_timer_id += 1;
+        self.next_timer_id = self.next_timer_id.wrapping_add(1).max(1);
         let d = if delay.is_nan() || delay < 0.0 { 0.0 } else { delay };
         self.timers.push(Timer { id, due: self.now_ms + d, interval: if repeat { Some(if d < 1.0 { 1.0 } else { d }) } else { None }, f, args });
         id
@@ -2365,11 +2492,12 @@ impl Interp {
     }
 
     pub fn run_timers(&mut self, now_ms: f64, max_jobs: usize) -> usize {
+        self.reset_execution_budget();
         if now_ms > self.now_ms {
             self.now_ms = now_ms;
         }
         let mut n = 0;
-        while n < max_jobs {
+        while n < max_jobs.min(4) && self.execution_steps_left > 0 {
             let lim = self.now_ms;
             match self.pop_due_timer(lim) {
                 Some(t) => {
@@ -2403,6 +2531,7 @@ impl Interp {
     }
 
     pub fn call_global(&mut self, name: &str, args: &[Value]) -> Res<Value> {
+        self.reset_execution_budget();
         let f = self.get_own_chain(&self.global, name).unwrap_or(Value::Undefined);
         if f.is_callable() {
             self.call(&f, &Value::Undefined, args)
@@ -2421,8 +2550,7 @@ impl Interp {
             Value::Obj(o) if self.promise_state(o).is_some() => o.clone(),
             _ => return Ok(v),
         };
-        let mut spins = 0;
-        loop {
+        for _ in 0..MAX_AWAIT_PUMP_STEPS {
             self.run_microtasks();
             if let Some((st, val)) = self.promise_state(&prom) {
                 if st == 1 {
@@ -2431,11 +2559,6 @@ impl Interp {
                 if st == 2 {
                     return Err(Ctl::Throw(val));
                 }
-            }
-            spins += 1;
-            let limit = if self.pump.is_some() { 5_000_000 } else { 10_000 };
-            if spins > limit {
-                return Err(self.throw_err("Error", "await: promise never settled"));
             }
             if self.run_next_timer() {
                 continue;
@@ -2452,12 +2575,16 @@ impl Interp {
                                 return Err(Ctl::Throw(val));
                             }
                         }
-                        return Err(self.throw_err("Error", "await: promise never settled"));
+                        break;
                     }
                 }
-                None => return Err(self.throw_err("Error", "await: promise never settled")),
+                None => break,
             }
         }
+        Err(self.throw_err(
+            "Error",
+            "await: pending I/O cannot block the browser thread; use Promise.then()",
+        ))
     }
 
     pub fn inspect(&mut self, v: &Value, depth: usize) -> String {

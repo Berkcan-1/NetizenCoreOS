@@ -373,3 +373,50 @@ fn dom_prelude() {
     });
 }
 
+
+#[test]
+fn infinite_loops_are_stopped_by_the_execution_budget() {
+    let mut it = Interp::new();
+    let err = match it.run("while (true) {}") {
+        Err(err) => err,
+        Ok(_) => panic!("infinite loop was not interrupted"),
+    };
+    assert!(err.contains("execution budget"), "unexpected error: {}", err);
+}
+
+#[test]
+fn string_search_uses_linear_matching_and_preserves_replace_semantics() {
+    assert_eq!(
+        ev("'ababa'.indexOf('aba') + ':' + 'ababa'.lastIndexOf('aba') + ':' + 'ababa'.replaceAll('aba', 'X') + ':' + 'abc'.replaceAll('', '-')"),
+        "0:2:Xba:-a-b-c-"
+    );
+    assert_eq!(ev("var s = 'a'.repeat(8000); s.replaceAll('aa', 'x').length"), "4000");
+}
+
+#[test]
+fn oversized_script_builtins_and_regex_are_rejected_with_range_errors() {
+    let cases = [
+        ("new Array(70000)", "Array"),
+        ("'x'.repeat(2000000)", "String repeat"),
+        ("new RegExp('a'.repeat(5000))", "regex"),
+    ];
+    for (source, label) in cases {
+        let mut it = Interp::new();
+        let err = match it.run(source) {
+            Err(err) => err,
+            Ok(_) => panic!("{} limit did not reject oversized input", label),
+        };
+        assert!(err.contains("RangeError") || err.contains("limit") || err.contains("exceeds"), "{}: {}", label, err);
+    }
+}
+
+
+#[test]
+fn json_stringify_output_is_bounded() {
+    let mut it = Interp::new();
+    let err = match it.run("JSON.stringify(['x'.repeat(600000), 'y'.repeat(600000)])") {
+        Err(err) => err,
+        Ok(_) => panic!("oversized JSON output was not rejected"),
+    };
+    assert!(err.contains("JSON output limit") || err.contains("RangeError"), "unexpected error: {}", err);
+}

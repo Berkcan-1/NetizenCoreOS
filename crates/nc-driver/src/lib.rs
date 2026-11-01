@@ -1,14 +1,15 @@
 #![no_std]
 extern crate alloc;
 
+pub mod ac97;
 pub mod dma;
 pub mod pci;
+pub mod ps2;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use dma::virt_to_phys;
-use nc_arch::{inb, inl, outb, outl, outw};
-use pci::{enumerate_pci_bus, DeviceLifecycleState, PciBar, PciEndpoint};
+use nc_hal::{AudioOutput, PcmFormat};
+use pci::{enumerate_pci_bus, DeviceLifecycleState, PciBar, PciEndpoint, PciEcam};
 
 pub const EFRA_MAGIC: [u8; 4] = *b"EFRA";
 pub const EFRA_VERSION: u32 = 1;
@@ -64,6 +65,7 @@ impl EfraClass {
 pub enum HardwareEnvironment {
     QemuKvm,
     VirtualBox,
+    VirtualizedVirtIo,
     BareMetalPc,
 }
 
@@ -72,6 +74,7 @@ impl HardwareEnvironment {
         match self {
             HardwareEnvironment::QemuKvm => "QEMU / KVM Sanal Donanim",
             HardwareEnvironment::VirtualBox => "Oracle VirtualBox Hipervizor",
+            HardwareEnvironment::VirtualizedVirtIo => "VirtIO destekli sanal ortam (hipervizor kesin degil)",
             HardwareEnvironment::BareMetalPc => "Gercek Fiziksel PC (Bare-Metal)",
         }
     }
@@ -442,30 +445,6 @@ pub struct HardwareDeviceNode {
     pub bars: [PciBar; 6],
 }
 
-fn pci_read_32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
-    let address = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xFC);
-    unsafe {
-        outl(0xCF8, address);
-        inl(0xCFC)
-    }
-}
-
-fn pci_write_32(bus: u8, dev: u8, func: u8, offset: u8, val: u32) {
-    let address = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xFC);
-    unsafe {
-        outl(0xCF8, address);
-        outl(0xCFC, val);
-    }
-}
-
 fn classify_pci(base_class: u8, sub_class: u8) -> EfraClass {
     match (base_class, sub_class) {
         (0x03, _) => EfraClass::Display,
@@ -523,19 +502,34 @@ pub struct DriverRegistry {
 }
 
 impl DriverRegistry {
-    pub fn new() -> Self {
+    fn new_unscanned() -> Self {
         let mut reg = DriverRegistry {
             environment: HardwareEnvironment::BareMetalPc,
             drivers: Vec::new(),
             devices: Vec::new(),
             pci_endpoints: Vec::new(),
-            write_combining_active: true,
+            write_combining_active: false,
             status_log: String::from("Generic .efra surucu ve PCI/DMA tabani hazirlaniyor..."),
         };
         for pkg in builtin_efra_packages() {
             reg.drivers.push(pkg);
         }
+        reg
+    }
+
+    /// Legacy PCI configuration mechanism 1 (0xCF8/0xCFC), suitable for
+    /// conventional x86 PCs and common QEMU/VirtualBox machine profiles.
+    pub fn new() -> Self {
+        let mut reg = Self::new_unscanned();
         reg.optimize_and_scan();
+        reg
+    }
+
+    /// PCIe-native initialization after platform code has parsed ACPI MCFG
+    /// and created a UC mapping for the matching ECAM allocation.
+    pub fn new_with_ecam(ecam: &PciEcam) -> Self {
+        let mut reg = Self::new_unscanned();
+        reg.optimize_and_scan_ecam(ecam);
         reg
     }
 
@@ -549,12 +543,23 @@ impl DriverRegistry {
     }
 
     pub fn optimize_and_scan(&mut self) {
-        self.write_combining_active = true;
+        self.bind_pci_endpoints(enumerate_pci_bus());
+    }
+
+    /// Use this entry point on platforms where ACPI MCFG has already been parsed
+    /// and its ECAM range safely mapped by the memory manager.
+    pub fn optimize_and_scan_ecam(&mut self, ecam: &pci::PciEcam) {
+        self.bind_pci_endpoints(ecam.enumerate());
+    }
+
+    fn bind_pci_endpoints(&mut self, endpoints: Vec<PciEndpoint>) {
+        self.write_combining_active = false;
         self.devices.clear();
-        self.pci_endpoints = enumerate_pci_bus();
+        self.pci_endpoints = endpoints;
 
         let mut found_vbox = false;
         let mut found_qemu = false;
+        let mut found_virtio = false;
 
         let total_endpoints = self.pci_endpoints.len();
         for i in 0..total_endpoints {
@@ -570,8 +575,11 @@ impl DriverRegistry {
             if vendor_id == 0x80EE {
                 found_vbox = true;
             }
-            if vendor_id == 0x1234 || vendor_id == 0x1AF4 {
+            if vendor_id == 0x1234 {
                 found_qemu = true;
+            }
+            if vendor_id == 0x1AF4 {
+                found_virtio = true;
             }
 
             let efra_class = classify_pci(class_code, subclass);
@@ -613,45 +621,29 @@ impl DriverRegistry {
                     bound_driver_version: drv_ver,
                     driver_file: drv_file,
                     is_generic_binding: is_gen,
-                    optimized: true,
+                    // A matched EFRA package is not proof that a native driver was loaded.
+                    optimized: false,
                     lifecycle: DeviceLifecycleState::DriverMatched,
                     bars,
                 });
             }
         }
 
-        let (in_id, in_name, in_ver, in_file, in_gen) =
-            self.match_driver(EfraClass::Input, 0xFFFF, 0xFFFF, 0x09, 0x00);
-        self.devices.push(HardwareDeviceNode {
-            slot_label: String::from("ISA 0x60/0x64"),
-            hw_name: String::from("i8042 PS/2 Klavye ve Fare Denetleyicisi"),
-            vendor_id: 0x8042,
-            device_id: 0x0303,
-            pci_class: 0x09,
-            pci_subclass: 0x00,
-            prog_if: 0x00,
-            revision_id: 0x01,
-            class: EfraClass::Input,
-            bound_driver_id: in_id,
-            bound_driver_name: in_name,
-            bound_driver_version: in_ver,
-            driver_file: in_file,
-            is_generic_binding: in_gen,
-            optimized: true,
-            lifecycle: DeviceLifecycleState::Operational,
-            bars: [PciBar::None; 6],
-        });
+        // Legacy PS/2 input is provided by `ps2::Ps2Input`, but it is not listed as
+        // present/operational until the platform input layer actually polls it.
 
         self.environment = if found_vbox {
             HardwareEnvironment::VirtualBox
         } else if found_qemu {
             HardwareEnvironment::QemuKvm
+        } else if found_virtio {
+            HardwareEnvironment::VirtualizedVirtIo
         } else {
             HardwareEnvironment::BareMetalPc
         };
 
         self.status_log = alloc::format!(
-            "{} algilandi | {} PCI fonksiyonu kesfedildi (Guvenli BAR/DMA hazir).",
+            "{} | {} PCI fonksiyonu kesfedildi. Eslesme yapildi; native baslatma yalnizca aygit surucusu tarafindan dogrulanir.",
             self.environment.label(),
             self.pci_endpoints.len()
         );
@@ -758,7 +750,7 @@ impl DriverRegistry {
         );
         self.register_or_update_package(pkg.clone());
         self.status_log = alloc::format!(
-            "'{}' icin ozel {} surucusu derlendi ve etkinlestirildi.",
+            "'{}' icin {} paket tanimi olusturuldu. Bu EFRA prototipi calistirilabilir native surucu degildir.",
             self.devices[dev_index].hw_name,
             custom_file
         );
@@ -782,6 +774,17 @@ pub fn init() -> &'static mut DriverRegistry {
     }
 }
 
+pub fn init_with_ecam(ecam: &PciEcam) -> &'static mut DriverRegistry {
+    unsafe {
+        let slot = core::ptr::addr_of_mut!(GLOBAL_DRIVERS);
+        let magic = core::ptr::addr_of_mut!(DRIVERS_MAGIC);
+        core::ptr::write(slot, None);
+        core::ptr::write(slot, Some(DriverRegistry::new_with_ecam(ecam)));
+        core::ptr::write(magic, ACTIVE_MAGIC);
+        (*slot).as_mut().unwrap()
+    }
+}
+
 pub fn global() -> &'static mut DriverRegistry {
     unsafe {
         let magic = core::ptr::read_volatile(core::ptr::addr_of!(DRIVERS_MAGIC));
@@ -796,129 +799,39 @@ pub fn global() -> &'static mut DriverRegistry {
     }
 }
 
-#[repr(C, align(8))]
-#[derive(Clone, Copy)]
-struct Ac97BdlEntry {
-    addr: u32,
-    length: u16,
-    flags: u16,
-}
-
-static mut AC97_BDL: [Ac97BdlEntry; 32] = [Ac97BdlEntry { addr: 0, length: 0, flags: 0 }; 32];
-static mut AC97_PCM_BUF: [i16; 48000] = [0; 48000];
-
-/// PCI uzerinde Intel AC'97 (8086:2415) ses karti varsa gercek 48kHz polifonik sentezleyici calar,
-/// yoksa gercek anakart PIT / PC Speaker uzerinden melodiyi calar.
+/// Play a short startup sequence only through a successfully probed AC'97 device.
+/// There is deliberately no guessed-BAR, unverified-DMA or PIT timer fallback.
 pub fn play_hardware_startup_chime() {
-    unsafe {
-        // 1. PCI Bus uzerinde AC'97 Ses Denetleyicisi (Class 0x04, Subclass 0x01) ara
-        for bus in 0..=2u8 {
-            for dev in 0..32u8 {
-                let vd = pci_read_32(bus, dev, 0, 0x00);
-                let vendor = (vd & 0xFFFF) as u16;
-                if vendor == 0xFFFF || vendor == 0x0000 {
-                    continue;
-                }
-                let class_reg = pci_read_32(bus, dev, 0, 0x08);
-                let base_class = ((class_reg >> 24) & 0xFF) as u8;
-                let sub_class = ((class_reg >> 16) & 0xFF) as u8;
-
-                if base_class == 0x04 && sub_class == 0x01 {
-                    // PCI Bus Mastering + I/O Space aktif et
-                    let cmd = pci_read_32(bus, dev, 0, 0x04);
-                    pci_write_32(bus, dev, 0, 0x04, cmd | 0x05);
-
-                    let nam_bar = (pci_read_32(bus, dev, 0, 0x10) & 0xFFFE) as u16; // Mixer
-                    let nabm_bar = (pci_read_32(bus, dev, 0, 0x14) & 0xFFFE) as u16; // Bus Master
-                    if nam_bar != 0 && nabm_bar != 0 {
-                        // AC97 Reset & Ses Seviyesi (Mute kaldir, ses %100)
-                        outw(nam_bar + 0x00, 1);
-                        outl(nabm_bar + 0x2C, 0x02); // Cold Reset
-                        outw(nam_bar + 0x02, 0x0000); // Master Volume
-                        outw(nam_bar + 0x18, 0x0000); // PCM Out Volume
-                        outw(nam_bar + 0x2C, 48000);  // 48 kHz Sample Rate
-
-                        // 0.5 saniyelik harmonik akor (Do5 + Mi5 + Sol5) PCM dalgasi uret (Stereo)
-                        let notes = [523usize, 659, 784, 1046];
-                        for i in 0..24000usize {
-                            let note_idx = (i / 6000).min(3);
-                            let period = 48000 / notes[note_idx];
-                            let env = ((24000 - i) as i32 * 6000) / 24000;
-                            let sample = if (i % period) < (period / 2) { env as i16 } else { -(env as i16) };
-                            AC97_PCM_BUF[i * 2] = sample;     // Sol kanal
-                            AC97_PCM_BUF[i * 2 + 1] = sample; // Sag kanal
-                        }
-
-                        // DMA Buffer Descriptor List (BDL) ayarla
-                        let Some(pcm_phys64) = virt_to_phys(core::ptr::addr_of!(AC97_PCM_BUF) as usize) else {
-                            return;
-                        };
-                        let Some(bdl_phys64) = virt_to_phys(core::ptr::addr_of!(AC97_BDL) as usize) else {
-                            return;
-                        };
-                        if pcm_phys64 > 0xFFFF_FFFF || bdl_phys64 > 0xFFFF_FFFF {
-                            return;
-                        }
-                        let pcm_phys = pcm_phys64 as u32;
-                        let bdl_phys = bdl_phys64 as u32;
-
-                        AC97_BDL[0] = Ac97BdlEntry {
-                            addr: pcm_phys,
-                            length: 48000, // sample sayisi
-                            flags: 0x8000, // IOC
-                        };
-                        outb(nabm_bar + 0x1B, 0x02); // PCM Out Reset
-                        outl(nabm_bar + 0x10, bdl_phys); // BDL adresi
-                        outb(nabm_bar + 0x15, 0); // Last Valid Index = 0
-                        outb(nabm_bar + 0x1B, 0x01); // DMA Baslat!
-                        return;
-                    }
-                }
-            }
-        }
-
-        // 2. AC97 yoksa Bare-Metal Anakart PIT (Port 0x42/0x61) Buzzer Melodisi
-        for &(freq, loops) in &[(523u32, 45000u32), (659, 45000), (784, 55000), (1046, 90000)] {
-            let div = 1193182 / freq;
-            outb(0x43, 0xB6);
-            outb(0x42, (div & 0xFF) as u8);
-            outb(0x42, ((div >> 8) & 0xFF) as u8);
-            let tmp = inb(0x61);
-            outb(0x61, tmp | 3);
-            for _ in 0..loops {
-                let _ = inb(0x80); // IO port gecikmesi (~1us)
-            }
-        }
-        outb(0x61, inb(0x61) & 0xFC);
-    }
+    let Ok(audio) = ac97::Ac97Output::probe() else { return; };
+    play_startup_chime_on(audio);
 }
 
-pub fn set_hardware_volume(percent: u8) {
-    let pct = percent.min(100) as u16;
-    // AC97 attenuation: 0 = %100 ses, 0x1F = en dusuk, 0x8000 = Mute
-    let reg_val: u16 = if pct == 0 {
-        0x8000
-    } else {
-        let att = ((100 - pct) * 31) / 100;
-        (att << 8) | att
-    };
-    unsafe {
-        for bus in 0..=2u8 {
-            for dev in 0..32u8 {
-                let vd = pci_read_32(bus, dev, 0, 0x00);
-                if (vd & 0xFFFF) == 0xFFFF || vd == 0 {
-                    continue;
-                }
-                let class_reg = pci_read_32(bus, dev, 0, 0x08);
-                if ((class_reg >> 24) & 0xFF) == 0x04 && ((class_reg >> 16) & 0xFF) == 0x01 {
-                    let nam_bar = (pci_read_32(bus, dev, 0, 0x10) & 0xFFFE) as u16;
-                    if nam_bar != 0 {
-                        outw(nam_bar + 0x02, reg_val); // Master Volume
-                        outw(nam_bar + 0x18, reg_val); // PCM Out Volume
-                    }
-                    return;
-                }
-            }
-        }
+/// ECAM variant for platforms initialized through ACPI MCFG.
+pub fn play_hardware_startup_chime_with_ecam(ecam: &PciEcam) {
+    let Ok(audio) = ac97::Ac97Output::probe_with_ecam(ecam) else { return; };
+    play_startup_chime_on(audio);
+}
+
+fn play_startup_chime_on(mut audio: ac97::Ac97Output) {
+    if audio.configure(PcmFormat { sample_rate_hz: 48_000, channels: 2 }).is_err() {
+        return;
     }
+    let notes = [523u32, 659, 784, 1046];
+    let mut pcm = [0i16; 2048]; // 1024 stereo frames; keep kernel-stack use small.
+    for frequency in notes {
+        let period = (48_000 / frequency).max(1) as usize;
+        for frame in 0..1024usize {
+            let amplitude = if (frame % period) < (period / 2) { 4500i16 } else { -4500i16 };
+            pcm[frame * 2] = amplitude;
+            pcm[frame * 2 + 1] = amplitude;
+        }
+        if audio.write_interleaved_i16(&pcm).is_err() { break; }
+    }
+    let _ = audio.drain();
+}
+
+/// Volume control is performed on the registered `AudioOutput` instance.
+/// This legacy global helper intentionally performs no PCI scan or guessed BAR I/O.
+pub fn set_hardware_volume(_percent: u8) {
+    // Call AudioOutput::set_volume_percent on the initialized backend instead.
 }

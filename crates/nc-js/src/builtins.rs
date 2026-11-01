@@ -5,6 +5,11 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+const MAX_JS_ARRAY_LENGTH: usize = 65_536;
+const MAX_JS_COLLECTION_ITEMS: usize = 4_096;
+const MAX_JS_STRING_BYTES: usize = 1_048_576;
+const MAX_JSON_OUTPUT_BYTES: usize = 1_048_576;
+
 fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or(Value::Undefined)
 }
@@ -40,7 +45,18 @@ fn str_arg(it: &mut Interp, args: &[Value], i: usize) -> Res<String> {
 fn this_array(it: &mut Interp, this: &Value) -> Res<Vec<Value>> {
     if let Value::Obj(o) = this {
         if let Kind::Array(a) = &o.borrow().kind {
+            let copy_cost = a.len().saturating_add(255) / 256;
+            it.consume_execution_steps(copy_cost)?;
             return Ok(a.clone());
+        }
+    }
+    Err(it.type_err("not an array"))
+}
+
+fn this_array_len(it: &Interp, this: &Value) -> Res<usize> {
+    if let Value::Obj(o) = this {
+        if let Kind::Array(a) = &o.borrow().kind {
+            return Ok(a.len());
         }
     }
     Err(it.type_err("not an array"))
@@ -73,29 +89,98 @@ fn rel_opt(it: &mut Interp, args: &[Value], i: usize, len: usize, default: usize
     Ok(rel(it.to_num(&v)?, len))
 }
 
-fn chars_of(s: &str) -> Vec<char> {
-    s.chars().collect()
+fn chars_of_budgeted(it: &mut Interp, s: &str) -> Res<Vec<char>> {
+    let cost = s.len().saturating_add(255) / 256;
+    it.consume_execution_steps(cost.max(1))?;
+    Ok(s.chars().collect())
 }
 
 fn from_chars(c: &[char]) -> String {
     c.iter().collect()
 }
 
+fn string_result(it: &Interp, value: String) -> Res<Value> {
+    if value.len() > MAX_JS_STRING_BYTES {
+        return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+    }
+    Ok(Value::string(value))
+}
+
+fn repeated_padding_bytes(pad: &[char], count: usize) -> usize {
+    if pad.is_empty() || count == 0 {
+        return 0;
+    }
+    let cycle_bytes = pad.iter().fold(0usize, |n, ch| n.saturating_add(ch.len_utf8()));
+    let full = count / pad.len();
+    let rest = count % pad.len();
+    full.saturating_mul(cycle_bytes)
+        .saturating_add(pad.iter().take(rest).fold(0usize, |n, ch| n.saturating_add(ch.len_utf8())))
+}
+
+fn kmp_prefix(pattern: &[char]) -> Vec<usize> {
+    let mut prefix = vec![0; pattern.len()];
+    let mut matched = 0usize;
+    for i in 1..pattern.len() {
+        while matched > 0 && pattern[i] != pattern[matched] {
+            matched = prefix[matched - 1];
+        }
+        if pattern[i] == pattern[matched] {
+            matched += 1;
+        }
+        prefix[i] = matched;
+    }
+    prefix
+}
+
 fn find_chars(h: &[char], n: &[char], from: usize) -> Option<usize> {
     if n.is_empty() {
-        return if from <= h.len() { Some(from) } else { Some(h.len()) };
+        return Some(from.min(h.len()));
+    }
+    if n.len() > h.len() || from >= h.len() {
+        return None;
+    }
+    let prefix = kmp_prefix(n);
+    let mut matched = 0usize;
+    for (i, ch) in h.iter().enumerate().skip(from) {
+        while matched > 0 && *ch != n[matched] {
+            matched = prefix[matched - 1];
+        }
+        if *ch == n[matched] {
+            matched += 1;
+        }
+        if matched == n.len() {
+            return Some(i + 1 - n.len());
+        }
+    }
+    None
+}
+
+fn last_find_chars(h: &[char], n: &[char], from: usize) -> Option<usize> {
+    if n.is_empty() {
+        return Some(from.min(h.len()));
     }
     if n.len() > h.len() {
         return None;
     }
-    let mut i = from;
-    while i + n.len() <= h.len() {
-        if &h[i..i + n.len()] == n {
-            return Some(i);
+    let prefix = kmp_prefix(n);
+    let mut matched = 0usize;
+    let mut last = None;
+    for (i, ch) in h.iter().enumerate() {
+        while matched > 0 && *ch != n[matched] {
+            matched = prefix[matched - 1];
         }
-        i += 1;
+        if *ch == n[matched] {
+            matched += 1;
+        }
+        if matched == n.len() {
+            let start = i + 1 - n.len();
+            if start <= from {
+                last = Some(start);
+            }
+            matched = prefix[matched - 1];
+        }
     }
-    None
+    last
 }
 
 fn get_regex(v: &Value) -> Option<Rc<crate::regex::Regex>> {
@@ -151,7 +236,7 @@ fn regex_exec(it: &mut Interp, rv: &Value, s: &str) -> Res<Value> {
         (Value::Obj(o), Some(r)) => (o.clone(), r),
         _ => return Err(it.type_err("receiver is not a RegExp")),
     };
-    let chars = chars_of(s);
+    let chars = chars_of_budgeted(it, s)?;
     let use_last = re.global || re.sticky;
     let start = if use_last { last_index(it, &o) } else { 0 };
     if start > chars.len() {
@@ -189,8 +274,9 @@ fn to_regex(it: &mut Interp, v: &Value, flags: &str) -> Res<Value> {
 fn all_matches(re: &crate::regex::Regex, chars: &[char], global: bool) -> Vec<crate::regex::Caps> {
     let mut out = Vec::new();
     let mut pos = 0usize;
-    while pos <= chars.len() {
-        match re.exec_at(chars, pos) {
+    let mut budget = crate::regex::EXECUTION_STEP_LIMIT;
+    while pos <= chars.len() && out.len() < 4_096 && budget > 0 {
+        match re.exec_at_with_budget(chars, pos, &mut budget) {
             Some(c) => {
                 let (a, b) = c[0].unwrap_or((pos, pos));
                 pos = if b == a { b + 1 } else { b };
@@ -200,9 +286,6 @@ fn all_matches(re: &crate::regex::Regex, chars: &[char], global: bool) -> Vec<cr
                 }
             }
             None => break,
-        }
-        if out.len() > 200_000 {
-            break;
         }
     }
     out
@@ -294,40 +377,75 @@ fn sort_le(it: &mut Interp, cmp: &Value, a: &Value, b: &Value) -> Res<bool> {
     Ok(x <= y)
 }
 
-fn sort_values(it: &mut Interp, v: Vec<Value>, cmp: &Value) -> Res<Vec<Value>> {
-    let mut out: Vec<Value> = Vec::with_capacity(v.len());
-    for x in v {
-        let mut lo = 0usize;
-        let mut hi = out.len();
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            let m = out[mid].clone();
-            if sort_le(it, cmp, &m, &x)? {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        out.insert(lo, x);
+fn sort_values(it: &mut Interp, mut values: Vec<Value>, cmp: &Value) -> Res<Vec<Value>> {
+    if values.len() > MAX_JS_ARRAY_LENGTH {
+        return Err(it.throw_err("RangeError", "Array sort exceeds the item limit"));
     }
-    Ok(out)
+    let len = values.len();
+    let mut width = 1usize;
+    let mut scratch = values.clone();
+    while width < len {
+        let mut start = 0usize;
+        while start < len {
+            let mid = (start + width).min(len);
+            let end = (start + width.saturating_mul(2)).min(len);
+            let (mut left, mut right, mut out) = (start, mid, start);
+            while left < mid && right < end {
+                it.consume_execution_step()?;
+                if sort_le(it, cmp, &values[left], &values[right])? {
+                    scratch[out] = values[left].clone();
+                    left += 1;
+                } else {
+                    scratch[out] = values[right].clone();
+                    right += 1;
+                }
+                out += 1;
+            }
+            while left < mid {
+                scratch[out] = values[left].clone();
+                left += 1;
+                out += 1;
+            }
+            while right < end {
+                scratch[out] = values[right].clone();
+                right += 1;
+                out += 1;
+            }
+            start = end;
+        }
+        core::mem::swap(&mut values, &mut scratch);
+        width = width.saturating_mul(2);
+    }
+    Ok(values)
 }
 
 fn join_values(it: &mut Interp, items: &[Value], sep: &str) -> Res<String> {
     let mut out = String::new();
     for (i, v) in items.iter().enumerate() {
+        it.consume_execution_step()?;
         if i > 0 {
+            if out.len().saturating_add(sep.len()) > MAX_JS_STRING_BYTES {
+                return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+            }
             out.push_str(sep);
         }
         if !v.is_nullish() {
-            out.push_str(&it.to_str(v)?);
+            let part = it.to_str(v)?;
+            if out.len().saturating_add(part.len()) > MAX_JS_STRING_BYTES {
+                return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+            }
+            out.push_str(&part);
         }
     }
     Ok(out)
 }
 
-fn flatten(it: &mut Interp, items: &[Value], depth: usize, out: &mut Vec<Value>) {
+fn flatten(it: &mut Interp, items: &[Value], depth: usize, out: &mut Vec<Value>) -> Res<()> {
     for v in items {
+        it.consume_execution_step()?;
+        if out.len() >= MAX_JS_ARRAY_LENGTH {
+            return Err(it.throw_err("RangeError", "Array length limit exceeded"));
+        }
         let inner = if let Value::Obj(o) = v {
             if let Kind::Array(a) = &o.borrow().kind {
                 Some(a.clone())
@@ -338,124 +456,117 @@ fn flatten(it: &mut Interp, items: &[Value], depth: usize, out: &mut Vec<Value>)
             None
         };
         match inner {
-            Some(a) if depth > 0 => flatten(it, &a, depth - 1, out),
+            Some(a) if depth > 0 && depth <= 64 => flatten(it, &a, depth - 1, out)?,
             _ => out.push(v.clone()),
         }
     }
+    Ok(())
 }
 
 // ---------- JSON ----------
 
-fn json_quote(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
+fn json_push_str(it: &Interp, out: &mut String, value: &str) -> Res<()> {
+    if out.len().saturating_add(value.len()) > MAX_JSON_OUTPUT_BYTES {
+        return Err(it.throw_err("RangeError", "JSON output limit exceeded (1 MiB)"));
     }
-    out.push('"');
+    out.push_str(value);
+    Ok(())
 }
 
-fn json_ser(it: &mut Interp, v: &Value, ind: &str, cur: &str, out: &mut String, depth: usize) -> Res<bool> {
+fn json_push_char(it: &Interp, out: &mut String, value: char) -> Res<()> {
+    if out.len().saturating_add(value.len_utf8()) > MAX_JSON_OUTPUT_BYTES {
+        return Err(it.throw_err("RangeError", "JSON output limit exceeded (1 MiB)"));
+    }
+    out.push(value);
+    Ok(())
+}
+
+fn json_quote(it: &Interp, value: &str, out: &mut String) -> Res<()> {
+    json_push_char(it, out, '"')?;
+    for ch in value.chars() {
+        match ch {
+            '"' => json_push_str(it, out, "\\\"")?,
+            '\\' => json_push_str(it, out, "\\\\")?,
+            '\n' => json_push_str(it, out, "\\n")?,
+            '\r' => json_push_str(it, out, "\\r")?,
+            '\t' => json_push_str(it, out, "\\t")?,
+            c if (c as u32) < 0x20 => json_push_str(it, out, &format!("\\u{:04x}", c as u32))?,
+            c => json_push_char(it, out, c)?,
+        }
+    }
+    json_push_char(it, out, '"')
+}
+
+fn json_ser(it: &mut Interp, value: &Value, indent: &str, current: &str, out: &mut String, depth: usize) -> Res<bool> {
     if depth > 40 {
         return Err(it.type_err("Converting circular structure to JSON"));
     }
-    let mut v = v.clone();
-    if let Value::Obj(o) = &v {
-        if let Some(f) = it.get_own_chain(o, "toJSON") {
-            if f.is_callable() {
-                v = it.call(&f, &v, &[])?;
+    let mut value = value.clone();
+    if let Value::Obj(object) = &value {
+        if let Some(to_json) = it.get_own_chain(object, "toJSON") {
+            if to_json.is_callable() {
+                value = it.call(&to_json, &value, &[])?;
             }
         }
     }
-    match &v {
+    match &value {
         Value::Undefined => Ok(false),
-        Value::Null => {
-            out.push_str("null");
+        Value::Null => { json_push_str(it, out, "null")?; Ok(true) }
+        Value::Bool(flag) => { json_push_str(it, out, if *flag { "true" } else { "false" })?; Ok(true) }
+        Value::Num(number) => {
+            let number_text = if number.is_finite() { num_to_str(*number) } else { String::from("null") };
+            json_push_str(it, out, &number_text)?;
             Ok(true)
         }
-        Value::Bool(b) => {
-            out.push_str(if *b { "true" } else { "false" });
-            Ok(true)
-        }
-        Value::Num(n) => {
-            if n.is_finite() {
-                out.push_str(&num_to_str(*n));
+        Value::Str(text) => { json_quote(it, text, out)?; Ok(true) }
+        Value::Obj(object) => {
+            if value.is_callable() { return Ok(false); }
+            let inner = format!("{}{}", current, indent);
+            let array = if let Kind::Array(items) = &object.borrow().kind { Some(items.clone()) } else { None };
+            if let Some(items) = array {
+                json_push_char(it, out, '[')?;
+                for (index, item) in items.iter().enumerate() {
+                    it.consume_execution_step()?;
+                    if index > 0 { json_push_char(it, out, ',')?; }
+                    if !indent.is_empty() {
+                        json_push_char(it, out, '\n')?;
+                        json_push_str(it, out, &inner)?;
+                    }
+                    if !json_ser(it, item, indent, &inner, out, depth + 1)? {
+                        json_push_str(it, out, "null")?;
+                    }
+                }
+                if !items.is_empty() && !indent.is_empty() {
+                    json_push_char(it, out, '\n')?;
+                    json_push_str(it, out, current)?;
+                }
+                json_push_char(it, out, ']')?;
+                Ok(true)
             } else {
-                out.push_str("null");
-            }
-            Ok(true)
-        }
-        Value::Str(s) => {
-            json_quote(s, out);
-            Ok(true)
-        }
-        Value::Obj(o) => {
-            if v.is_callable() {
-                return Ok(false);
-            }
-            let inner = format!("{}{}", cur, ind);
-            let arr = if let Kind::Array(a) = &o.borrow().kind { Some(a.clone()) } else { None };
-            if let Some(a) = arr {
-                if a.is_empty() {
-                    out.push_str("[]");
-                    return Ok(true);
-                }
-                out.push('[');
-                for (i, x) in a.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
+                json_push_char(it, out, '{')?;
+                let mut first = true;
+                for key in it.own_keys(&value) {
+                    it.consume_execution_step()?;
+                    let property = it.get_own_chain(object, &key).unwrap_or(Value::Undefined);
+                    if matches!(property, Value::Undefined) || property.is_callable() { continue; }
+                    if !first { json_push_char(it, out, ',')?; }
+                    if !indent.is_empty() {
+                        json_push_char(it, out, '\n')?;
+                        json_push_str(it, out, &inner)?;
                     }
-                    if !ind.is_empty() {
-                        out.push('\n');
-                        out.push_str(&inner);
-                    }
-                    if !json_ser(it, x, ind, &inner, out, depth + 1)? {
-                        out.push_str("null");
-                    }
-                }
-                if !ind.is_empty() {
-                    out.push('\n');
-                    out.push_str(cur);
-                }
-                out.push(']');
-                return Ok(true);
-            }
-            out.push('{');
-            let mut first = true;
-            for k in it.own_keys(&v) {
-                let pv = it.get_own_chain(o, &k).unwrap_or(Value::Undefined);
-                let mark = out.len();
-                if !first {
-                    out.push(',');
-                }
-                if !ind.is_empty() {
-                    out.push('\n');
-                    out.push_str(&inner);
-                }
-                json_quote(&k, out);
-                out.push(':');
-                if !ind.is_empty() {
-                    out.push(' ');
-                }
-                if json_ser(it, &pv, ind, &inner, out, depth + 1)? {
+                    json_quote(it, &key, out)?;
+                    json_push_char(it, out, ':')?;
+                    if !indent.is_empty() { json_push_char(it, out, ' ')?; }
+                    json_ser(it, &property, indent, &inner, out, depth + 1)?;
                     first = false;
-                } else {
-                    out.truncate(mark);
                 }
+                if !first && !indent.is_empty() {
+                    json_push_char(it, out, '\n')?;
+                    json_push_str(it, out, current)?;
+                }
+                json_push_char(it, out, '}')?;
+                Ok(true)
             }
-            if !first && !ind.is_empty() {
-                out.push('\n');
-                out.push_str(cur);
-            }
-            out.push('}');
-            Ok(true)
         }
     }
 }
@@ -922,17 +1033,22 @@ fn setup_object(it: &mut Interp) {
         }
     }, &op);
     def(it, &oc, "keys", |it, _t, args| {
-        let keys: Vec<Value> = it.own_keys(&arg(args, 0)).into_iter().map(Value::string).collect();
+        let names = it.own_keys(&arg(args, 0));
+        it.consume_execution_steps((names.len().saturating_add(255) / 256).max(1))?;
+        let keys: Vec<Value> = names.into_iter().map(Value::string).collect();
         Ok(it.new_array(keys))
     });
     def(it, &oc, "getOwnPropertyNames", |it, _t, args| {
-        let keys: Vec<Value> = it.own_keys(&arg(args, 0)).into_iter().map(Value::string).collect();
+        let names = it.own_keys(&arg(args, 0));
+        it.consume_execution_steps((names.len().saturating_add(255) / 256).max(1))?;
+        let keys: Vec<Value> = names.into_iter().map(Value::string).collect();
         Ok(it.new_array(keys))
     });
     def(it, &oc, "values", |it, _t, args| {
         let o = arg(args, 0);
         let mut out = Vec::new();
         for k in it.own_keys(&o) {
+            it.consume_execution_step()?;
             out.push(it.get_prop(&o, &k)?);
         }
         Ok(it.new_array(out))
@@ -941,6 +1057,7 @@ fn setup_object(it: &mut Interp) {
         let o = arg(args, 0);
         let mut out = Vec::new();
         for k in it.own_keys(&o) {
+            it.consume_execution_step()?;
             let v = it.get_prop(&o, &k)?;
             let pair = it.new_array(vec![Value::string(k), v]);
             out.push(pair);
@@ -951,6 +1068,7 @@ fn setup_object(it: &mut Interp) {
         let target = arg(args, 0);
         for src in args.iter().skip(1) {
             for k in it.own_keys(src) {
+                it.consume_execution_step()?;
                 let v = it.get_prop(src, &k)?;
                 it.set_prop(&target, &k, v)?;
             }
@@ -960,9 +1078,18 @@ fn setup_object(it: &mut Interp) {
     def(it, &oc, "fromEntries", |it, _t, args| {
         let o = it.new_plain();
         for pair in it.iterate(&arg(args, 0))? {
+            it.consume_execution_step()?;
             let k = it.get_prop(&pair, "0")?;
             let v = it.get_prop(&pair, "1")?;
             let ks = it.to_key(&k)?;
+            if ks.len() > 4_096 {
+                return Err(it.throw_err("RangeError", "Object property key exceeds 4096 bytes"));
+            }
+            if !o.borrow().props.iter().any(|(existing, _)| existing == &ks)
+                && o.borrow().props.len() >= 16_384
+            {
+                return Err(it.throw_err("RangeError", "Object property limit exceeded"));
+            }
             it.set_own(&o, &ks, v);
         }
         Ok(Value::Obj(o))
@@ -1120,9 +1247,10 @@ fn setup_array(it: &mut Interp) {
     let ac = ctor(it, "Array", |it, _t, args| {
         if args.len() == 1 {
             if let Value::Num(n) = &args[0] {
-                if *n >= 0.0 && *n < 5_000_000.0 {
+                if *n >= 0.0 && *n <= MAX_JS_ARRAY_LENGTH as f64 && libm::trunc(*n) == *n {
                     return Ok(it.new_array(vec![Value::Undefined; *n as usize]));
                 }
+                return Err(it.throw_err("RangeError", "Array length exceeds the 65536 item limit"));
             }
         }
         Ok(it.new_array(args.to_vec()))
@@ -1142,9 +1270,10 @@ fn setup_array(it: &mut Interp) {
                 } else {
                     let len = it.get_prop(&src, "length")?;
                     let n = it.to_num(&len)?;
-                    let n = if n.is_nan() || n < 0.0 { 0 } else { (n as usize).min(1_000_000) };
+                    let n = if n.is_nan() || n < 0.0 { 0 } else { (n as usize).min(MAX_JS_ARRAY_LENGTH) };
                     let mut v = Vec::new();
                     for i in 0..n {
+                        it.consume_execution_step()?;
                         v.push(it.get_prop(&src, &i.to_string())?);
                     }
                     v
@@ -1153,40 +1282,61 @@ fn setup_array(it: &mut Interp) {
             Value::Str(_) => it.iterate(&src)?,
             _ => Vec::new(),
         };
+        items.truncate(MAX_JS_ARRAY_LENGTH);
         if f.is_callable() {
             for (i, x) in items.iter_mut().enumerate() {
+                it.consume_execution_step()?;
                 *x = it.call(&f, &Value::Undefined, &[x.clone(), Value::Num(i as f64)])?;
             }
         }
         Ok(it.new_array(items))
     });
 
-    def(it, &ap, "push", |_it, this, args| Ok(Value::Num(with_arr(this, |a| {
-        a.extend_from_slice(args);
-        a.len()
-    }).unwrap_or(0) as f64)));
+    def(it, &ap, "push", |it, this, args| {
+        let status = with_arr(this, |a| {
+            let available = MAX_JS_ARRAY_LENGTH.saturating_sub(a.len());
+            if args.len() > available { return (a.len(), true); }
+            a.extend_from_slice(args);
+            (a.len(), false)
+        }).unwrap_or((0, false));
+        if status.1 { return Err(it.throw_err("RangeError", "Array length limit exceeded")); }
+        Ok(Value::Num(status.0 as f64))
+    });
     def(it, &ap, "pop", |_it, this, _a| Ok(with_arr(this, |a| a.pop()).flatten().unwrap_or(Value::Undefined)));
-    def(it, &ap, "shift", |_it, this, _a| {
+    def(it, &ap, "shift", |it, this, _a| {
+        let len = this_array_len(it, this)?;
+        it.consume_execution_steps((len.saturating_add(255) / 256).max(1))?;
         Ok(with_arr(this, |a| if a.is_empty() { None } else { Some(a.remove(0)) }).flatten().unwrap_or(Value::Undefined))
     });
-    def(it, &ap, "unshift", |_it, this, args| {
-        Ok(Value::Num(with_arr(this, |a| {
+    def(it, &ap, "unshift", |it, this, args| {
+        let len = this_array_len(it, this)?;
+        it.consume_execution_steps((len.saturating_add(args.len()).saturating_add(255) / 256).max(1))?;
+        let status = with_arr(this, |a| {
+            if a.len().saturating_add(args.len()) > MAX_JS_ARRAY_LENGTH { return (a.len(), true); }
             let mut v = args.to_vec();
             v.append(a);
             *a = v;
-            a.len()
-        }).unwrap_or(0) as f64))
+            (a.len(), false)
+        }).unwrap_or((0, false));
+        if status.1 { return Err(it.throw_err("RangeError", "Array length limit exceeded")); }
+        Ok(Value::Num(status.0 as f64))
     });
     def(it, &ap, "slice", |it, this, args| {
         let a = this_array(it, this)?;
         let s = rel_opt(it, args, 0, a.len(), 0)?;
         let e = rel_opt(it, args, 1, a.len(), a.len())?;
+        if s < e { it.consume_execution_steps((e - s).saturating_add(255) / 256)?; }
         Ok(it.new_array(if s < e { a[s..e].to_vec() } else { Vec::new() }))
     });
     def(it, &ap, "splice", |it, this, args| {
         let len = this_array(it, this)?.len();
         let s = rel_opt(it, args, 0, len, 0)?;
         let dc = if args.len() < 2 { len - s } else { (num_arg(it, args, 1)?.max(0.0) as usize).min(len - s) };
+        let available = MAX_JS_ARRAY_LENGTH.saturating_sub(len - dc);
+        if args.len().saturating_sub(2) > available {
+            return Err(it.throw_err("RangeError", "Array length limit exceeded"));
+        }
+        it.consume_execution_steps((len.saturating_add(255) / 256).max(1))?;
         let ins: Vec<Value> = args.iter().skip(2).cloned().collect();
         let removed = with_arr(this, |a| a.splice(s..s + dc, ins).collect::<Vec<Value>>()).unwrap_or_default();
         Ok(it.new_array(removed))
@@ -1200,8 +1350,16 @@ fn setup_array(it: &mut Interp) {
                 None
             };
             match inner {
-                Some(v) => out.extend(v),
-                None => out.push(a.clone()),
+                Some(v) => {
+                    let available = MAX_JS_ARRAY_LENGTH.saturating_sub(out.len());
+                    if v.len() > available {
+                        return Err(it.throw_err("RangeError", "Array length limit exceeded"));
+                    }
+                    it.consume_execution_steps((v.len().saturating_add(255) / 256).max(1))?;
+                    out.extend(v);
+                }
+                None if out.len() < MAX_JS_ARRAY_LENGTH => out.push(a.clone()),
+                None => return Err(it.throw_err("RangeError", "Array length limit exceeded")),
             }
         }
         Ok(it.new_array(out))
@@ -1211,6 +1369,7 @@ fn setup_array(it: &mut Interp) {
         let t = arg(args, 0);
         let from = rel_opt(it, args, 1, a.len(), 0)?;
         for (i, x) in a.iter().enumerate().skip(from) {
+            it.consume_execution_step()?;
             if strict_eq(x, &t) {
                 return Ok(Value::Num(i as f64));
             }
@@ -1220,7 +1379,13 @@ fn setup_array(it: &mut Interp) {
     def(it, &ap, "lastIndexOf", |it, this, args| {
         let a = this_array(it, this)?;
         let t = arg(args, 0);
-        for (i, x) in a.iter().enumerate().rev() {
+        let from = if a.is_empty() {
+            0
+        } else {
+            rel_opt(it, args, 1, a.len(), a.len() - 1)?.min(a.len() - 1)
+        };
+        for (i, x) in a.iter().enumerate().take(from.saturating_add(1)).rev() {
+            it.consume_execution_step()?;
             if strict_eq(x, &t) {
                 return Ok(Value::Num(i as f64));
             }
@@ -1230,7 +1395,13 @@ fn setup_array(it: &mut Interp) {
     def(it, &ap, "includes", |it, this, args| {
         let a = this_array(it, this)?;
         let t = arg(args, 0);
-        Ok(Value::Bool(a.iter().any(|x| same_value_zero(x, &t))))
+        for x in &a {
+            it.consume_execution_step()?;
+            if same_value_zero(x, &t) {
+                return Ok(Value::Bool(true));
+            }
+        }
+        Ok(Value::Bool(false))
     });
     def(it, &ap, "join", |it, this, args| {
         let a = this_array(it, this)?;
@@ -1244,7 +1415,9 @@ fn setup_array(it: &mut Interp) {
         let a = this_array(it, this)?;
         Ok(Value::string(join_values(it, &a, ",")?))
     });
-    def(it, &ap, "reverse", |_it, this, _a| {
+    def(it, &ap, "reverse", |it, this, _a| {
+        let len = this_array_len(it, this)?;
+        it.consume_execution_steps((len.saturating_add(255) / 256).max(1))?;
         with_arr(this, |a| a.reverse());
         Ok(this.clone())
     });
@@ -1265,6 +1438,7 @@ fn setup_array(it: &mut Interp) {
         let s = rel_opt(it, args, 1, len, 0)?;
         let e = rel_opt(it, args, 2, len, len)?;
         let v = arg(args, 0);
+        it.consume_execution_steps(e.min(len).saturating_sub(s))?;
         with_arr(this, |a| {
             for i in s..e.min(a.len()) {
                 a[i] = v.clone();
@@ -1276,16 +1450,17 @@ fn setup_array(it: &mut Interp) {
         let a = this_array(it, this)?;
         let d = match arg(args, 0) {
             Value::Undefined => 1,
-            v => it.to_num(&v)?.max(0.0) as usize,
+            v => (it.to_num(&v)?.max(0.0) as usize).min(64),
         };
         let mut out = Vec::new();
-        flatten(it, &a, d, &mut out);
+        flatten(it, &a, d, &mut out)?;
         Ok(it.new_array(out))
     });
     def(it, &ap, "forEach", |it, this, args| {
         let a = this_array(it, this)?;
         let f = arg(args, 0);
         for (i, x) in a.iter().enumerate() {
+            it.consume_execution_step()?;
             it.call(&f, &arg(args, 1), &[x.clone(), Value::Num(i as f64), this.clone()])?;
         }
         Ok(Value::Undefined)
@@ -1295,6 +1470,8 @@ fn setup_array(it: &mut Interp) {
         let f = arg(args, 0);
         let mut out = Vec::with_capacity(a.len());
         for (i, x) in a.iter().enumerate() {
+            it.consume_execution_step()?;
+            if out.len() >= MAX_JS_ARRAY_LENGTH { break; }
             out.push(it.call(&f, &arg(args, 1), &[x.clone(), Value::Num(i as f64), this.clone()])?);
         }
         Ok(it.new_array(out))
@@ -1304,8 +1481,10 @@ fn setup_array(it: &mut Interp) {
         let f = arg(args, 0);
         let mut out = Vec::new();
         for (i, x) in a.iter().enumerate() {
+            it.consume_execution_step()?;
+            if out.len() >= MAX_JS_ARRAY_LENGTH { break; }
             let r = it.call(&f, &Value::Undefined, &[x.clone(), Value::Num(i as f64)])?;
-            flatten(it, &[r], 1, &mut out);
+            flatten(it, &[r], 1, &mut out)?;
         }
         Ok(it.new_array(out))
     });
@@ -1314,7 +1493,8 @@ fn setup_array(it: &mut Interp) {
         let f = arg(args, 0);
         let mut out = Vec::new();
         for (i, x) in a.iter().enumerate() {
-            if it.call(&f, &arg(args, 1), &[x.clone(), Value::Num(i as f64), this.clone()])?.truthy() {
+            it.consume_execution_step()?;
+            if out.len() < MAX_JS_ARRAY_LENGTH && it.call(&f, &arg(args, 1), &[x.clone(), Value::Num(i as f64), this.clone()])?.truthy() {
                 out.push(x.clone());
             }
         }
@@ -1324,6 +1504,7 @@ fn setup_array(it: &mut Interp) {
         let a = this_array(it, this)?;
         let f = arg(args, 0);
         for (i, x) in a.iter().enumerate() {
+            it.consume_execution_step()?;
             if it.call(&f, &Value::Undefined, &[x.clone(), Value::Num(i as f64), this.clone()])?.truthy() {
                 return Ok(x.clone());
             }
@@ -1334,6 +1515,7 @@ fn setup_array(it: &mut Interp) {
         let a = this_array(it, this)?;
         let f = arg(args, 0);
         for (i, x) in a.iter().enumerate() {
+            it.consume_execution_step()?;
             if it.call(&f, &Value::Undefined, &[x.clone(), Value::Num(i as f64), this.clone()])?.truthy() {
                 return Ok(Value::Num(i as f64));
             }
@@ -1344,6 +1526,7 @@ fn setup_array(it: &mut Interp) {
         let a = this_array(it, this)?;
         let f = arg(args, 0);
         for (i, x) in a.iter().enumerate() {
+            it.consume_execution_step()?;
             if it.call(&f, &Value::Undefined, &[x.clone(), Value::Num(i as f64), this.clone()])?.truthy() {
                 return Ok(Value::Bool(true));
             }
@@ -1354,6 +1537,7 @@ fn setup_array(it: &mut Interp) {
         let a = this_array(it, this)?;
         let f = arg(args, 0);
         for (i, x) in a.iter().enumerate() {
+            it.consume_execution_step()?;
             if !it.call(&f, &Value::Undefined, &[x.clone(), Value::Num(i as f64), this.clone()])?.truthy() {
                 return Ok(Value::Bool(false));
             }
@@ -1373,6 +1557,7 @@ fn setup_array(it: &mut Interp) {
             }
         };
         for (i, x) in iter {
+            it.consume_execution_step()?;
             acc = it.call(&f, &Value::Undefined, &[acc, x.clone(), Value::Num(i as f64), this.clone()])?;
         }
         Ok(acc)
@@ -1390,17 +1575,20 @@ fn setup_array(it: &mut Interp) {
             }
         };
         for (i, x) in iter {
+            it.consume_execution_step()?;
             acc = it.call(&f, &Value::Undefined, &[acc, x.clone(), Value::Num(i as f64), this.clone()])?;
         }
         Ok(acc)
     });
     def(it, &ap, "keys", |it, this, _a| {
         let n = this_array(it, this)?.len();
+        it.consume_execution_steps(n)?;
         Ok(it.new_array((0..n).map(|i| Value::Num(i as f64)).collect()))
     });
     def(it, &ap, "entries", |it, this, _a| {
         let a = this_array(it, this)?;
-        let mut out = Vec::new();
+        it.consume_execution_steps(a.len())?;
+        let mut out = Vec::with_capacity(a.len());
         for (i, x) in a.into_iter().enumerate() {
             let p = it.new_array(vec![Value::Num(i as f64), x]);
             out.push(p);
@@ -1423,90 +1611,105 @@ fn setup_string(it: &mut Interp) {
     }, &sp);
     def(it, &sc, "fromCharCode", |it, _t, args| {
         let mut s = String::new();
-        for i in 0..args.len() {
+        for i in 0..args.len().min(MAX_JS_STRING_BYTES) {
             let n = num_arg(it, args, i)? as u32;
-            s.push(char::from_u32(n).unwrap_or('\u{fffd}'));
+            let ch = char::from_u32(n).unwrap_or('\u{fffd}');
+            if s.len().saturating_add(ch.len_utf8()) > MAX_JS_STRING_BYTES {
+                return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+            }
+            s.push(ch);
         }
         Ok(Value::string(s))
     });
     def(it, &sc, "fromCodePoint", |it, _t, args| {
         let mut s = String::new();
-        for i in 0..args.len() {
+        for i in 0..args.len().min(MAX_JS_STRING_BYTES) {
             let n = num_arg(it, args, i)? as u32;
-            s.push(char::from_u32(n).unwrap_or('\u{fffd}'));
+            let ch = char::from_u32(n).unwrap_or('\u{fffd}');
+            if s.len().saturating_add(ch.len_utf8()) > MAX_JS_STRING_BYTES {
+                return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+            }
+            s.push(ch);
         }
         Ok(Value::string(s))
     });
     def(it, &sp, "toString", |it, this, _a| Ok(Value::string(this_str(it, this)?)));
     def(it, &sp, "valueOf", |it, this, _a| Ok(Value::string(this_str(it, this)?)));
     def(it, &sp, "charAt", |it, this, args| {
-        let c = chars_of(&this_str(it, this)?);
+        let raw = this_str(it, this)?;
+        let c = chars_of_budgeted(it, &raw)?;
         let i = num_arg(it, args, 0).unwrap_or(0.0);
         let i = if i.is_nan() { 0.0 } else { i };
         Ok(if i >= 0.0 { c.get(i as usize).map(|x| Value::string(x.to_string())).unwrap_or(Value::str("")) } else { Value::str("") })
     });
     def(it, &sp, "at", |it, this, args| {
-        let c = chars_of(&this_str(it, this)?);
+        let raw = this_str(it, this)?;
+        let c = chars_of_budgeted(it, &raw)?;
         let n = num_arg(it, args, 0)?;
         let i = if n < 0.0 { c.len() as f64 + n } else { n };
         Ok(if i >= 0.0 { c.get(i as usize).map(|x| Value::string(x.to_string())).unwrap_or(Value::Undefined) } else { Value::Undefined })
     });
     def(it, &sp, "charCodeAt", |it, this, args| {
-        let c = chars_of(&this_str(it, this)?);
+        let raw = this_str(it, this)?;
+        let c = chars_of_budgeted(it, &raw)?;
         let i = num_arg(it, args, 0).unwrap_or(0.0);
         let i = if i.is_nan() { 0.0 } else { i };
         Ok(if i >= 0.0 { c.get(i as usize).map(|x| Value::Num(*x as u32 as f64)).unwrap_or(Value::Num(f64::NAN)) } else { Value::Num(f64::NAN) })
     });
     def(it, &sp, "codePointAt", |it, this, args| {
-        let c = chars_of(&this_str(it, this)?);
+        let raw = this_str(it, this)?;
+        let c = chars_of_budgeted(it, &raw)?;
         let i = num_arg(it, args, 0).unwrap_or(0.0);
         Ok(if i >= 0.0 { c.get(i as usize).map(|x| Value::Num(*x as u32 as f64)).unwrap_or(Value::Undefined) } else { Value::Undefined })
     });
     def(it, &sp, "indexOf", |it, this, args| {
-        let h = chars_of(&this_str(it, this)?);
-        let n = chars_of(&str_arg(it, args, 0)?);
+        let haystack = this_str(it, this)?;
+        let needle = str_arg(it, args, 0)?;
+        let h = chars_of_budgeted(it, &haystack)?;
+        let n = chars_of_budgeted(it, &needle)?;
         let from = rel_opt(it, args, 1, h.len(), 0)?;
         Ok(Value::Num(find_chars(&h, &n, from).map(|x| x as f64).unwrap_or(-1.0)))
     });
     def(it, &sp, "lastIndexOf", |it, this, args| {
-        let h = chars_of(&this_str(it, this)?);
-        let n = chars_of(&str_arg(it, args, 0)?);
-        let mut last: Option<usize> = None;
-        let mut from = 0;
-        while let Some(i) = find_chars(&h, &n, from) {
-            last = Some(i);
-            from = i + 1;
-            if from > h.len() {
-                break;
-            }
-        }
-        Ok(Value::Num(last.map(|x| x as f64).unwrap_or(-1.0)))
+        let haystack = this_str(it, this)?;
+        let needle = str_arg(it, args, 0)?;
+        let h = chars_of_budgeted(it, &haystack)?;
+        let n = chars_of_budgeted(it, &needle)?;
+        let from = rel_opt(it, args, 1, h.len(), h.len())?;
+        Ok(Value::Num(last_find_chars(&h, &n, from).map(|x| x as f64).unwrap_or(-1.0)))
     });
     def(it, &sp, "includes", |it, this, args| {
-        let h = chars_of(&this_str(it, this)?);
-        let n = chars_of(&str_arg(it, args, 0)?);
+        let haystack = this_str(it, this)?;
+        let needle = str_arg(it, args, 0)?;
+        let h = chars_of_budgeted(it, &haystack)?;
+        let n = chars_of_budgeted(it, &needle)?;
         Ok(Value::Bool(find_chars(&h, &n, 0).is_some()))
     });
     def(it, &sp, "startsWith", |it, this, args| {
         let s = this_str(it, this)?;
         let n = str_arg(it, args, 0)?;
         let from = rel_opt(it, args, 1, s.chars().count(), 0)?;
-        let rest: String = s.chars().skip(from).collect();
-        Ok(Value::Bool(rest.starts_with(n.as_str())))
+        let scan_cost = s.len().saturating_add(255) / 256;
+        it.consume_execution_steps(scan_cost.max(1))?;
+        let byte_from = s.char_indices().nth(from).map(|(i, _)| i).unwrap_or(s.len());
+        Ok(Value::Bool(s.get(byte_from..).unwrap_or("").starts_with(n.as_str())))
     });
     def(it, &sp, "endsWith", |it, this, args| {
         let s = this_str(it, this)?;
         let n = str_arg(it, args, 0)?;
+        it.consume_execution_steps((s.len().saturating_add(255) / 256).max(1))?;
         Ok(Value::Bool(s.ends_with(n.as_str())))
     });
     def(it, &sp, "slice", |it, this, args| {
-        let c = chars_of(&this_str(it, this)?);
+        let raw = this_str(it, this)?;
+        let c = chars_of_budgeted(it, &raw)?;
         let s = rel_opt(it, args, 0, c.len(), 0)?;
         let e = rel_opt(it, args, 1, c.len(), c.len())?;
         Ok(Value::string(if s < e { from_chars(&c[s..e]) } else { String::new() }))
     });
     def(it, &sp, "substring", |it, this, args| {
-        let c = chars_of(&this_str(it, this)?);
+        let raw = this_str(it, this)?;
+        let c = chars_of_budgeted(it, &raw)?;
         let clamp = |n: f64| -> usize {
             if n.is_nan() || n < 0.0 {
                 0
@@ -1523,7 +1726,8 @@ fn setup_string(it: &mut Interp) {
         Ok(Value::string(from_chars(&c[s..e])))
     });
     def(it, &sp, "substr", |it, this, args| {
-        let c = chars_of(&this_str(it, this)?);
+        let raw = this_str(it, this)?;
+        let c = chars_of_budgeted(it, &raw)?;
         let s = rel_opt(it, args, 0, c.len(), 0)?;
         let n = match arg(args, 1) {
             Value::Undefined => c.len() - s,
@@ -1531,63 +1735,123 @@ fn setup_string(it: &mut Interp) {
         };
         Ok(Value::string(from_chars(&c[s..s + n])))
     });
-    def(it, &sp, "toUpperCase", |it, this, _a| Ok(Value::string(this_str(it, this)?.to_uppercase())));
-    def(it, &sp, "toLowerCase", |it, this, _a| Ok(Value::string(this_str(it, this)?.to_lowercase())));
-    def(it, &sp, "toLocaleUpperCase", |it, this, _a| Ok(Value::string(this_str(it, this)?.to_uppercase())));
-    def(it, &sp, "toLocaleLowerCase", |it, this, _a| Ok(Value::string(this_str(it, this)?.to_lowercase())));
-    def(it, &sp, "trim", |it, this, _a| Ok(Value::string(String::from(this_str(it, this)?.trim()))));
-    def(it, &sp, "trimStart", |it, this, _a| Ok(Value::string(String::from(this_str(it, this)?.trim_start()))));
-    def(it, &sp, "trimEnd", |it, this, _a| Ok(Value::string(String::from(this_str(it, this)?.trim_end()))));
+    def(it, &sp, "toUpperCase", |it, this, _a| {
+        let source = this_str(it, this)?;
+        let converted = source.to_uppercase();
+        string_result(it, converted)
+    });
+    def(it, &sp, "toLowerCase", |it, this, _a| {
+        let source = this_str(it, this)?;
+        let converted = source.to_lowercase();
+        string_result(it, converted)
+    });
+    def(it, &sp, "toLocaleUpperCase", |it, this, _a| {
+        let source = this_str(it, this)?;
+        let converted = source.to_uppercase();
+        string_result(it, converted)
+    });
+    def(it, &sp, "toLocaleLowerCase", |it, this, _a| {
+        let source = this_str(it, this)?;
+        let converted = source.to_lowercase();
+        string_result(it, converted)
+    });
+    def(it, &sp, "trim", |it, this, _a| {
+        let s = this_str(it, this)?;
+        it.consume_execution_steps((s.len().saturating_add(255) / 256).max(1))?;
+        Ok(Value::string(String::from(s.trim())))
+    });
+    def(it, &sp, "trimStart", |it, this, _a| {
+        let s = this_str(it, this)?;
+        it.consume_execution_steps((s.len().saturating_add(255) / 256).max(1))?;
+        Ok(Value::string(String::from(s.trim_start())))
+    });
+    def(it, &sp, "trimEnd", |it, this, _a| {
+        let s = this_str(it, this)?;
+        it.consume_execution_steps((s.len().saturating_add(255) / 256).max(1))?;
+        Ok(Value::string(String::from(s.trim_end())))
+    });
     def(it, &sp, "concat", |it, this, args| {
         let mut s = this_str(it, this)?;
         for i in 0..args.len() {
-            s.push_str(&str_arg(it, args, i)?);
+            let part = str_arg(it, args, i)?;
+            if s.len().saturating_add(part.len()) > MAX_JS_STRING_BYTES {
+                return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+            }
+            it.consume_execution_steps((part.len().saturating_add(255) / 256).max(1))?;
+            s.push_str(&part);
         }
         Ok(Value::string(s))
     });
     def(it, &sp, "repeat", |it, this, args| {
         let s = this_str(it, this)?;
         let n = num_arg(it, args, 0)?;
-        if n < 0.0 || n > 1_000_000.0 {
+        if n < 0.0 || n > MAX_JS_STRING_BYTES as f64 {
             return Err(it.throw_err("RangeError", "Invalid count value"));
         }
-        Ok(Value::string(s.repeat(n as usize)))
+        let count = n as usize;
+        if s.len().checked_mul(count).filter(|size| *size <= MAX_JS_STRING_BYTES).is_none() {
+            return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+        }
+        let output_bytes = s.len().saturating_mul(count);
+        it.consume_execution_steps((output_bytes.saturating_add(255) / 256).max(1))?;
+        Ok(Value::string(s.repeat(count)))
     });
     def(it, &sp, "padStart", |it, this, args| {
-        let s = chars_of(&this_str(it, this)?);
-        let n = num_arg(it, args, 0)?.max(0.0) as usize;
+        let source = this_str(it, this)?;
+        let s = chars_of_budgeted(it, &source)?;
+        let n = (num_arg(it, args, 0)?.max(0.0) as usize).min(MAX_JS_STRING_BYTES);
         let pad = match arg(args, 1) {
             Value::Undefined => vec![' '],
-            v => chars_of(&it.to_str(&v)?),
+            v => {
+                let text = it.to_str(&v)?;
+                chars_of_budgeted(it, &text)?
+            },
         };
         if pad.is_empty() || n <= s.len() {
             return Ok(Value::string(from_chars(&s)));
         }
-        let mut out: Vec<char> = Vec::new();
-        for i in 0..(n - s.len()) {
+        let needed = n - s.len();
+        let output_bytes = source.len().saturating_add(repeated_padding_bytes(&pad, needed));
+        if output_bytes > MAX_JS_STRING_BYTES {
+            return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+        }
+        it.consume_execution_steps((output_bytes.saturating_add(255) / 256).max(1))?;
+        let mut out: Vec<char> = Vec::with_capacity(n);
+        for i in 0..needed {
             out.push(pad[i % pad.len()]);
         }
         out.extend(s);
-        Ok(Value::string(from_chars(&out)))
+        string_result(it, from_chars(&out))
     });
     def(it, &sp, "padEnd", |it, this, args| {
-        let s = chars_of(&this_str(it, this)?);
-        let n = num_arg(it, args, 0)?.max(0.0) as usize;
+        let source = this_str(it, this)?;
+        let s = chars_of_budgeted(it, &source)?;
+        let n = (num_arg(it, args, 0)?.max(0.0) as usize).min(MAX_JS_STRING_BYTES);
         let pad = match arg(args, 1) {
             Value::Undefined => vec![' '],
-            v => chars_of(&it.to_str(&v)?),
+            v => {
+                let text = it.to_str(&v)?;
+                chars_of_budgeted(it, &text)?
+            },
         };
         if pad.is_empty() || n <= s.len() {
             return Ok(Value::string(from_chars(&s)));
         }
+        let needed = n - s.len();
+        let output_bytes = source.len().saturating_add(repeated_padding_bytes(&pad, needed));
+        if output_bytes > MAX_JS_STRING_BYTES {
+            return Err(it.throw_err("RangeError", "String output exceeds the 1 MiB limit"));
+        }
+        it.consume_execution_steps((output_bytes.saturating_add(255) / 256).max(1))?;
         let mut out = s.clone();
-        for i in 0..(n - s.len()) {
+        for i in 0..needed {
             out.push(pad[i % pad.len()]);
         }
-        Ok(Value::string(from_chars(&out)))
+        string_result(it, from_chars(&out))
     });
     def(it, &sp, "split", |it, this, args| {
         let s = this_str(it, this)?;
+        it.consume_execution_steps((s.len().saturating_add(255) / 256).max(1))?;
         let sep = arg(args, 0);
         let limit = match arg(args, 1) {
             Value::Undefined => usize::MAX,
@@ -1597,7 +1861,7 @@ fn setup_string(it: &mut Interp) {
         if matches!(sep, Value::Undefined) {
             parts.push(Value::string(s));
         } else if let Some(re) = get_regex(&sep) {
-            let chars = chars_of(&s);
+            let chars = chars_of_budgeted(it, &s)?;
             if chars.is_empty() {
                 if re.exec_at(&chars, 0).is_none() {
                     parts.push(Value::str(""));
@@ -1605,8 +1869,9 @@ fn setup_string(it: &mut Interp) {
             } else {
                 let mut last = 0usize;
                 let mut pos = 0usize;
-                while pos < chars.len() {
-                    match re.exec_at(&chars, pos) {
+                let mut regex_budget = crate::regex::EXECUTION_STEP_LIMIT;
+                while pos < chars.len() && parts.len() < MAX_JS_COLLECTION_ITEMS && regex_budget > 0 {
+                    match re.exec_at_with_budget(&chars, pos, &mut regex_budget) {
                         Some(c) => {
                             let (a, b) = c[0].unwrap_or((pos, pos));
                             if a >= chars.len() {
@@ -1618,6 +1883,7 @@ fn setup_string(it: &mut Interp) {
                             }
                             parts.push(Value::string(from_chars(&chars[last..a])));
                             for g in c.iter().skip(1) {
+                                if parts.len() >= MAX_JS_COLLECTION_ITEMS { break; }
                                 parts.push(cap_value(&chars, *g));
                             }
                             last = b;
@@ -1631,16 +1897,16 @@ fn setup_string(it: &mut Interp) {
         } else {
             let sp = it.to_str(&sep)?;
             if sp.is_empty() {
-                for c in s.chars() {
+                for c in s.chars().take(MAX_JS_COLLECTION_ITEMS) {
                     parts.push(Value::string(c.to_string()));
                 }
             } else {
-                for p in s.split(sp.as_str()) {
+                for p in s.split(sp.as_str()).take(MAX_JS_COLLECTION_ITEMS) {
                     parts.push(Value::str(p));
                 }
             }
         }
-        parts.truncate(limit);
+        parts.truncate(limit.min(MAX_JS_COLLECTION_ITEMS));
         Ok(it.new_array(parts))
     });
     def(it, &sp, "replace", |it, this, args| str_replace(it, this, args, false));
@@ -1661,7 +1927,7 @@ fn setup_string(it: &mut Interp) {
         if !re.global {
             return regex_exec(it, &rv, &s);
         }
-        let chars = chars_of(&s);
+        let chars = chars_of_budgeted(it, &s)?;
         let found = all_matches(&re, &chars, true);
         if let Value::Obj(o) = &rv {
             it.set_own(o, "lastIndex", Value::Num(0.0));
@@ -1679,7 +1945,7 @@ fn setup_string(it: &mut Interp) {
             Some(r) => r,
             None => return Ok(it.new_array(Vec::new())),
         };
-        let chars = chars_of(&s);
+        let chars = chars_of_budgeted(it, &s)?;
         let found = all_matches(&re, &chars, true);
         let mut out = Vec::new();
         for c in found.iter() {
@@ -1690,7 +1956,7 @@ fn setup_string(it: &mut Interp) {
     def(it, &sp, "search", |it, this, args| {
         let s = this_str(it, this)?;
         let rv = to_regex(it, &arg(args, 0), "")?;
-        let chars = chars_of(&s);
+        let chars = chars_of_budgeted(it, &s)?;
         Ok(Value::Num(match get_regex(&rv).and_then(|r| r.exec_at(&chars, 0)) {
             Some(c) => c[0].map(|x| x.0 as f64).unwrap_or(-1.0),
             None => -1.0,
@@ -1734,7 +2000,7 @@ fn setup_string(it: &mut Interp) {
 
 fn str_replace(it: &mut Interp, this: &Value, args: &[Value], all: bool) -> Res<Value> {
     let s = this_str(it, this)?;
-    let chars = chars_of(&s);
+    let chars = chars_of_budgeted(it, &s)?;
     let pat = arg(args, 0);
     let rep = arg(args, 1);
     let rep_str = if rep.is_callable() { String::new() } else { it.to_str(&rep)? };
@@ -1743,9 +2009,11 @@ fn str_replace(it: &mut Interp, this: &Value, args: &[Value], all: bool) -> Res<
     match &rx {
         Some(re) => matches = all_matches(re, &chars, re.global || all),
         None => {
-            let nd = chars_of(&it.to_str(&pat)?);
+            let pattern_text = it.to_str(&pat)?;
+            let nd = chars_of_budgeted(it, &pattern_text)?;
             let mut from = 0usize;
-            while let Some(i) = find_chars(&chars, &nd, from) {
+            while matches.len() < MAX_JS_COLLECTION_ITEMS {
+                let Some(i) = find_chars(&chars, &nd, from) else { break; };
                 matches.push(vec![Some((i, i + nd.len()))]);
                 if !all {
                     break;
@@ -1767,7 +2035,11 @@ fn str_replace(it: &mut Interp, this: &Value, args: &[Value], all: bool) -> Res<
         if a < last {
             continue;
         }
-        out.push_str(&from_chars(&chars[last..a]));
+        let prefix = from_chars(&chars[last..a]);
+        if out.len().saturating_add(prefix.len()) > MAX_JS_STRING_BYTES {
+            return Err(it.throw_err("RangeError", "String replace output exceeds the 1 MiB limit"));
+        }
+        out.push_str(&prefix);
         if rep.is_callable() {
             let mut cargs: Vec<Value> = caps.iter().map(|c| cap_value(&chars, *c)).collect();
             if cargs.is_empty() {
@@ -1776,13 +2048,25 @@ fn str_replace(it: &mut Interp, this: &Value, args: &[Value], all: bool) -> Res<
             cargs.push(Value::Num(a as f64));
             cargs.push(Value::string(s.clone()));
             let r = it.call(&rep, &Value::Undefined, &cargs)?;
-            out.push_str(&it.to_str(&r)?);
+            let replacement = it.to_str(&r)?;
+            if out.len().saturating_add(replacement.len()) > MAX_JS_STRING_BYTES {
+                return Err(it.throw_err("RangeError", "String replace output exceeds the 1 MiB limit"));
+            }
+            out.push_str(&replacement);
         } else {
-            out.push_str(&expand_template(&rep_str, &chars, caps, rx.as_deref()));
+            let replacement = expand_template(&rep_str, &chars, caps, rx.as_deref());
+            if out.len().saturating_add(replacement.len()) > MAX_JS_STRING_BYTES {
+                return Err(it.throw_err("RangeError", "String replace output exceeds the 1 MiB limit"));
+            }
+            out.push_str(&replacement);
         }
         last = b;
     }
-    out.push_str(&from_chars(&chars[last.min(chars.len())..]));
+    let suffix = from_chars(&chars[last.min(chars.len())..]);
+    if out.len().saturating_add(suffix.len()) > MAX_JS_STRING_BYTES {
+        return Err(it.throw_err("RangeError", "String replace output exceeds the 1 MiB limit"));
+    }
+    out.push_str(&suffix);
     Ok(Value::string(out))
 }
 
@@ -1970,7 +2254,7 @@ fn setup_json(it: &mut Interp) {
     def(it, &j, "stringify", |it, _t, args| {
         let ind = match arg(args, 2) {
             Value::Num(n) => " ".repeat((n.max(0.0) as usize).min(10)),
-            Value::Str(s) => String::from(&*s),
+            Value::Str(s) => s.chars().take(10).collect(),
             _ => String::new(),
         };
         let mut out = String::new();
@@ -1982,6 +2266,9 @@ fn setup_json(it: &mut Interp) {
     });
     def(it, &j, "parse", |it, _t, args| {
         let s = str_arg(it, args, 0)?;
+        if s.len() > MAX_JS_STRING_BYTES {
+            return Err(it.throw_err("RangeError", "JSON input exceeds the 1 MiB limit"));
+        }
         let mut p = JP { c: s.chars().collect(), i: 0 };
         let r = p.value(it, 0);
         match r {
@@ -1997,8 +2284,24 @@ fn setup_json(it: &mut Interp) {
     });
 }
 
-fn map_find(m: &[(Value, Value)], k: &Value) -> Option<usize> {
-    m.iter().position(|(x, _)| same_value_zero(x, k))
+fn map_find_budgeted(it: &mut Interp, m: &[(Value, Value)], k: &Value) -> Res<Option<usize>> {
+    for (i, (key, _)) in m.iter().enumerate() {
+        it.consume_execution_step()?;
+        if same_value_zero(key, k) {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
+fn set_find_budgeted(it: &mut Interp, items: &[Value], needle: &Value) -> Res<Option<usize>> {
+    for (i, item) in items.iter().enumerate() {
+        it.consume_execution_step()?;
+        if same_value_zero(item, needle) {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
 }
 
 fn setup_collections(it: &mut Interp) {
@@ -2010,10 +2313,11 @@ fn setup_collections(it: &mut Interp) {
         };
         let mut entries: Vec<(Value, Value)> = Vec::new();
         if !arg(args, 0).is_nullish() {
-            for pair in it.iterate(&arg(args, 0))? {
+            for pair in it.iterate(&arg(args, 0))?.into_iter().take(MAX_JS_COLLECTION_ITEMS) {
+                it.consume_execution_step()?;
                 let k = it.get_prop(&pair, "0")?;
                 let v = it.get_prop(&pair, "1")?;
-                match map_find(&entries, &k) {
+                match map_find_budgeted(it, &entries, &k)? {
                     Some(i) => entries[i].1 = v,
                     None => entries.push((k, v)),
                 }
@@ -2022,38 +2326,40 @@ fn setup_collections(it: &mut Interp) {
         o.borrow_mut().kind = Kind::Map(entries);
         Ok(Value::Obj(o))
     }, &mp);
-    def(it, &mp, "get", |_it, this, args| {
+    def(it, &mp, "get", |it, this, args| {
         if let Value::Obj(o) = this {
             if let Kind::Map(m) = &o.borrow().kind {
-                return Ok(map_find(m, &arg(args, 0)).map(|i| m[i].1.clone()).unwrap_or(Value::Undefined));
+                let index = map_find_budgeted(it, m, &arg(args, 0))?;
+                return Ok(index.map(|i| m[i].1.clone()).unwrap_or(Value::Undefined));
             }
         }
         Ok(Value::Undefined)
     });
-    def(it, &mp, "set", |_it, this, args| {
+    def(it, &mp, "set", |it, this, args| {
         if let Value::Obj(o) = this {
             if let Kind::Map(m) = &mut o.borrow_mut().kind {
                 let k = arg(args, 0);
-                match map_find(m, &k) {
+                match map_find_budgeted(it, m, &k)? {
                     Some(i) => m[i].1 = arg(args, 1),
-                    None => m.push((k, arg(args, 1))),
+                    None if m.len() < MAX_JS_COLLECTION_ITEMS => m.push((k, arg(args, 1))),
+                    None => return Err(it.throw_err("RangeError", "Map exceeds the 4096 entry limit")),
                 }
             }
         }
         Ok(this.clone())
     });
-    def(it, &mp, "has", |_it, this, args| {
+    def(it, &mp, "has", |it, this, args| {
         if let Value::Obj(o) = this {
             if let Kind::Map(m) = &o.borrow().kind {
-                return Ok(Value::Bool(map_find(m, &arg(args, 0)).is_some()));
+                return Ok(Value::Bool(map_find_budgeted(it, m, &arg(args, 0))?.is_some()));
             }
         }
         Ok(Value::Bool(false))
     });
-    def(it, &mp, "delete", |_it, this, args| {
+    def(it, &mp, "delete", |it, this, args| {
         if let Value::Obj(o) = this {
             if let Kind::Map(m) = &mut o.borrow_mut().kind {
-                if let Some(i) = map_find(m, &arg(args, 0)) {
+                if let Some(i) = map_find_budgeted(it, m, &arg(args, 0))? {
                     m.remove(i);
                     return Ok(Value::Bool(true));
                 }
@@ -2076,6 +2382,7 @@ fn setup_collections(it: &mut Interp) {
             Vec::new()
         };
         for (k, v) in entries {
+            it.consume_execution_step()?;
             it.call(&arg(args, 0), &Value::Undefined, &[v, k, this.clone()])?;
         }
         Ok(Value::Undefined)
@@ -2084,6 +2391,7 @@ fn setup_collections(it: &mut Interp) {
         let items = it.iterate(this)?;
         let mut out = Vec::new();
         for p in items {
+            it.consume_execution_step()?;
             out.push(it.get_prop(&p, "0")?);
         }
         Ok(it.new_array(out))
@@ -2092,12 +2400,14 @@ fn setup_collections(it: &mut Interp) {
         let items = it.iterate(this)?;
         let mut out = Vec::new();
         for p in items {
+            it.consume_execution_step()?;
             out.push(it.get_prop(&p, "1")?);
         }
         Ok(it.new_array(out))
     });
     def(it, &mp, "entries", |it, this, _a| {
         let items = it.iterate(this)?;
+        it.consume_execution_steps(items.len())?;
         Ok(it.new_array(items))
     });
 
@@ -2109,8 +2419,9 @@ fn setup_collections(it: &mut Interp) {
         };
         let mut items: Vec<Value> = Vec::new();
         if !arg(args, 0).is_nullish() {
-            for v in it.iterate(&arg(args, 0))? {
-                if !items.iter().any(|x| same_value_zero(x, &v)) {
+            for v in it.iterate(&arg(args, 0))?.into_iter().take(MAX_JS_COLLECTION_ITEMS) {
+                it.consume_execution_step()?;
+                if set_find_budgeted(it, &items, &v)?.is_none() {
                     items.push(v);
                 }
             }
@@ -2118,31 +2429,35 @@ fn setup_collections(it: &mut Interp) {
         o.borrow_mut().kind = Kind::Set(items);
         Ok(Value::Obj(o))
     }, &sp);
-    def(it, &sp, "add", |_it, this, args| {
+    def(it, &sp, "add", |it, this, args| {
         if let Value::Obj(o) = this {
             if let Kind::Set(s) = &mut o.borrow_mut().kind {
                 let v = arg(args, 0);
-                if !s.iter().any(|x| same_value_zero(x, &v)) {
+                let exists = set_find_budgeted(it, s, &v)?.is_some();
+                if !exists {
+                    if s.len() >= MAX_JS_COLLECTION_ITEMS {
+                        return Err(it.throw_err("RangeError", "Set exceeds the 4096 item limit"));
+                    }
                     s.push(v);
                 }
             }
         }
         Ok(this.clone())
     });
-    def(it, &sp, "has", |_it, this, args| {
+    def(it, &sp, "has", |it, this, args| {
         if let Value::Obj(o) = this {
             if let Kind::Set(s) = &o.borrow().kind {
                 let v = arg(args, 0);
-                return Ok(Value::Bool(s.iter().any(|x| same_value_zero(x, &v))));
+                return Ok(Value::Bool(set_find_budgeted(it, s, &v)?.is_some()));
             }
         }
         Ok(Value::Bool(false))
     });
-    def(it, &sp, "delete", |_it, this, args| {
+    def(it, &sp, "delete", |it, this, args| {
         if let Value::Obj(o) = this {
             if let Kind::Set(s) = &mut o.borrow_mut().kind {
                 let v = arg(args, 0);
-                if let Some(i) = s.iter().position(|x| same_value_zero(x, &v)) {
+                if let Some(i) = set_find_budgeted(it, s, &v)? {
                     s.remove(i);
                     return Ok(Value::Bool(true));
                 }
@@ -2161,16 +2476,19 @@ fn setup_collections(it: &mut Interp) {
     def(it, &sp, "forEach", |it, this, args| {
         let items = it.iterate(this)?;
         for v in items {
+            it.consume_execution_step()?;
             it.call(&arg(args, 0), &Value::Undefined, &[v.clone(), v, this.clone()])?;
         }
         Ok(Value::Undefined)
     });
     def(it, &sp, "values", |it, this, _a| {
         let items = it.iterate(this)?;
+        it.consume_execution_steps(items.len())?;
         Ok(it.new_array(items))
     });
     def(it, &sp, "keys", |it, this, _a| {
         let items = it.iterate(this)?;
+        it.consume_execution_steps(items.len())?;
         Ok(it.new_array(items))
     });
 }
