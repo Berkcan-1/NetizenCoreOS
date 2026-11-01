@@ -43,6 +43,10 @@ SECTIONS
         __stack_top = .;
     }
 
+    __kernel_image_end = .;
+    ASSERT((__kernel_image_end - __kernel_bin_start) <= 0x400000,
+           "kernel runtime image (.text/.data/.bss/.stack) exceeds the 4 MiB UEFI reservation")
+
     /DISCARD/ :
     {
         *(.eh_frame*)

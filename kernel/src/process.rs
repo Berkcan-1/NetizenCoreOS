@@ -1,20 +1,26 @@
 // kernel/src/process.rs
 #![allow(dead_code)]
+
 extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use nc_arch::apic::PER_CPU;
 use nc_arch::idt::{
     run_ring3_task_session, set_kernel_stack, switch_context, task_entry_trampoline,
     KernelThreadContext, UserContext, IRQ_TIMER_TICKS,
 };
-use nc_mem::{alloc_frame, free_frame, AddressSpace, PagePermissions};
+use nc_mem::{
+    alloc_frame, free_frame, retain_frame, AddressSpace, PagePermissions, PAGE_SIZE, PTE_COW,
+};
 
+use crate::ipc::{CSpace, IpcManager};
 use crate::syscall::{
-    HandleKind, Ncu1Image, ProcessHandle, STDOUT_HANDLE, STDERR_HANDLE,
-    USER_CODE_BASE, USER_DATA_BASE, USER_STACK_PAGE, USER_STACK_TOP,
+    HandleKind, Ncu1Image, ProcessHandle, STDERR_HANDLE, STDOUT_HANDLE, USER_CODE_BASE,
+    USER_DATA_BASE, USER_HEAP_BASE, USER_HEAP_MAX, USER_STACK_GUARD, USER_STACK_PAGE,
+    USER_STACK_TOP,
 };
 
 pub unsafe fn active_user_pcb() -> Option<&'static mut ProcessControlBlock> {
@@ -27,18 +33,19 @@ pub unsafe fn active_user_pcb() -> Option<&'static mut ProcessControlBlock> {
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
-pub const CAP_NONE: u32                 = 0;
-pub const CAP_SETTINGS_READ: u32        = 1 << 0;
-pub const CAP_SETTINGS_WRITE_DISP: u32  = 1 << 1;
-pub const CAP_SETTINGS_WRITE_LOCALE: u32= 1 << 2;
-pub const CAP_SETTINGS_WRITE_NET: u32   = 1 << 3;
-pub const CAP_SETTINGS_WRITE_DRV: u32   = 1 << 4;
-pub const CAP_FS_USER_READ: u32         = 1 << 5;
-pub const CAP_FS_USER_WRITE: u32        = 1 << 6;
-pub const CAP_FS_USER_DELETE: u32       = 1 << 7;
-pub const CAP_PKG_INSTALL: u32          = 1 << 8;
-pub const CAP_NET_CLIENT: u32           = 1 << 9;
-pub const CAP_KERNEL_INTERNAL: u32      = 0xFFFF_FFFF;
+pub const CAP_NONE: u32                  = 0;
+pub const CAP_SETTINGS_READ: u32         = 1 << 0;
+pub const CAP_SETTINGS_WRITE_DISP: u32   = 1 << 1;
+pub const CAP_SETTINGS_WRITE_LOCALE: u32 = 1 << 2;
+pub const CAP_SETTINGS_WRITE_NET: u32    = 1 << 3;
+pub const CAP_SETTINGS_WRITE_DRV: u32    = 1 << 4;
+pub const CAP_FS_USER_READ: u32          = 1 << 5;
+pub const CAP_FS_USER_WRITE: u32         = 1 << 6;
+pub const CAP_FS_USER_DELETE: u32        = 1 << 7;
+pub const CAP_PKG_INSTALL: u32           = 1 << 8;
+pub const CAP_NET_CLIENT: u32            = 1 << 9;
+pub const CAP_IPC_ENDPOINT: u32          = 1 << 10;
+pub const CAP_KERNEL_INTERNAL: u32       = 0xFFFF_FFFF;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TrustLevel {
@@ -80,8 +87,9 @@ impl SecurityIdentity {
             }
             "nc.browser" => CAP_NET_CLIENT | CAP_FS_USER_READ,
             "nc.system" | "nc.stopwatch" => CAP_SETTINGS_READ,
-            _ => CAP_NONE,
+            _ => CAP_IPC_ENDPOINT,
         };
+
         Self {
             app_id: String::from(app_id),
             uid: 1000,
@@ -187,6 +195,7 @@ pub enum ProcessState {
     Ready,
     Running,
     Sleeping(u64),
+    BlockedIpc(usize),
     Terminated(i32),
     Stopped,
 }
@@ -199,6 +208,7 @@ pub enum ExecutionMode {
 
 pub struct ProcessControlBlock {
     pub pid: usize,
+    pub cpu_affinity: u32,
     pub name: String,
     pub mode: ExecutionMode,
     pub identity: SecurityIdentity,
@@ -207,7 +217,12 @@ pub struct ProcessControlBlock {
     pub user_ctx: Option<UserContext>,
     pub handles: Vec<ProcessHandle>,
     pub next_handle_id: u64,
+    pub cspace: CSpace,
     pub owned_frames: Vec<u64>,
+    pub demand_heap_limit: u64,
+    pub stack_lowest_vaddr: u64,
+    pub cow_faults_resolved: u32,
+    pub demand_pages_allocated: u32,
     pub exit_code: Option<i32>,
     pub fault_vec: Option<u8>,
     pub fault_rip: u64,
@@ -231,6 +246,7 @@ impl ProcessControlBlock {
 
 pub struct ProcessManager {
     pub processes: Vec<ProcessControlBlock>,
+    pub ipc: IpcManager,
     pub current: usize,
     next_pid: usize,
 }
@@ -272,11 +288,14 @@ impl ProcessManager {
         let kernel_space = AddressSpace::current();
         let mut pm = ProcessManager {
             processes: Vec::new(),
+            ipc: IpcManager::new(),
             current: 0,
             next_pid: 1,
         };
+
         pm.processes.push(ProcessControlBlock {
             pid: 1,
+            cpu_affinity: 0,
             name: String::from("SystemCompositor"),
             mode: ExecutionMode::KernelThread,
             identity: SecurityIdentity::kernel_service("nc.kernel.compositor"),
@@ -285,7 +304,12 @@ impl ProcessManager {
             user_ctx: None,
             handles: Vec::new(),
             next_handle_id: 1,
+            cspace: CSpace::new(),
             owned_frames: Vec::new(),
+            demand_heap_limit: USER_HEAP_BASE,
+            stack_lowest_vaddr: USER_STACK_PAGE,
+            cow_faults_resolved: 0,
+            demand_pages_allocated: 0,
             exit_code: None,
             fault_vec: None,
             fault_rip: 0,
@@ -295,6 +319,7 @@ impl ProcessManager {
             kernel_stack_top: 0,
             stack: Vec::new(),
         });
+
         pm.next_pid = 2;
         pm
     }
@@ -307,13 +332,16 @@ impl ProcessManager {
     pub fn spawn(&mut self, name: &str, entry: extern "C" fn() -> !) -> usize {
         let pid = self.next_pid;
         self.next_pid += 1;
+
         let mut stack = vec![0u8; KERNEL_STACK_SIZE];
         unsafe {
             core::ptr::write_unaligned(stack.as_mut_ptr() as *mut u64, STACK_CANARY);
         }
+
         let stack_top = (stack.as_mut_ptr() as usize + KERNEL_STACK_SIZE) & !0xF;
         let ctx_ptr =
             (stack_top - core::mem::size_of::<KernelThreadContext>()) as *mut KernelThreadContext;
+
         unsafe {
             *ctx_ptr = KernelThreadContext {
                 r15: 0,
@@ -325,8 +353,10 @@ impl ProcessManager {
                 rip: task_entry_trampoline as *const () as usize as u64,
             };
         }
+
         self.processes.push(ProcessControlBlock {
             pid,
+            cpu_affinity: 0,
             name: String::from(name),
             mode: ExecutionMode::KernelThread,
             identity: SecurityIdentity::kernel_service(name),
@@ -335,7 +365,12 @@ impl ProcessManager {
             user_ctx: None,
             handles: Vec::new(),
             next_handle_id: 1,
+            cspace: CSpace::new(),
             owned_frames: Vec::new(),
+            demand_heap_limit: USER_HEAP_BASE,
+            stack_lowest_vaddr: USER_STACK_PAGE,
+            cow_faults_resolved: 0,
+            demand_pages_allocated: 0,
             exit_code: None,
             fault_vec: None,
             fault_rip: 0,
@@ -345,6 +380,7 @@ impl ProcessManager {
             kernel_stack_top: stack_top as u64,
             stack,
         });
+
         pid
     }
 
@@ -355,13 +391,18 @@ impl ProcessManager {
         raw_image: &[u8],
     ) -> Result<usize, &'static str> {
         let parsed = Ncu1Image::parse_and_verify(raw_image)?;
+        self.processes.try_reserve(1).map_err(|_| "Process tablosu icin heap yetersiz")?;
+        let mut process_name = String::new();
+        process_name.try_reserve(name.len()).map_err(|_| "Process adi icin heap yetersiz")?;
+        process_name.push_str(name);
+        let mut owned_frames = Vec::new();
+        owned_frames.try_reserve_exact(24).map_err(|_| "Process frame listesi icin heap yetersiz")?;
         let mut user_space =
             AddressSpace::create_user_space().map_err(|_| "User CR3 olusturulamadi")?;
-        let mut owned_frames = Vec::new();
         owned_frames.push(user_space.pml4_phys);
 
         let Some(code_frame) = alloc_frame() else {
-            Self::cleanup_frames(&owned_frames);
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
             return Err("Kod sayfasi icin PMM frame yetersiz");
         };
         owned_frames.push(code_frame);
@@ -376,12 +417,12 @@ impl ProcessManager {
             .map_4k(USER_CODE_BASE, code_frame, PagePermissions::USER_RX)
             .is_err()
         {
-            Self::cleanup_frames(&owned_frames);
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
             return Err("Kod sayfasi map_4k basarisiz");
         }
 
         let Some(data_frame) = alloc_frame() else {
-            Self::cleanup_frames(&owned_frames);
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
             return Err("Veri sayfasi icin PMM frame yetersiz");
         };
         owned_frames.push(data_frame);
@@ -398,12 +439,12 @@ impl ProcessManager {
             .map_4k(USER_DATA_BASE, data_frame, PagePermissions::USER_RO)
             .is_err()
         {
-            Self::cleanup_frames(&owned_frames);
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
             return Err("Veri sayfasi map_4k basarisiz");
         }
 
         let Some(stack_frame) = alloc_frame() else {
-            Self::cleanup_frames(&owned_frames);
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
             return Err("Stack sayfasi icin PMM frame yetersiz");
         };
         owned_frames.push(stack_frame);
@@ -411,13 +452,18 @@ impl ProcessManager {
             .map_4k(USER_STACK_PAGE, stack_frame, PagePermissions::USER_RW)
             .is_err()
         {
-            Self::cleanup_frames(&owned_frames);
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
             return Err("Stack sayfasi map_4k basarisiz");
         }
 
         Self::collect_user_table_frames(user_space.pml4_phys, &mut owned_frames);
 
-        let mut kstack = vec![0u8; KERNEL_STACK_SIZE];
+        let mut kstack = Vec::new();
+        if kstack.try_reserve_exact(KERNEL_STACK_SIZE).is_err() {
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
+            return Err("Kernel stack icin heap yetersiz");
+        }
+        kstack.resize(KERNEL_STACK_SIZE, 0);
         unsafe {
             core::ptr::write_unaligned(kstack.as_mut_ptr() as *mut u64, STACK_CANARY);
         }
@@ -435,6 +481,10 @@ impl ProcessManager {
         };
 
         let mut default_handles = Vec::new();
+        if default_handles.try_reserve_exact(2).is_err() {
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
+            return Err("Default handle tablosu icin heap yetersiz");
+        }
         default_handles.push(ProcessHandle {
             id: STDOUT_HANDLE,
             kind: HandleKind::ConsoleOut,
@@ -448,7 +498,8 @@ impl ProcessManager {
 
         self.processes.push(ProcessControlBlock {
             pid,
-            name: String::from(name),
+            cpu_affinity: (pid as u32) % (nc_arch::apic::DETECTED_CPU_COUNT.load(Ordering::Relaxed).max(1) as u32),
+            name: process_name,
             mode: ExecutionMode::UserProcess,
             identity,
             state: ProcessState::Ready,
@@ -456,7 +507,12 @@ impl ProcessManager {
             user_ctx: Some(uctx),
             handles: default_handles,
             next_handle_id: 3,
+            cspace: CSpace::new(),
             owned_frames,
+            demand_heap_limit: USER_HEAP_MAX,
+            stack_lowest_vaddr: USER_STACK_PAGE,
+            cow_faults_resolved: 0,
+            demand_pages_allocated: 0,
             exit_code: None,
             fault_vec: None,
             fault_rip: 0,
@@ -470,13 +526,80 @@ impl ProcessManager {
         Ok(pid)
     }
 
-    unsafe fn collect_table(table_phys: u64, level: u8, out: &mut Vec<u64>) {
+    /// Faz 5: İki süreç arasında fiziksel bir sayfayı Copy-on-Write (CoW) olarak paylaştırır.
+    pub fn share_page_cow(
+        &mut self,
+        parent_pid: usize,
+        child_pid: usize,
+        vaddr: u64,
+    ) -> Result<u64, &'static str> {
+        let page_vaddr = vaddr & !(PAGE_SIZE as u64 - 1);
+        let parent_idx = self.processes.iter().position(|p| p.pid == parent_pid).ok_or("Parent PID bulunamadi")?;
+        let child_idx = self.processes.iter().position(|p| p.pid == child_pid).ok_or("Child PID bulunamadi")?;
+        if parent_idx == child_idx {
+            return Err("Ayni surec uzerinde CoW paylasimi yapilamaz");
+        }
+
+        let phys = self.processes[parent_idx]
+            .address_space
+            .mark_4k_cow(page_vaddr)
+            .map_err(|_| "Parent sayfa CoW olarak isaretlenemedi")?;
+
+        retain_frame(phys).map_err(|_| "PMM retain_frame basarisiz")?;
+
+        if self.processes[child_idx].address_space.translate_with_flags(page_vaddr).is_some() {
+            if let Ok(old_child_phys) = self.processes[child_idx].address_space.unmap_4k(page_vaddr) {
+                if let Some(pos) = self.processes[child_idx].owned_frames.iter().position(|&f| f == old_child_phys) {
+                    self.processes[child_idx].owned_frames.remove(pos);
+                }
+                unsafe {
+                    free_frame(old_child_phys);
+                }
+            }
+        }
+
+        if self.processes[child_idx]
+            .address_space
+            .map_4k_with_extra_flags(page_vaddr, phys, PagePermissions::USER_RO, PTE_COW)
+            .is_err()
+        {
+            unsafe {
+                free_frame(phys);
+            }
+            return Err("Child sayfa CoW map_4k basarisiz");
+        }
+
+        self.processes[child_idx].owned_frames.push(phys);
+        Self::collect_user_table_frames(
+            self.processes[child_idx].address_space.pml4_phys,
+            &mut self.processes[child_idx].owned_frames,
+        );
+        Ok(phys)
+    }
+
+    pub fn add_owned_frame_to_active(&mut self, frame: u64) {
+        let pid = unsafe { ACTIVE_USER_PID };
+        if let Some(proc) = self.processes.iter_mut().find(|p| p.pid == pid) {
+            if !proc.owned_frames.contains(&frame) {
+                proc.owned_frames.push(frame);
+            }
+            Self::collect_user_table_frames(proc.address_space.pml4_phys, &mut proc.owned_frames);
+        }
+    }
+
+    fn rollback_user_spawn(pml4_phys: u64, owned_frames: &mut Vec<u64>) {
+        Self::collect_user_table_frames(pml4_phys, owned_frames);
+        Self::cleanup_frames(owned_frames);
+    }
+
+    pub unsafe fn collect_table(table_phys: u64, level: u8, out: &mut Vec<u64>) {
         if table_phys == 0 || level == 0 {
             return;
         }
         let ptr = table_phys as *const u64;
         let start_idx = if level == 4 { 1 } else { 0 };
         let end_idx = if level == 4 { 256 } else { 512 };
+
         for i in start_idx..end_idx {
             let entry = core::ptr::read_volatile(ptr.add(i));
             if (entry & 1) != 0 && (entry & (1 << 7)) == 0 {
@@ -491,7 +614,7 @@ impl ProcessManager {
         }
     }
 
-    fn collect_user_table_frames(pml4_phys: u64, out: &mut Vec<u64>) {
+    pub fn collect_user_table_frames(pml4_phys: u64, out: &mut Vec<u64>) {
         unsafe {
             Self::collect_table(pml4_phys, 4, out);
         }
@@ -520,7 +643,8 @@ impl ProcessManager {
             if self.processes[i].mode == ExecutionMode::UserProcess
                 && matches!(self.processes[i].state, ProcessState::Terminated(_))
             {
-                let proc = self.processes.remove(i);
+                let mut proc = self.processes.remove(i);
+                proc.cspace.release_all();
                 Self::cleanup_frames(&proc.owned_frames);
                 if self.current >= self.processes.len() && !self.processes.is_empty() {
                     self.current = 0;
@@ -541,6 +665,7 @@ impl ProcessManager {
         {
             return;
         }
+
         let mgr = match pm.as_mut() {
             Some(m) => m,
             None => {
@@ -548,11 +673,13 @@ impl ProcessManager {
                 return;
             }
         };
+
         let count = mgr.processes.len();
         if count <= 1 {
             IN_SCHEDULER.store(false, Ordering::Release);
             return;
         }
+
         let now_ticks = IRQ_TIMER_TICKS.load(Ordering::Relaxed);
         for proc in mgr.processes.iter_mut() {
             if !proc.check_canary() {
@@ -564,8 +691,10 @@ impl ProcessManager {
                 }
             }
         }
+
         let prev = mgr.current;
         mgr.processes[prev].ticks = mgr.processes[prev].ticks.wrapping_add(1);
+
         let mut next = (prev + 1) % count;
         let mut found = false;
         for _ in 0..count {
@@ -581,13 +710,14 @@ impl ProcessManager {
             return;
         }
 
-        // Eğer çalışan çekirdek iş parçacığı kendisiyle eşleştiyse tekrar geçiş yapma
         if next == prev && mgr.processes[prev].state == ProcessState::Running {
             IN_SCHEDULER.store(false, Ordering::Release);
             return;
         }
 
-        // Hedef süreç Ring 3 Kullanıcı Süreci ise
+        PER_CPU[0].current_pid.store(mgr.processes[next].pid, Ordering::Relaxed);
+        PER_CPU[0].ticks.fetch_add(1, Ordering::Relaxed);
+
         if mgr.processes[next].mode == ExecutionMode::UserProcess {
             let Some(uctx) = mgr.processes[next].user_ctx else {
                 IN_SCHEDULER.store(false, Ordering::Release);
@@ -595,12 +725,14 @@ impl ProcessManager {
             };
             mgr.processes[next].state = ProcessState::Running;
             mgr.current = next;
+
             ACTIVE_USER_PID = mgr.processes[next].pid;
             ACTIVE_USER_SPACE = Some(mgr.processes[next].address_space);
             ACTIVE_APP_CAPS.store(mgr.processes[next].identity.capabilities, Ordering::Release);
             set_kernel_stack(mgr.processes[next].kernel_stack_top);
 
             IN_SCHEDULER.store(false, Ordering::Release);
+
             let status = run_ring3_task_session(
                 uctx.user_rip,
                 uctx.user_rsp,
@@ -636,7 +768,6 @@ impl ProcessManager {
             return;
         }
 
-        // Ring 0 Çekirdek İş Parçacığı
         if mgr.processes[prev].state == ProcessState::Running {
             mgr.processes[prev].state = ProcessState::Ready;
         }
@@ -646,10 +777,11 @@ impl ProcessManager {
         if mgr.processes[next].kernel_stack_top != 0 {
             set_kernel_stack(mgr.processes[next].kernel_stack_top);
         }
-
         ACTIVE_APP_CAPS.store(mgr.processes[next].identity.capabilities, Ordering::Release);
+
         let old_rsp = core::ptr::addr_of_mut!(mgr.processes[prev].rsp);
         let new_rsp = mgr.processes[next].rsp;
+
         IN_SCHEDULER.store(false, Ordering::Release);
         switch_context(old_rsp, new_rsp);
     }

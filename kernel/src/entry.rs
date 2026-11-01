@@ -28,6 +28,22 @@ _start:
     or rax, 3 << 9
     mov cr4, rax
 
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb .nx_done
+    mov eax, 0x80000001
+    cpuid
+    test edx, (1 << 20)
+    jz .nx_done
+    mov ecx, 0xC0000080
+    rdmsr
+    or eax, (1 << 11)
+    wrmsr
+    rdmsr
+    test eax, (1 << 11)
+    jz .nx_done
+.nx_done:
     call kernel_main
 .Lhalt:
     cli

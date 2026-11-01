@@ -5,6 +5,7 @@ extern crate alloc;
 
 mod devices;
 mod entry;
+mod ipc;
 mod platform;
 mod prepare;
 mod process;
@@ -40,6 +41,21 @@ const ARENA_BASE: usize = 0x0080_0000;
 const FRAME_MS: u32 = 16;
 const TRANSITION_MS: u32 = 600;
 
+// Custom, non-usable BootInfo memory-region types published by nc-uefi.
+const BOOT_REGION_UEFI_INSTALL_IMAGE: u32 = 0x4E43_0003;
+const BOOT_REGION_STAGE2_IMAGE: u32 = 0x4E43_0004;
+const UEFI_INSTALL_IMAGE_MAGIC: u32 = 0x5545_4649; // "UEFI"
+
+fn find_boot_region(boot: &BootInfo, region_type: u32) -> Option<(u64, u64)> {
+    boot.memory_regions().iter().find_map(|region| {
+        if region.region_type == region_type && region.length != 0 {
+            Some((region.base, region.length))
+        } else {
+            None
+        }
+    })
+}
+
 // PAIR-028: Checked arithmetic ile guvenli Canvas olusturma
 fn new_canvas(arena: &mut Arena, width: usize, height: usize) -> Option<Canvas<'static>> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
@@ -74,15 +90,17 @@ fn detect_ram_bounds(boot: &BootInfo) -> Option<(usize, usize, usize)> {
     let mut managed_usable: u64 = 0;
     let mut best_base: u64 = ARENA_BASE as u64;
     let mut best_end: u64 = 0;
+    let mut saw_unmapped_high_ram = false;
 
     for region in boot.memory_regions() {
         if region.is_usable() {
+            let raw_end = region.base.saturating_add(region.length);
+            if raw_end > nc_mem::MAX_PHYSICAL_ADDRESS { saw_unmapped_high_ram = true; }
             let start = region.base.max(ARENA_BASE as u64);
-            let end = region.base.saturating_add(region.length).min(0xC000_0000);
+            let end = raw_end.min(nc_mem::MAX_PHYSICAL_ADDRESS);
             if end > start {
-                let len = end - start;
-                managed_usable = managed_usable.saturating_add(len);
-                if len > best_end.saturating_sub(best_base) {
+                managed_usable = managed_usable.saturating_add(end - start);
+                if end - start > best_end.saturating_sub(best_base) {
                     best_base = start;
                     best_end = end;
                 }
@@ -90,13 +108,15 @@ fn detect_ram_bounds(boot: &BootInfo) -> Option<(usize, usize, usize)> {
         }
     }
 
-    // En az 16 MB kesintisiz kullanilabilir bolge sart
-    if best_end <= best_base || (best_end - best_base) < 16 * 1024 * 1024 {
-        return None;
+    if saw_unmapped_high_ram {
+        nc_arch::serial::write_str("[PMM] 4 GiB ustu RAM bulundu fakat mevcut bootloader direct/identity map'i 4 GiB ile sinirli; bu bolge kullanilmayacak.\n");
     }
 
-    let total_mb = (managed_usable / (1024 * 1024)).max(16) as usize;
-    Some((total_mb, best_base as usize, best_end as usize))
+    // Bu boot ABI'si ve Stage2 mapping'i icin en az 16 MiB kesintisiz bolge gerekir.
+    if best_end <= best_base || best_end - best_base < 16 * 1024 * 1024 {
+        return None;
+    }
+    Some(((managed_usable / (1024 * 1024)).max(16) as usize, best_base as usize, best_end as usize))
 }
 
 fn detect_is_uefi(boot: &BootInfo) -> bool {
@@ -202,34 +222,75 @@ pub extern "C" fn kernel_main() -> ! {
         _ => halt_forever(),
     };
 
-    // Belleği UEFI'nin bildirdiği garantili kullanılabilir tabandan (usable_base) başlat
+    // Arena, PMM ve heap birbirinden ayri araliklarda tutulur. PMM birden fazla usable
+    // firmware region'ini alir; ana region'da arena ve heap icin alan korunur.
     let arena_target = canvas_bytes.saturating_mul(12).max(64 * 1024 * 1024);
-    let arena_size = arena_target.min(total_avail / 2);
+    let arena_size = arena_target.min(total_avail / 4) & !0xFFF;
     let arena_base = usable_base;
-
-    // PMM için tam 16 MiB (4096 adet 4 KiB çerçeve)
-    let pmm_base = ((usable_base + arena_size + 0xFFF) & !0xFFF) as u64;
-    let pmm_size = 16 * 1024 * 1024u64;
-    let pmm_end  = pmm_base + pmm_size;
-
+    let arena_end = match arena_base.checked_add(arena_size) { Some(v) => v, None => halt_forever() };
+    let pmm_base = match arena_end.checked_add(0xFFF) { Some(v) => v & !0xFFF, None => halt_forever() };
+    let pmm_room = usable_limit.saturating_sub(pmm_base).saturating_sub(16 * 1024 * 1024);
+    if arena_size == 0 || pmm_room < 16 * 1024 * 1024 {
+        log!(&active, "Kritik hata: Arena/PMM/heap icin yeterli kesintisiz RAM yok");
+        halt_forever();
+    }
+    let pmm_size = (pmm_room / 3).min(512 * 1024 * 1024).max(16 * 1024 * 1024) & !0xFFF;
+    let pmm_end = match pmm_base.checked_add(pmm_size) { Some(v) => v, None => halt_forever() };
     let heap_base = pmm_end as usize;
     let heap_size = usable_limit.saturating_sub(heap_base);
+    if heap_size < 16 * 1024 * 1024 {
+        log!(&active, "Kritik hata: Heap icin en az 16 MiB kesintisiz RAM yok");
+        halt_forever();
+    }
+
+    // Keep a generous bounded staging array before PMM is online. Overflow is fatal,
+    // never a silent loss of firmware-described usable memory regions.
+    let mut pmm_regions = [nc_mem::PhysicalRegion::default(); 2048];
+    let mut pmm_region_count = 0usize;
+    for region in boot.memory_regions() {
+        if !region.is_usable() { continue; }
+        let raw_end = region.base.saturating_add(region.length);
+        let region_start = region.base.max(ARENA_BASE as u64);
+        let start = region.base.max(16 * 1024 * 1024);
+        let end = raw_end.min(nc_mem::MAX_PHYSICAL_ADDRESS);
+        if end <= start { continue; }
+
+        // Best/contiguous region: only its dedicated PMM slice is given to the allocator.
+        // `MemoryRegion` stores physical addresses as u64, while the selected
+        // contiguous arena bounds are kept as usize for Arena/heap APIs. The
+        // kernel target is x86_64 and detect_ram_bounds clamps these values to
+        // MAX_PHYSICAL_ADDRESS (currently <= 4 GiB), so this conversion is safe.
+        if region_start == usable_base as u64 && end == usable_limit as u64 {
+            if pmm_end > pmm_base && pmm_region_count < pmm_regions.len() {
+                pmm_regions[pmm_region_count] = nc_mem::PhysicalRegion { start: pmm_base as u64, end: pmm_end as u64 };
+                pmm_region_count += 1;
+            }
+        } else if pmm_region_count < pmm_regions.len() {
+            // Other firmware-verified usable regions are PMM-owned, never guessed/fallback RAM.
+            pmm_regions[pmm_region_count] = nc_mem::PhysicalRegion { start, end };
+            pmm_region_count += 1;
+        } else {
+            log!(&active, "Kritik hata: PMM memory-map region limiti (2048) asildi; sessiz RAM kesilmesi engellendi");
+            halt_forever();
+        }
+    }
+
+    if pmm_region_count == 0 {
+        log!(&active, "Kritik hata: Firmware haritasinda PMM icin usable frame yok");
+        halt_forever();
+    }
 
     let mut arena = unsafe { Arena::new(arena_base, arena_size) };
     unsafe {
         ALLOCATOR.init(heap_base, heap_size);
-        nc_mem::init_pmm(pmm_base, pmm_end);
-
-        for region in boot.memory_regions() {
-            if region.is_usable() {
-                let r_start = (region.base as usize).max(ARENA_BASE);
-                let r_end = (region.base.saturating_add(region.length) as usize).min(0xC000_0000);
-                if r_end > r_start && (r_end <= usable_base || r_start >= usable_limit) {
-                    ALLOCATOR.add_region(r_start, r_end - r_start);
-                }
-            }
+        if nc_mem::init_pmm(&pmm_regions[..pmm_region_count]).is_err() {
+            log!(&active, "Kritik hata: PMM baslatilamadi; firmware memory map gecersiz veya frame yok");
+            halt_forever();
         }
     }
+    log!(&active, "Bellek: {} MiB firmware usable / PMM managed frame: {} / PMM free frame: {}",
+        total_ram_mb, nc_mem::managed_frame_count(), nc_mem::free_frame_count());
+    log!(&active, "PMM invalid/double free denemesi: {}", nc_mem::invalid_free_count());
 
     nc_arch::idt::init();
 
@@ -281,6 +342,18 @@ pub extern "C" fn kernel_main() -> ! {
         ),
         Err(e) => {
             log!(&active, "[FAZ 4 KRITIK HATA] Faz 4 sertlestirme testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    match syscall::run_phase5_modernization_suite(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 5 OK] Fast SYSCALL/SYSRET, Local APIC/SMP, Zero-Copy IPC, C-Space CapRef ve Demand Paging/CoW dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 5 KRITIK HATA] Modernizasyon testi basarisiz: {}", e);
             halt_forever();
         }
     }
@@ -482,15 +555,25 @@ pub extern "C" fn kernel_main() -> ! {
                     }
                 };
 
-                let uefi_slice = unsafe {
-                    let ptr = 0x0040_0000 as *const u8;
-                    let magic = core::ptr::read_unaligned(ptr as *const u32);
-                    let size = core::ptr::read_unaligned(ptr.add(4) as *const u32) as usize;
-                    if magic == 0x5545_4649 && size > 0 && size <= 3 * 1024 * 1024 {
-                        Some(core::slice::from_raw_parts(ptr.add(8), size))
-                    } else {
-                        None
-                    }
+                let uefi_slice = if is_uefi_system {
+                    find_boot_region(&boot, BOOT_REGION_UEFI_INSTALL_IMAGE).and_then(|(base, length)| {
+                        if length < 8 || base == 0 { return None; }
+                        unsafe {
+                            let ptr = base as *const u8;
+                            let magic = core::ptr::read_unaligned(ptr as *const u32);
+                            let size = core::ptr::read_unaligned(ptr.add(4) as *const u32) as usize;
+                            if magic == UEFI_INSTALL_IMAGE_MAGIC
+                                && size > 0
+                                && size <= length.saturating_sub(8) as usize
+                            {
+                                Some(core::slice::from_raw_parts(ptr.add(8), size))
+                            } else {
+                                None
+                            }
+                        }
+                    })
+                } else {
+                    None
                 };
 
                 // Bolum 5.3: UEFI sistemde BOOTX64.EFI yoksa kurulumu yarim birakma, hata ver
@@ -503,13 +586,23 @@ pub extern "C" fn kernel_main() -> ! {
                 }
 
                 if let Some(mut target_disk) = nc_storage::find_install_target_disk(Some(target_channel)) {
-                    let stage2_slice = unsafe { core::slice::from_raw_parts(0x8800 as *const u8, 4096) };
+                    let stage2_location = if is_uefi_system {
+                        find_boot_region(&boot, BOOT_REGION_STAGE2_IMAGE)
+                    } else {
+                        Some((0x8800, 4096))
+                    };
+                    let stage2_slice = stage2_location.and_then(|(base, length)| {
+                        if base == 0 || length < 4096 { return None; }
+                        Some(unsafe { core::slice::from_raw_parts(base as *const u8, 4096) })
+                    });
                     let kernel_bytes = unsafe {
                         (&__kernel_bin_end as *const u8 as usize)
                             .saturating_sub(&__kernel_bin_start as *const u8 as usize)
                     };
 
-                    let install_success = if kernel_bytes > 0 && kernel_bytes <= 2 * 1024 * 1024 {
+                    let install_success = if let (Some(stage2_slice), true) = (stage2_slice, kernel_bytes > 0 && kernel_bytes <= 2 * 1024 * 1024) {
+                        // UEFI reserves the linked 1 MiB kernel destination with AllocateAddress;
+                        // the legacy Stage2 contract continues to use its fixed physical address.
                         let kernel_slice = unsafe { core::slice::from_raw_parts(0x100000 as *const u8, kernel_bytes) };
                         if is_uefi_system {
                             log!(&active, "[BOOT] Kanal {} uzerine UEFI + ESP kurulumu basliyor...", target_channel);
@@ -539,7 +632,7 @@ pub extern "C" fn kernel_main() -> ! {
                         log!(&active, "Disk kurulum hatasi (Kanal {}, deneme {}/3)", target_channel, install_attempts);
                         if install_attempts >= 3 {
                             setup_state.fail_install(
-                                "Disk yazma veya MBR geri-okuma dogrulamasi 3 denemede de basarisiz oldu.",
+                                "Boot payload'i bulunamadi veya disk yazma/GPT/ESP geri-okuma dogrulamasi basarisiz oldu.",
                             );
                         }
                     }

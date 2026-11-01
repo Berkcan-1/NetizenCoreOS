@@ -8,6 +8,7 @@ members = [
     "crates/nc-math",
     "crates/nc-mem",
     "crates/nc-assets",
+    "crates/nc-media",
     "crates/nc-gfx",
     "crates/nc-font",
     "crates/nc-ui",
