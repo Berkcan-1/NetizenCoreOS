@@ -16,10 +16,19 @@ use nc_font::{text_width, Style};
 use nc_fs::{DirEntry, FileType, VfsManager};
 use nc_gfx::{lerp_color, rgb, Canvas, Rect};
 use nc_pkg::NtzcPackage;
+use nc_media::{
+    decode_jpeg_preview, decode_png_preview, inspect as inspect_media,
+    inspect_source as inspect_media_source, play_mp3, play_wav_pcm16, AudioOutput,
+    MediaError, MediaInfo, MediaKind, MediaSource,
+};
 use nc_ui::{draw_dot, draw_panel, draw_shadow, draw_text_color, text_style};
 
 const MAX_BLUR_SPAN: usize = 2048;
 const VISIBLE_ROWS: usize = 7;
+const MAX_MEDIA_READ_BYTES: u64 = 32 * 1024 * 1024;
+const IMAGE_IO_CHUNK_BYTES: usize = 256 * 1024;
+const MAX_IMAGE_PREVIEW_WIDTH: u32 = 1280;
+const MAX_IMAGE_PREVIEW_HEIGHT: u32 = 800;
 
 const PORCELAIN_BG: u32 = rgb(232, 239, 248);
 const SIDEBAR_TOP: u32 = rgb(246, 250, 255);
@@ -89,37 +98,22 @@ enum ModalState {
         scroll_line: usize,
         modified: bool,
     },
+    LoadingImage {
+        name: String,
+        path: String,
+        total_size: usize,
+        offset: usize,
+        bytes: Vec<u8>,
+    },
     ViewImage {
         name: String,
         format_label: &'static str,
         width: u32,
         height: u32,
-        theme_id: u8,
+        pixel_width: u32,
+        pixel_height: u32,
         raw_size: usize,
-        pixels: Vec<u32>, // Çözülmüş gerçek 32-bit RGB pikseller!
-    },
-    ViewAudio {
-        name: String,
-        format_label: &'static str,
-        sample_rate: u32,
-        kbps: u16,
-        duration_secs: u16,
-        playing: bool,
-        start_ms: u32,
-        elapsed_ms: u32,
-        spectrum_seed: [u8; 32],
-    },
-    ViewVideo {
-        name: String,
-        width: u16,
-        height: u16,
-        duration_secs: u16,
-        scene_id: u8,
-        playing: bool,
-        start_ms: u32,
-        elapsed_ms: u32,
-        #[allow(dead_code)]
-        frame_data: Vec<u8>,
+        pixels: Vec<u32>,
     },
     CreateFolder {
         name_buf: String,
@@ -136,6 +130,22 @@ enum ModalState {
         name: String,
         is_dir: bool,
     },
+}
+
+struct VfsMediaSource<'a> {
+    vfs: &'a mut VfsManager,
+    path: String,
+    length: u64,
+}
+
+impl<'a> MediaSource for VfsMediaSource<'a> {
+    fn len(&self) -> u64 { self.length }
+
+    fn read_at(&mut self, offset: u64, output: &mut [u8]) -> Result<usize, MediaError> {
+        self.vfs
+            .read_file_range_path(&self.path, offset, output)
+            .map_err(|_| MediaError::IoFailure)
+    }
 }
 
 pub struct FilesApp {
@@ -163,6 +173,193 @@ pub struct FilesApp {
 }
 
 impl FilesApp {
+    fn finish_image_open(&mut self, name: String, bytes: Vec<u8>) {
+        let info = match inspect_media(&bytes) {
+            Ok(info) => info,
+            Err(MediaError::UnsupportedEncoding) => {
+                self.modal = ModalState::None;
+                self.status_banner = String::from(
+                    "Gorselin bu kodlama ozelligi desteklenmiyor; dosya guvenli sekilde reddedildi.",
+                );
+                return;
+            }
+            Err(_) => {
+                self.modal = ModalState::None;
+                self.status_banner = String::from(
+                    "Gorsel imzasi, baslik veya dosya icerigi gecersiz; onizleme acilmadi.",
+                );
+                return;
+            }
+        };
+        let source_width = info.width.unwrap_or(0);
+        let source_height = info.height.unwrap_or(0);
+        let raw_size = bytes.len();
+        let decoded = match info.kind {
+            MediaKind::Bmp => decode_bmp_buffer(&bytes).map(|image| {
+                (image.pixel_width, image.pixel_height, image.pixels, "BMP")
+            }),
+            MediaKind::Png => decode_png_preview(
+                &bytes,
+                MAX_IMAGE_PREVIEW_WIDTH,
+                MAX_IMAGE_PREVIEW_HEIGHT,
+            )
+            .map(|image| {
+                let mut pixels = image.pixels_argb;
+                flatten_argb_pixels_in_place(&mut pixels, rgb(20, 26, 36));
+                (image.width, image.height, pixels, "PNG")
+            })
+            .map_err(|error| match error {
+                MediaError::ResourceLimit => "PNG onizlemesi guvenli kaynak limitini asiyor (en fazla 20 MP / 64 MiB decode, 32 MiB dosya).",
+                _ => "PNG bozuk veya desteklenmeyen bir icerige sahip.",
+            }),
+            MediaKind::Jpeg => decode_jpeg_preview(
+                &bytes,
+                MAX_IMAGE_PREVIEW_WIDTH,
+                MAX_IMAGE_PREVIEW_HEIGHT,
+            )
+            .map(|image| {
+                let mut pixels = image.pixels_argb;
+                flatten_argb_pixels_in_place(&mut pixels, rgb(20, 26, 36));
+                (image.width, image.height, pixels, "JPEG")
+            })
+            .map_err(|error| match error {
+                MediaError::ResourceLimit => "JPEG onizlemesi guvenli kaynak limitini asiyor (en fazla 20 MP / 64 MiB decode, 32 MiB dosya).",
+                _ => "JPEG bozuk veya desteklenmeyen bir icerige sahip.",
+            }),
+            _ => {
+                self.modal = ModalState::None;
+                self.status_banner = String::from("Dosya uzantisi medya icerigiyle uyusmuyor.");
+                return;
+            }
+        };
+
+        match decoded {
+            Ok((pixel_width, pixel_height, pixels, format_label)) => {
+                self.modal = ModalState::ViewImage {
+                    name,
+                    format_label: match format_label {
+                        "BMP" => "BMP (BGR raster)",
+                        "PNG" => "PNG (nopng native-format preview)",
+                        _ => "JPEG (zune RGB preview)",
+                    },
+                    width: source_width,
+                    height: source_height,
+                    pixel_width,
+                    pixel_height,
+                    raw_size,
+                    pixels,
+                };
+                self.modal_hover_primary = false;
+                self.modal_hover_secondary = false;
+                self.status_banner = String::from("Gorsel acildi.");
+            }
+            Err(message) => {
+                self.modal = ModalState::None;
+                self.status_banner = String::from(message);
+            }
+        }
+    }
+
+    /// Reads a bounded slice on each UI tick. This keeps slow disks/USB media from
+    /// holding the whole desktop in one long VFS read. Codec work still needs a
+    /// scheduler worker to become fully asynchronous (see the status report).
+    fn advance_image_load(&mut self) -> bool {
+        let mut completed: Option<(String, Vec<u8>)> = None;
+        let mut failed = false;
+        let mut changed = false;
+
+        if let ModalState::LoadingImage {
+            ref name,
+            ref path,
+            total_size,
+            ref mut offset,
+            ref mut bytes,
+        } = self.modal
+        {
+            if *offset < total_size {
+                let start = *offset;
+                let end = start.saturating_add(IMAGE_IO_CHUNK_BYTES).min(total_size);
+                match self.vfs.read_file_range_path(
+                    path,
+                    start as u64,
+                    &mut bytes[start..end],
+                ) {
+                    Ok(read) if read > 0 && read <= end - start => {
+                        *offset = offset.saturating_add(read);
+                        changed = true;
+                    }
+                    _ => failed = true,
+                }
+            }
+            if *offset >= total_size && !failed {
+                completed = Some((name.clone(), core::mem::take(bytes)));
+            }
+        }
+
+        if failed {
+            self.modal = ModalState::None;
+            self.status_banner = String::from("Gorsel dosyasi eksik okundu veya depolama hatasi olustu.");
+            return true;
+        }
+        if let Some((name, bytes)) = completed {
+            self.finish_image_open(name, bytes);
+            return true;
+        }
+        if changed {
+            if let ModalState::LoadingImage { offset, total_size, .. } = &self.modal {
+                let total_bytes = (*total_size).max(1) as u64;
+                let loaded_bytes = (*offset).min(*total_size) as u64;
+                let percent = loaded_bytes.saturating_mul(100) / total_bytes;
+                self.status_banner = alloc::format!("Gorsel okunuyor... {}%", percent);
+            }
+        }
+        changed
+    }
+
+    /// Blocking MP3/WAV playback bridge using VFS range reads.
+    /// Call from a dedicated audio worker, never from the UI/render thread.
+    /// The host supplies the initialized hardware-independent AudioOutput backend.
+    pub fn play_audio_file_blocking(
+        &mut self,
+        path: &str,
+        output: &mut impl AudioOutput,
+    ) -> Result<u64, MediaError> {
+        let stat = self.vfs.file_stat_path(path).map_err(|_| MediaError::IoFailure)?;
+        if stat.is_dir { return Err(MediaError::InvalidContainer); }
+        if stat.size == 0 { return Err(MediaError::Empty); }
+
+        let mut source = VfsMediaSource {
+            vfs: &mut self.vfs,
+            path: String::from(path),
+            length: stat.size,
+        };
+        let mut signature = [0u8; 12];
+        let read = source.read_at(0, &mut signature)?;
+        if read >= 12 && &signature[..4] == b"RIFF" && &signature[8..12] == b"WAVE" {
+            play_wav_pcm16(&mut source, output)
+        } else {
+            play_mp3(&mut source, output)
+        }
+    }
+
+    /// Reads only bounded container metadata. Large audio/video payloads are skipped
+    /// through VFS range reads instead of being copied into a Vec on the UI thread.
+    fn inspect_media_path(&mut self, path: &str) -> Result<MediaInfo, MediaError> {
+        let stat = self.vfs.file_stat_path(path).map_err(|_| MediaError::IoFailure)?;
+        if stat.is_dir {
+            return Err(MediaError::InvalidContainer);
+        }
+        if stat.size == 0 {
+            return Err(MediaError::Empty);
+        }
+        let mut source = VfsMediaSource {
+            vfs: &mut self.vfs,
+            path: String::from(path),
+            length: stat.size,
+        };
+        inspect_media_source(&mut source)
+    }
+
     pub fn new() -> FilesApp {
         let mut vfs = VfsManager::new();
         let initial_path = String::from("/data/desktop");
@@ -380,86 +577,74 @@ impl FilesApp {
             || lower_name.ends_with(".jpeg")
             || lower_name.ends_with(".bmp")
         {
-            if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
-                let (fmt_lbl, w, h, theme_id, pixels) = decode_image_buffer(&bytes, &lower_name);
-                self.modal = ModalState::ViewImage {
-                    name: entry.name,
-                    format_label: fmt_lbl,
-                    width: w,
-                    height: h,
-                    theme_id,
-                    raw_size: bytes.len(),
-                    pixels,
-                };
-                self.modal_hover_primary = false;
-                self.modal_hover_secondary = false;
-            }
-        } else if lower_name.ends_with(".mp3") || lower_name.ends_with(".wav") {
-            if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
-                let is_wav = lower_name.ends_with(".wav");
-                let fmt_lbl = if is_wav { "WAV (PCM Audio)" } else { "MP3 (MPEG-1 Layer 3)" };
-                let sample_rate = if is_wav && bytes.len() >= 28 {
-                    u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]).clamp(8000, 96000)
-                } else {
-                    44100
-                };
-                let kbps = if is_wav { 1411 } else { 320 };
-                let est_secs = ((bytes.len() as u32) / 128).clamp(12, 600) as u16;
-                let mut seed = [0u8; 32];
-                for i in 0..32 {
-                    seed[i] = bytes.get(i * (bytes.len() / 33).max(1)).copied().unwrap_or((i * 19) as u8);
+            let total_size = match usize::try_from(entry.size) {
+                Ok(size) if size > 0 && (size as u64) <= MAX_MEDIA_READ_BYTES => size,
+                Ok(0) => {
+                    self.status_banner = String::from("Gorsel dosyasi bos.");
+                    return;
                 }
-                self.modal = ModalState::ViewAudio {
-                    name: entry.name,
-                    format_label: fmt_lbl,
-                    sample_rate,
-                    kbps,
-                    duration_secs: est_secs,
-                    playing: true,
-                    start_ms: 0,
-                    elapsed_ms: 0,
-                    spectrum_seed: seed,
-                };
-                self.modal_hover_primary = false;
-                self.modal_hover_secondary = false;
+                _ => {
+                    self.status_banner = String::from(
+                        "Gorsel dosyasi 32 MiB guvenli okuma sinirini asiyor.",
+                    );
+                    return;
+                }
+            };
+            let mut bytes = Vec::new();
+            if bytes.try_reserve_exact(total_size).is_err() {
+                self.status_banner = String::from("Gorsel icin bellek ayrılamadı; sistem guvenli kaldı.");
+                return;
+            }
+            bytes.resize(total_size, 0);
+            self.modal = ModalState::LoadingImage {
+                name: entry.name,
+                path: full_path,
+                total_size,
+                offset: 0,
+                bytes,
+            };
+            self.modal_hover_primary = false;
+            self.modal_hover_secondary = false;
+            self.status_banner = String::from("Gorsel okunuyor... pencere yanit vermeye devam edecek.");
+        } else if lower_name.ends_with(".mp3") || lower_name.ends_with(".wav") {
+            match self.inspect_media_path(&full_path) {
+                Ok(info) if matches!(info.kind, MediaKind::Mp3 | MediaKind::Wav) => {
+                    let duration = info.duration_ms.unwrap_or(0);
+                    let duration_note = if info.kind == MediaKind::Mp3 { "yaklaşık" } else { "" };
+                    self.status_banner = alloc::format!(
+                        "{} başlıkları okundu: {} Hz, {} kanal, {} {:02}:{:02}. Büyük dosya içeriği RAM'e alınmadı.",
+                        info.codec,
+                        info.sample_rate.unwrap_or(0),
+                        info.channels.unwrap_or(0),
+                        duration_note,
+                        duration / 60_000,
+                        (duration / 1_000) % 60,
+                    );
+                }
+                _ => {
+                    self.status_banner = String::from(
+                        "Ses dosyası geçersiz veya desteklenmeyen bir codec içeriyor.",
+                    );
+                }
             }
         } else if lower_name.ends_with(".mp4") {
-            if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
-                let scene_id = if bytes.len() > 40 { bytes[40] } else { 0 };
-                let ticks = if bytes.len() >= 52 {
-                    u32::from_be_bytes([bytes[48], bytes[49], bytes[50], bytes[51]])
-                } else {
-                    1080
-                };
-                let dur = ((ticks / 60).max(5) as u16).min(600);
-                let w = if bytes.len() >= 54 {
-                    u16::from_be_bytes([bytes[52], bytes[53]]).clamp(160, 1920)
-                } else {
-                    320
-                };
-                let h = if bytes.len() >= 56 {
-                    u16::from_be_bytes([bytes[54], bytes[55]]).clamp(90, 1080)
-                } else {
-                    180
-                };
-                let mut fdata = Vec::new();
-                if bytes.len() > 104 {
-                    let take = (bytes.len() - 104).min(4096);
-                    fdata.extend_from_slice(&bytes[104..104 + take]);
+            match self.inspect_media_path(&full_path) {
+                Ok(info) if info.kind == MediaKind::Mp4 => {
+                    let duration = info.duration_ms.unwrap_or(0);
+                    self.status_banner = alloc::format!(
+                        "MP4 metadata okundu: {}x{}, {}, {:02}:{:02}. Video decode henüz etkin değil; medya yükü okunmadı.",
+                        info.width.unwrap_or(0),
+                        info.height.unwrap_or(0),
+                        info.codec,
+                        duration / 60_000,
+                        (duration / 1_000) % 60,
+                    );
                 }
-                self.modal = ModalState::ViewVideo {
-                    name: entry.name,
-                    width: w,
-                    height: h,
-                    duration_secs: dur,
-                    scene_id,
-                    playing: true,
-                    start_ms: 0,
-                    elapsed_ms: 0,
-                    frame_data: fdata,
-                };
-                self.modal_hover_primary = false;
-                self.modal_hover_secondary = false;
+                _ => {
+                    self.status_banner = String::from(
+                        "MP4 kutu yapısı geçersiz veya desteklenmiyor; sahte kare üretilmedi.",
+                    );
+                }
             }
         } else if let Ok(bytes) = self.vfs.read_file_path(&full_path) {
             let text_str = String::from_utf8_lossy(&bytes).into_owned();
@@ -491,8 +676,43 @@ impl FilesApp {
         self.vfs.file_stat_path(path).is_ok()
     }
 
-    // C-04: Tum alt kopyalari ve yazilan veriyi dogrula; tek bir hata bile olursa false don
-    fn copy_tree_recursive(&mut self, src: &str, dst: &str, is_dir: bool) -> bool {
+    /// Reads a file through sequential VFS ranges. The filesystem range cache can
+    /// retain its cluster position between chunks, unlike a whole-file read fallback.
+    fn read_file_for_copy(&mut self, path: &str) -> Result<Vec<u8>, nc_fs::FsError> {
+        const COPY_READ_CHUNK: usize = 256 * 1024;
+        let stat = self.vfs.file_stat_path(path)?;
+        if stat.is_dir {
+            return Err(nc_fs::FsError::NotAFile);
+        }
+        let size = usize::try_from(stat.size).map_err(|_| nc_fs::FsError::StorageFull)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size).map_err(|_| nc_fs::FsError::StorageFull)?;
+        bytes.resize(size, 0);
+        let mut offset = 0usize;
+        while offset < size {
+            let end = offset.saturating_add(COPY_READ_CHUNK).min(size);
+            let read = self.vfs.read_file_range_path(
+                path,
+                offset as u64,
+                &mut bytes[offset..end],
+            )?;
+            if read == 0 || read > end - offset {
+                return Err(nc_fs::FsError::Corrupted);
+            }
+            offset = offset.saturating_add(read);
+        }
+        Ok(bytes)
+    }
+
+    // Content verification remains mandatory for Cut/Rename before deleting the source.
+    // Plain Copy avoids an unnecessary second full disk read; committed size is checked.
+    fn copy_tree_recursive(
+        &mut self,
+        src: &str,
+        dst: &str,
+        is_dir: bool,
+        verify_content: bool,
+    ) -> bool {
         if src == dst || (is_dir && Self::is_subpath(src, dst)) {
             return false;
         }
@@ -511,23 +731,30 @@ impl FilesApp {
                     &c_src,
                     &c_dst,
                     child.file_type == FileType::Directory,
+                    verify_content,
                 ) {
                     return false;
                 }
             }
             self.vfs.list_dir_path(dst).is_ok()
         } else {
-            let bytes = match self.vfs.read_file_path(src) {
+            let bytes = match self.read_file_for_copy(src) {
                 Ok(b) => b,
                 Err(_) => return false,
             };
             if self.vfs.write_file_path(dst, &bytes).is_err() {
                 return false;
             }
-            // Yazilan dosyanin boyut ve icerigini geri okuyarak dogrula
-            match self.vfs.read_file_path(dst) {
-                Ok(verified) => verified.len() == bytes.len() && verified == bytes,
-                Err(_) => false,
+            if verify_content {
+                match self.vfs.read_file_path(dst) {
+                    Ok(verified) => verified.len() == bytes.len() && verified == bytes,
+                    Err(_) => false,
+                }
+            } else {
+                match self.vfs.file_stat_path(dst) {
+                    Ok(stat) => !stat.is_dir && stat.size == bytes.len() as u64,
+                    Err(_) => false,
+                }
             }
         }
     }
@@ -628,7 +855,12 @@ impl FilesApp {
             return;
         }
 
-        if self.copy_tree_recursive(&clip.source_path, &dst_path, clip.is_dir) {
+        if self.copy_tree_recursive(
+            &clip.source_path,
+            &dst_path,
+            clip.is_dir,
+            clip.op == ClipboardOp::Cut,
+        ) {
             if clip.op == ClipboardOp::Cut {
                 if self.remove_tree_recursive(&clip.source_path, clip.is_dir) {
                     self.clipboard = None;
@@ -1022,6 +1254,11 @@ impl App for FilesApp {
                     }
                 }
             }
+            ModalState::LoadingImage { .. } => {
+                if matches!(input.key, Some(KeyCode::Escape)) {
+                    close_modal = true;
+                }
+            }
             ModalState::ViewImage { .. } => {
                 let m_rect = Self::modal_rect(input.area, unit);
                 let btn_w = unit * 7 + unit / 2;
@@ -1044,115 +1281,6 @@ impl App for FilesApp {
                 }
             }
 
-            ModalState::ViewAudio {
-                duration_secs,
-                ref mut playing,
-                ref mut start_ms,
-                ref mut elapsed_ms,
-                ..
-            } => {
-                let total_ms = (duration_secs as u32) * 1000;
-                if *start_ms == 0 {
-                    *start_ms = ctx.uptime_ms;
-                }
-                if *playing {
-                    *elapsed_ms = ctx.uptime_ms.wrapping_sub(*start_ms) % total_ms.max(1000);
-                    redraw = true;
-                }
-                let m_rect = Self::modal_rect(input.area, unit);
-                let btn_w = unit * 7 + unit / 2;
-                let btn_h = unit * 2 + unit / 4;
-                let btn_y = m_rect.y + m_rect.height - btn_h - unit;
-                let close_btn =
-                    Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
-                let play_btn = Rect::new(close_btn.x - btn_w - unit / 2, btn_y, btn_w, btn_h);
-                if let Some(key) = input.key {
-                    if key == KeyCode::Escape {
-                        close_modal = true;
-                    } else if key == KeyCode::Space {
-                        *playing = !*playing;
-                        if *playing {
-                            *start_ms = ctx.uptime_ms.wrapping_sub(*elapsed_ms);
-                        }
-                        redraw = true;
-                    }
-                }
-                if let Some(pointer) = input.pointer {
-                    let h_close = inside(close_btn, pointer.x, pointer.y);
-                    let h_play = inside(play_btn, pointer.x, pointer.y);
-                    if h_close != self.modal_hover_primary || h_play != self.modal_hover_secondary {
-                        self.modal_hover_primary = h_close;
-                        self.modal_hover_secondary = h_play;
-                        redraw = true;
-                    }
-                    if pointer.clicked {
-                        if h_close {
-                            close_modal = true;
-                        } else if h_play {
-                            *playing = !*playing;
-                            if *playing {
-                                *start_ms = ctx.uptime_ms.wrapping_sub(*elapsed_ms);
-                            }
-                            redraw = true;
-                        }
-                    }
-                }
-            }
-
-            ModalState::ViewVideo {
-                duration_secs,
-                ref mut playing,
-                ref mut start_ms,
-                ref mut elapsed_ms,
-                ..
-            } => {
-                let total_ms = (duration_secs as u32) * 1000;
-                if *start_ms == 0 {
-                    *start_ms = ctx.uptime_ms;
-                }
-                if *playing {
-                    *elapsed_ms = ctx.uptime_ms.wrapping_sub(*start_ms) % total_ms.max(1000);
-                    redraw = true;
-                }
-                let m_rect = Self::modal_rect(input.area, unit);
-                let btn_w = unit * 7 + unit / 2;
-                let btn_h = unit * 2 + unit / 4;
-                let btn_y = m_rect.y + m_rect.height - btn_h - unit;
-                let close_btn =
-                    Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
-                let play_btn = Rect::new(close_btn.x - btn_w - unit / 2, btn_y, btn_w, btn_h);
-                if let Some(key) = input.key {
-                    if key == KeyCode::Escape {
-                        close_modal = true;
-                    } else if key == KeyCode::Space {
-                        *playing = !*playing;
-                        if *playing {
-                            *start_ms = ctx.uptime_ms.wrapping_sub(*elapsed_ms);
-                        }
-                        redraw = true;
-                    }
-                }
-                if let Some(pointer) = input.pointer {
-                    let h_close = inside(close_btn, pointer.x, pointer.y);
-                    let h_play = inside(play_btn, pointer.x, pointer.y);
-                    if h_close != self.modal_hover_primary || h_play != self.modal_hover_secondary {
-                        self.modal_hover_primary = h_close;
-                        self.modal_hover_secondary = h_play;
-                        redraw = true;
-                    }
-                    if pointer.clicked {
-                        if h_close {
-                            close_modal = true;
-                        } else if h_play {
-                            *playing = !*playing;
-                            if *playing {
-                                *start_ms = ctx.uptime_ms.wrapping_sub(*elapsed_ms);
-                            }
-                            redraw = true;
-                        }
-                    }
-                }
-            }
             ModalState::CreateFolder { ref mut name_buf } => {
                 let m_rect = Self::modal_rect(input.area, unit);
                 let btn_w = unit * 7 + unit / 2;
@@ -1391,6 +1519,12 @@ impl App for FilesApp {
             }
             self.refresh();
         }
+        if !close_modal && matches!(self.modal, ModalState::LoadingImage { .. }) {
+            if self.advance_image_load() {
+                redraw = true;
+            }
+        }
+
         if let Some(p) = action_create_dir {
             if !self.is_writable_current() {
                 self.current_path = String::from("/data/desktop");
@@ -1436,7 +1570,7 @@ impl App for FilesApp {
                         "'{}' adinda bir oge zaten mevcut; uzerine yazma engellendi.",
                         new_name
                     );
-                } else if self.copy_tree_recursive(&src, &dst, is_dir) {
+                } else if self.copy_tree_recursive(&src, &dst, is_dir, true) {
                     if self.remove_tree_recursive(&src, is_dir) {
                         self.status_banner = alloc::format!(
                             "'{}' → '{}' olarak yeniden adlandırıldı",
@@ -2660,12 +2794,74 @@ impl App for FilesApp {
                     can_edit,
                 );
             }
+            ModalState::LoadingImage {
+                ref name,
+                total_size,
+                offset,
+                ..
+            } => {
+                let m_rect = Self::modal_rect(area, unit);
+                draw_frosted_modal(canvas, m_rect, unit);
+                let title = alloc::format!("Görsel açılıyor · {}", name);
+                draw_text_color(
+                    canvas,
+                    &title,
+                    m_rect.x + unit * 3 / 2,
+                    m_rect.y + unit * 2,
+                    &title_style,
+                    INK_PRIMARY,
+                );
+                // `match self.modal` copies these `usize` fields because they are `Copy`.
+                // Unlike the `&self.modal` match in `advance_image_load`, these are values.
+                let total_bytes = total_size.max(1) as u64;
+                let loaded_bytes = offset.min(total_size) as u64;
+                let percent = loaded_bytes.saturating_mul(100) / total_bytes;
+                let status = alloc::format!("Dosya okunuyor: {}%", percent);
+                draw_text_color(
+                    canvas,
+                    &status,
+                    m_rect.x + unit * 3 / 2,
+                    m_rect.y + unit * 4,
+                    &cap_style,
+                    INK_SECONDARY,
+                );
+                let bar = Rect::new(
+                    m_rect.x + unit * 3 / 2,
+                    m_rect.y + unit * 6,
+                    m_rect.width - unit * 3,
+                    (unit / 2).max(5),
+                );
+                draw_rounded_surface(
+                    canvas,
+                    bar,
+                    bar.height / 2,
+                    SURFACE_ALT,
+                    SURFACE_ALT,
+                    255,
+                    BORDER_SOFT,
+                    false,
+                );
+                let filled = ((bar.width.max(0) as u64).saturating_mul(loaded_bytes)
+                    / total_bytes) as i32;
+                if filled > 0 {
+                    canvas.fill_rect(bar.x, bar.y, filled.min(bar.width), bar.height, AZURE_BRIGHT);
+                }
+                draw_text_color(
+                    canvas,
+                    "ESC: iptal",
+                    m_rect.x + unit * 3 / 2,
+                    m_rect.y + unit * 8,
+                    &cap_style,
+                    INK_MUTED,
+                );
+            }
             ModalState::ViewImage {
                 ref name,
                 format_label,
                 width,
                 height,
-                theme_id,
+                pixel_width,
+                pixel_height,
                 raw_size,
                 ref pixels,
             } => {
@@ -2704,312 +2900,40 @@ impl App for FilesApp {
                     m_rect.width - unit * 4,
                     m_rect.height - unit * 8,
                 );
-                // Eğer gerçek piksel tamponu çözüldüyse doğrudan ölçekleyerek ekrana çiz!
-                if !pixels.is_empty() && width > 0 && height > 0 {
-                    draw_rounded_surface(
-                        canvas,
-                        view_r,
-                        unit / 3,
-                        rgb(20, 26, 36),
-                        rgb(14, 18, 26),
-                        255,
-                        AZURE_BRIGHT,
-                        false,
-                    );
-                    let pad = 6;
-                    let dst_w = (view_r.width - pad * 2).max(1);
-                    let dst_h = (view_r.height - pad * 2).max(1);
-                    for dy in 0..dst_h {
-                        let sy = ((dy as u32) * height / (dst_h as u32)).min(height - 1) as usize;
-                        for dx in 0..dst_w {
-                            let sx = ((dx as u32) * width / (dst_w as u32)).min(width - 1) as usize;
-                            let idx = sy * (width as usize) + sx;
-                            if idx < pixels.len() {
-                                canvas.fill_rect(
-                                    view_r.x + pad + dx,
-                                    view_r.y + pad + dy,
-                                    1,
-                                    1,
-                                    pixels[idx],
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    let (c_top, c_bot) = if theme_id == 0 {
-                        (rgb(18, 88, 178), rgb(22, 174, 158))
-                    } else {
-                        (rgb(44, 48, 128), rgb(168, 64, 122))
-                    };
-                    draw_rounded_surface(
-                        canvas,
-                        view_r,
-                        unit / 2,
-                        c_top,
-                        c_bot,
-                        255,
-                        AZURE_BRIGHT,
-                        true,
-                    );
-                }
-                let btn_w = unit * 7 + unit / 2;
-                let btn_h = unit * 2 + unit / 4;
-                let btn_y = m_rect.y + m_rect.height - btn_h - unit;
-                let close_btn =
-                    Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
-                draw_aero_pill_button(
-                    canvas,
-                    close_btn,
-                    "Kapat",
-                    self.modal_hover_primary,
-                    true,
-                    true,
-                );
-            }
-            ModalState::ViewAudio {
-                ref name,
-                format_label,
-                sample_rate,
-                kbps,
-                duration_secs,
-                playing,
-                elapsed_ms,
-                ref spectrum_seed,
-                ..
-            } => {
-                let m_rect = Self::modal_rect(area, unit);
-                draw_frosted_modal(canvas, m_rect, unit);
-                let hdr = alloc::format!("Muzik & Ses Oynatici: {}", name);
-                draw_text_color(
-                    canvas,
-                    &hdr,
-                    m_rect.x + unit * 3 / 2,
-                    m_rect.y + unit,
-                    &title_style,
-                    INK_PRIMARY,
-                );
-                let cur_sec = (elapsed_ms / 1000).min(duration_secs as u32);
-                let mut meta = Line::new();
-                meta.text(format_label)
-                    .text("   |   ")
-                    .number(sample_rate, 1)
-                    .text(" Hz / ")
-                    .number(kbps as u32, 1)
-                    .text(" kbps   |   Sure: ")
-                    .number(cur_sec / 60, 2)
-                    .text(":")
-                    .number(cur_sec % 60, 2)
-                    .text(" / ")
-                    .number((duration_secs / 60) as u32, 2)
-                    .text(":")
-                    .number((duration_secs % 60) as u32, 2);
-                draw_text_color(
-                    canvas,
-                    meta.as_str(),
-                    m_rect.x + unit * 3 / 2,
-                    m_rect.y + unit * 5 / 2,
-                    &cap_style,
-                    INK_MUTED,
-                );
-                let stage = Rect::new(
-                    m_rect.x + unit * 2,
-                    m_rect.y + unit * 4,
-                    m_rect.width - unit * 4,
-                    m_rect.height - unit * 19 / 2,
-                );
                 draw_rounded_surface(
                     canvas,
-                    stage,
-                    unit / 2,
-                    rgb(14, 24, 42),
-                    rgb(20, 48, 76),
-                    255,
-                    AQUA_MINT,
-                    true,
-                );
-                // 24-Bant Canlı Spektrum / Ses Dalgası Çizimi
-                let bars = 24usize;
-                let bar_gap = 4;
-                let avail_w = (stage.width - unit * 2).max(48);
-                let bar_w = ((avail_w - (bars as i32 - 1) * bar_gap) / bars as i32).max(4);
-                let start_x = stage.x + (stage.width - (bars as i32 * (bar_w + bar_gap))) / 2;
-                let max_bar_h = (stage.height - unit * 2).max(20);
-                let tick = (elapsed_ms / 40) as usize;
-                for b in 0..bars {
-                    let seed_v = spectrum_seed[b % 32] as i32;
-                    let wave = if playing {
-                        (((tick.wrapping_mul(7) + b * 13 + seed_v as usize) % 31) as i32 - 15).abs()
-                    } else {
-                        3
-                    };
-                    let bh = ((wave * max_bar_h) / 16).clamp(6, max_bar_h);
-                    let bx = start_x + (b as i32) * (bar_w + bar_gap);
-                    let by = stage.y + stage.height - unit - bh;
-                    let col = if b % 2 == 0 { AQUA_MINT } else { AZURE_BRIGHT };
-                    canvas.fill_rect(bx, by, bar_w, bh, col);
-                }
-                let prog_bar = Rect::new(
-                    stage.x,
-                    stage.y + stage.height + unit / 2,
-                    stage.width,
-                    unit / 2,
-                );
-                draw_rounded_surface(
-                    canvas,
-                    prog_bar,
-                    3,
-                    SURFACE_ALT,
-                    BORDER_SOFT,
-                    255,
-                    BORDER_SOFT,
-                    false,
-                );
-                let total_ms = (duration_secs as u32 * 1000).max(1);
-                let fill_w = ((prog_bar.width as u64 * elapsed_ms as u64) / total_ms as u64) as i32;
-                if fill_w > 4 {
-                    let fill_r = Rect::new(prog_bar.x, prog_bar.y, fill_w.min(prog_bar.width), prog_bar.height);
-                    draw_rounded_surface(canvas, fill_r, 3, AQUA_MINT, AZURE_BRIGHT, 255, AQUA_DEEP, false);
-                }
-                let btn_w = unit * 7 + unit / 2;
-                let btn_h = unit * 2 + unit / 4;
-                let btn_y = m_rect.y + m_rect.height - btn_h - unit;
-                let close_btn =
-                    Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
-                let play_btn = Rect::new(close_btn.x - btn_w - unit / 2, btn_y, btn_w, btn_h);
-                draw_aero_pill_button(
-                    canvas,
-                    play_btn,
-                    if playing { "Duraklat" } else { "Cal" },
-                    self.modal_hover_secondary,
-                    false,
-                    true,
-                );
-                draw_aero_pill_button(
-                    canvas,
-                    close_btn,
-                    "Kapat",
-                    self.modal_hover_primary,
-                    true,
-                    true,
-                );
-            }
-            ModalState::ViewVideo {
-                ref name,
-                width,
-                height,
-                duration_secs,
-                scene_id,
-                playing,
-                elapsed_ms,
-                ..
-            } => {
-                let m_rect = Self::modal_rect(area, unit);
-                draw_frosted_modal(canvas, m_rect, unit);
-                let hdr = alloc::format!("Medya Oynatici: {}", name);
-                draw_text_color(
-                    canvas,
-                    &hdr,
-                    m_rect.x + unit * 3 / 2,
-                    m_rect.y + unit,
-                    &title_style,
-                    INK_PRIMARY,
-                );
-                let cur_sec = (elapsed_ms / 1000).min(duration_secs as u32);
-                let mut meta = Line::new();
-                meta.text("Video: ")
-                    .number(width as u32, 1)
-                    .text("x")
-                    .number(height as u32, 1)
-                    .text(" @ 60 FPS   |   Sure: ")
-                    .number(cur_sec / 60, 2)
-                    .text(":")
-                    .number(cur_sec % 60, 2)
-                    .text(" / ")
-                    .number((duration_secs / 60) as u32, 2)
-                    .text(":")
-                    .number((duration_secs % 60) as u32, 2);
-                draw_text_color(
-                    canvas,
-                    meta.as_str(),
-                    m_rect.x + unit * 3 / 2,
-                    m_rect.y + unit * 5 / 2,
-                    &cap_style,
-                    INK_MUTED,
-                );
-                let stage = Rect::new(
-                    m_rect.x + unit * 2,
-                    m_rect.y + unit * 4,
-                    m_rect.width - unit * 4,
-                    m_rect.height - unit * 19 / 2,
-                );
-                let (bg_top, bg_bot) = if scene_id == 0 {
-                    (rgb(12, 28, 54), rgb(20, 88, 112))
-                } else {
-                    (rgb(28, 18, 52), rgb(92, 34, 88))
-                };
-                draw_rounded_surface(
-                    canvas,
-                    stage,
-                    unit / 2,
-                    bg_top,
-                    bg_bot,
+                    view_r,
+                    unit / 3,
+                    rgb(20, 26, 36),
+                    rgb(14, 18, 26),
                     255,
                     AZURE_BRIGHT,
-                    true,
-                );
-                let phase = (elapsed_ms / 16) as i32;
-                let orb1_x = stage.x + stage.width / 4 + ((phase * 3) % (stage.width / 2).max(1));
-                let orb1_y = stage.y + stage.height / 2 + ((phase % 24) - 12);
-                let orb2_x =
-                    stage.x + stage.width * 3 / 4 - ((phase * 2) % (stage.width / 2).max(1));
-                let orb2_y = stage.y + stage.height / 2 - ((phase % 20) - 10);
-                draw_dot(canvas, orb1_x, orb1_y, unit * 2, AQUA_MINT, 190);
-                draw_dot(
-                    canvas,
-                    orb1_x - 4,
-                    orb1_y - 4,
-                    unit / 2,
-                    rgb(255, 255, 255),
-                    220,
-                );
-                draw_dot(canvas, orb2_x, orb2_y, unit * 3 / 2, AZURE_BRIGHT, 190);
-                draw_dot(
-                    canvas,
-                    orb2_x - 3,
-                    orb2_y - 3,
-                    unit / 3,
-                    rgb(255, 255, 255),
-                    220,
-                );
-                let bar = Rect::new(
-                    stage.x,
-                    stage.y + stage.height + unit / 2,
-                    stage.width,
-                    unit / 2,
-                );
-                draw_rounded_surface(
-                    canvas,
-                    bar,
-                    3,
-                    SURFACE_ALT,
-                    BORDER_SOFT,
-                    255,
-                    BORDER_SOFT,
                     false,
                 );
-                let total_ms = (duration_secs as u32 * 1000).max(1);
-                let fill_w = ((bar.width as u64 * elapsed_ms as u64) / total_ms as u64) as i32;
-                if fill_w > 4 {
-                    let fill_r = Rect::new(bar.x, bar.y, fill_w.min(bar.width), bar.height);
-                    draw_rounded_surface(
-                        canvas,
-                        fill_r,
-                        3,
-                        AZURE_BRIGHT,
-                        AQUA_MINT,
-                        255,
-                        AQUA_DEEP,
-                        false,
+                if !pixels.is_empty() && pixel_width > 0 && pixel_height > 0 {
+                    let pad = 6;
+                    let avail_w = (view_r.width - pad * 2).max(1);
+                    let avail_h = (view_r.height - pad * 2).max(1);
+                    let (dst_w, dst_h) = if (avail_w as u64) * (pixel_height as u64)
+                        <= (avail_h as u64) * (pixel_width as u64)
+                    {
+                        let w = avail_w;
+                        let h = ((w as u64 * pixel_height as u64) / pixel_width as u64)
+                            .max(1) as i32;
+                        (w, h.min(avail_h))
+                    } else {
+                        let h = avail_h;
+                        let w = ((h as u64 * pixel_width as u64) / pixel_height as u64)
+                            .max(1) as i32;
+                        (w.min(avail_w), h)
+                    };
+                    let dst_x = view_r.x + (view_r.width - dst_w) / 2;
+                    let dst_y = view_r.y + (view_r.height - dst_h) / 2;
+                    canvas.draw_image_bilinear(
+                        pixels,
+                        pixel_width,
+                        pixel_height,
+                        Rect::new(dst_x, dst_y, dst_w, dst_h),
                     );
                 }
                 let btn_w = unit * 7 + unit / 2;
@@ -3017,15 +2941,6 @@ impl App for FilesApp {
                 let btn_y = m_rect.y + m_rect.height - btn_h - unit;
                 let close_btn =
                     Rect::new(m_rect.x + m_rect.width - btn_w - unit, btn_y, btn_w, btn_h);
-                let play_btn = Rect::new(close_btn.x - btn_w - unit / 2, btn_y, btn_w, btn_h);
-                draw_aero_pill_button(
-                    canvas,
-                    play_btn,
-                    if playing { "Duraklat" } else { "Oynat" },
-                    self.modal_hover_secondary,
-                    false,
-                    true,
-                );
                 draw_aero_pill_button(
                     canvas,
                     close_btn,
@@ -4267,94 +4182,163 @@ impl App for NativeModuleApp {
 
 }
 
-fn decode_image_buffer(bytes: &[u8], lower_name: &str) -> (&'static str, u32, u32, u8, Vec<u32>) {
-    let out_w = 160u32;
-    let out_h = 100u32;
-    let mut pixels = alloc::vec![0u32; (out_w * out_h) as usize];
+struct DecodedImage {
+    pixel_width: u32,
+    pixel_height: u32,
+    pixels: Vec<u32>,
+}
 
-    // 1. BMP Çözücü (Gerçek 24-bit / 32-bit BGR piksel dizisi okuma)
-    if bytes.len() > 54 && &bytes[0..2] == b"BM" {
-        let data_off = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]) as usize;
-        let bmp_w = i32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]).unsigned_abs().clamp(1, 2048);
-        let bmp_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]).unsigned_abs().clamp(1, 2048);
-        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
-        let bytes_per_px = (bpp / 8).max(3) as usize;
-        let row_stride = ((bmp_w as usize * bytes_per_px + 3) & !3).max(1);
+/// Canvas pixels use 0x00RRGGBB, so flatten decoder ARGB output over the viewer
+/// surface before drawing. This prevents transparent PNG RGB values leaking through.
+fn flatten_argb_pixels_in_place(pixels: &mut [u32], background: u32) {
+    for pixel in pixels {
+        let alpha = (*pixel >> 24) & 0xFF;
+        let foreground = *pixel & 0x00FF_FFFF;
+        *pixel = if alpha == 0xFF {
+            foreground
+        } else {
+            lerp_color(background, foreground, alpha)
+        };
+    }
+}
 
-        for y in 0..out_h {
-            let sy = (bmp_h - 1 - (y * bmp_h / out_h)) as usize;
-            for x in 0..out_w {
-                let sx = (x * bmp_w / out_w) as usize;
-                let pos = data_off + sy * row_stride + sx * bytes_per_px;
-                if pos + 2 < bytes.len() {
-                    let b = bytes[pos];
-                    let g = bytes[pos + 1];
-                    let r = bytes[pos + 2];
-                    pixels[(y * out_w + x) as usize] = rgb(r, g, b);
-                }
-            }
-        }
-        return ("BMP (RGB Raster)", bmp_w, bmp_h, 0, pixels);
+fn fit_image_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    let w = width as u64;
+    let h = height as u64;
+    let mw = max_width.max(1) as u64;
+    let mh = max_height.max(1) as u64;
+    if w <= mw && h <= mh {
+        return (width, height);
+    }
+    if w.saturating_mul(mh) >= h.saturating_mul(mw) {
+        (mw as u32, (h.saturating_mul(mw) / w).max(1) as u32)
+    } else {
+        ((w.saturating_mul(mh) / h).max(1) as u32, mh as u32)
+    }
+}
+
+fn decode_bmp_buffer(bytes: &[u8]) -> Result<DecodedImage, &'static str> {
+    let info = inspect_media(bytes).map_err(|_| "BMP basligi gecersiz veya desteklenmeyen bicimde.")?;
+    if info.kind != MediaKind::Bmp {
+        return Err("Dosya BMP degil; yanlis raster decoder secildi.");
+    }
+    let width = info.width.ok_or("BMP genisligi okunamadi.")?;
+    let height = info.height.ok_or("BMP yuksekligi okunamadi.")?;
+    let data_offset = u32::from_le_bytes(bytes[10..14].try_into().map_err(|_| "BMP piksel ofseti eksik.")?) as usize;
+    let dib_size = u32::from_le_bytes(bytes[14..18].try_into().map_err(|_| "BMP DIB basligi eksik.")?) as usize;
+    let signed_height = i32::from_le_bytes(bytes[22..26].try_into().map_err(|_| "BMP yukseklik alani eksik.")?);
+    let bits_per_pixel = u16::from_le_bytes(bytes[28..30].try_into().map_err(|_| "BMP renk derinligi eksik.")?);
+    let bytes_per_pixel = (bits_per_pixel / 8) as usize;
+    if !matches!(bits_per_pixel, 24 | 32) || dib_size < 40 {
+        return Err("Yalnizca sikistirilmamis 24/32-bit BMP destekleniyor.");
+    }
+    let row_bytes = (width as usize)
+        .checked_mul(bytes_per_pixel)
+        .ok_or("BMP satir boyutu tasti.")?;
+    let stride = row_bytes.checked_add(3).ok_or("BMP satir hizalamasi tasti.")? & !3;
+    let required = stride
+        .checked_mul(height as usize)
+        .and_then(|n| data_offset.checked_add(n))
+        .ok_or("BMP piksel araligi tasti.")?;
+    if required > bytes.len() || data_offset < 14 + dib_size {
+        return Err("BMP piksel verisi dosya sinirlarinin disinda.");
     }
 
-    // 2. PNG Çözücü (IHDR + IDAT chunk verisi okuma)
-    if bytes.len() >= 24 && &bytes[0..8] == &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
-        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]).clamp(16, 4096);
-        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]).clamp(16, 4096);
-        let theme_id = if bytes.len() >= 27 { bytes[26] } else { 0 };
-        let idat_pos = bytes.windows(4).position(|w| w == b"IDAT").map(|p| p + 4).unwrap_or(41);
-        let payload = if idat_pos < bytes.len() { &bytes[idat_pos..] } else { bytes };
+    let (pixel_width, pixel_height) = fit_image_dimensions(
+        width,
+        height,
+        MAX_IMAGE_PREVIEW_WIDTH,
+        MAX_IMAGE_PREVIEW_HEIGHT,
+    );
+    let pixel_count = (pixel_width as usize)
+        .checked_mul(pixel_height as usize)
+        .ok_or("BMP onizleme boyutu tasti.")?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(pixel_count)
+        .map_err(|_| "BMP onizleme icin bellek ayrılamadi.")?;
 
-        for y in 0..out_h {
-            for x in 0..out_w {
-                let idx = ((y * out_w + x) as usize) % payload.len().max(1);
-                let v = payload.get(idx).copied().unwrap_or(128);
-                let base_top = if theme_id == 0 { rgb(24, 112, 210) } else { rgb(82, 48, 168) };
-                let base_bot = if theme_id == 0 { rgb(22, 196, 176) } else { rgb(214, 72, 132) };
-                let grad = lerp_color(base_top, base_bot, (y * 255 / out_h) as u32);
-                let tint = rgb(v, v.wrapping_mul(3), 255u8.wrapping_sub(v));
-                pixels[(y * out_w + x) as usize] = lerp_color(grad, tint, 48);
-            }
+    let top_down = signed_height < 0;
+    for dy in 0..pixel_height {
+        let sy = (((2u64 * dy as u64 + 1) * height as u64)
+            / (2u64 * pixel_height as u64))
+            .min(height.saturating_sub(1) as u64) as u32;
+        let source_y = if top_down { sy } else { height - 1 - sy };
+        for dx in 0..pixel_width {
+            let sx = (((2u64 * dx as u64 + 1) * width as u64)
+                / (2u64 * pixel_width as u64))
+                .min(width.saturating_sub(1) as u64) as u32;
+            let offset = data_offset
+                .checked_add(source_y as usize * stride)
+                .and_then(|n| n.checked_add(sx as usize * bytes_per_pixel))
+                .ok_or("BMP piksel ofseti tasti.")?;
+            let b = *bytes.get(offset).ok_or("BMP mavi kanali eksik.")?;
+            let g = *bytes.get(offset + 1).ok_or("BMP yesil kanali eksik.")?;
+            let r = *bytes.get(offset + 2).ok_or("BMP kirmizi kanali eksik.")?;
+            pixels.push(rgb(r, g, b));
         }
-        return ("PNG (RGBA Lossless)", w, h, theme_id, pixels);
     }
 
-    // 3. JPG / JPEG Çözücü (SOF0 0xFFC0 başlığından gerçek çözünürlük ve MCU verisi okuma)
-    if (bytes.len() > 4 && bytes[0] == 0xFF && bytes[1] == 0xD8)
-        || lower_name.ends_with(".jpg")
-        || lower_name.ends_with(".jpeg")
-    {
-        let mut jpg_w = 640u32;
-        let mut jpg_h = 480u32;
-        let mut i = 2usize;
-        while i + 9 < bytes.len() {
-            if bytes[i] == 0xFF && (bytes[i + 1] == 0xC0 || bytes[i + 1] == 0xC2) {
-                jpg_h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]).clamp(16, 4096) as u32;
-                jpg_w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]).clamp(16, 4096) as u32;
-                break;
-            }
-            i += 1;
-        }
-        let scan_start = bytes.windows(2).position(|w| w == &[0xFF, 0xDA]).map(|p| p + 12).unwrap_or(bytes.len() / 3);
-        let scan = if scan_start < bytes.len() { &bytes[scan_start..] } else { bytes };
+    Ok(DecodedImage { pixel_width, pixel_height, pixels })
+}
 
-        for y in 0..out_h {
-            for x in 0..out_w {
-                let bx = (x / 4) as usize;
-                let by = (y / 4) as usize;
-                let sample_idx = (by * 40 + bx * 3) % scan.len().max(1);
-                let y_luma = scan.get(sample_idx).copied().unwrap_or(140);
-                let cb = scan.get((sample_idx + 1) % scan.len().max(1)).copied().unwrap_or(128);
-                let cr = scan.get((sample_idx + 2) % scan.len().max(1)).copied().unwrap_or(128);
-                let r = (y_luma as i32 + ((cr as i32 - 128) * 45 / 32)).clamp(0, 255) as u8;
-                let g = (y_luma as i32 - ((cb as i32 - 128) * 11 / 32) - ((cr as i32 - 128) * 23 / 32)).clamp(0, 255) as u8;
-                let b = (y_luma as i32 + ((cb as i32 - 128) * 57 / 32)).clamp(0, 255) as u8;
-                let sky = lerp_color(rgb(38, 128, 224), rgb(242, 184, 112), (y * 255 / out_h) as u32);
-                pixels[(y * out_w + x) as usize] = lerp_color(sky, rgb(r, g, b), 95);
-            }
+#[cfg(test)]
+mod media_preview_tests {
+    use super::*;
+    extern crate std;
+
+    fn make_bmp(top_down: bool) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(70);
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&70u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        let height = if top_down { -2i32 } else { 2i32 };
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+
+        let top_row = [
+            0u8, 0, 255, // red, stored BGR
+            0, 255, 0,   // green
+            0, 0,        // row padding
+        ];
+        let bottom_row = [
+            255u8, 0, 0, // blue
+            255, 255, 255, // white
+            0, 0,        // row padding
+        ];
+        if top_down {
+            bytes.extend_from_slice(&top_row);
+            bytes.extend_from_slice(&bottom_row);
+        } else {
+            bytes.extend_from_slice(&bottom_row);
+            bytes.extend_from_slice(&top_row);
         }
-        return ("JPEG (YCbCr DCT)", jpg_w, jpg_h, 1, pixels);
+        bytes
     }
 
-    ("RAW Image", out_w, out_h, 0, pixels)
+    #[test]
+    fn bmp_decoder_respects_bottom_up_orientation_and_padding() {
+        let image = decode_bmp_buffer(&make_bmp(false)).unwrap();
+        assert_eq!((image.pixel_width, image.pixel_height), (2, 2));
+        assert_eq!(
+            image.pixels.as_slice(),
+            &[rgb(255, 0, 0), rgb(0, 255, 0), rgb(0, 0, 255), rgb(255, 255, 255)]
+        );
+    }
+
+    #[test]
+    fn bmp_decoder_respects_top_down_orientation() {
+        let image = decode_bmp_buffer(&make_bmp(true)).unwrap();
+        assert_eq!(
+            image.pixels.as_slice(),
+            &[rgb(255, 0, 0), rgb(0, 255, 0), rgb(0, 0, 255), rgb(255, 255, 255)]
+        );
+    }
 }

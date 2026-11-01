@@ -196,3 +196,29 @@ pub trait InputDevice {
     fn name(&self) -> &'static str;
     fn poll(&mut self, width: i32, height: i32) -> (MouseState, Option<KeyCode>);
 }
+
+
+/// Interleaved signed 16-bit PCM format delivered to an audio backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PcmFormat {
+    pub sample_rate_hz: u32,
+    pub channels: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioError {
+    UnsupportedFormat,
+    DeviceNotReady,
+    BufferTooLarge,
+    Timeout,
+    HardwareFailure,
+}
+
+/// Hardware-independent audio output contract. Drivers implement this trait;
+/// codecs only submit PCM and never touch PCI registers or DMA directly.
+pub trait AudioOutput {
+    fn configure(&mut self, format: PcmFormat) -> Result<(), AudioError>;
+    fn write_interleaved_i16(&mut self, samples: &[i16]) -> Result<(), AudioError>;
+    fn drain(&mut self) -> Result<(), AudioError>;
+    fn set_volume_percent(&mut self, percent: u8) -> Result<(), AudioError>;
+}

@@ -10,17 +10,20 @@ pub mod gpt;
 pub mod nvme;
 pub mod partition;
 
-pub use partition::{parse_mbr_partitions, AtaPartition, PartitionInfo};
+pub use partition::{parse_mbr_partitions, parse_partitions, AtaPartition, PartitionInfo};
 
 pub const MAX_DISKS: usize = 4;
 
-pub const SYSTEM_START_LBA: u64 = 133_120;
+pub const ESP_START_LBA: u64 = 65_536;
+pub const ESP_SECTORS: u64 = 532_480; // 260 MiB; enough FAT32 data clusters with 1 sector/cluster
+pub const SYSTEM_START_LBA: u64 = 600_064;
 pub const SYSTEM_SECTORS: u64 = 4_194_304;
-pub const SECURITY_START_LBA: u64 = SYSTEM_START_LBA + SYSTEM_SECTORS; // 4_327_424
+pub const SECURITY_START_LBA: u64 = SYSTEM_START_LBA + SYSTEM_SECTORS; // 4_794_368
 pub const SECURITY_SECTORS: u64 = 524_288;
-pub const DATA_START_LBA: u64 = SECURITY_START_LBA + SECURITY_SECTORS; // 4_851_712
+pub const DATA_START_LBA: u64 = SECURITY_START_LBA + SECURITY_SECTORS; // 5_318_656
 pub const MIN_DATA_SECTORS: u64 = 2_097_152;
-pub const MIN_INSTALL_SECTORS: u64 = DATA_START_LBA + MIN_DATA_SECTORS; // 6_948_864
+// block_count includes LBA 0; LastUsableLBA is block_count - 34.
+pub const MIN_INSTALL_SECTORS: u64 = DATA_START_LBA + MIN_DATA_SECTORS + 33; // 7_415_841
 
 const LBA28_MAX_SECTORS: u64 = 0x1000_0000;
 const LBA48_MAX_SECTORS: u64 = 0x0001_0000_0000_0000;
@@ -821,99 +824,207 @@ pub fn write_data_exfat(device: &mut AtaDevice, start_lba: u64) -> Result<(), ()
     Ok(())
 }
 
-fn write_esp_fat16(device: &mut AtaDevice, start_lba: u64, efi_blob: &[u8]) -> Result<(), ()> {
-    // ESP icinde veri alani LBA + 164'te baslar, toplam 65536 sektor icinde kalmali
-    if efi_blob.is_empty() || efi_blob.len() > (65_536 - 172) * 512 {
+fn write_esp_fat32(device: &mut AtaDevice, start_lba: u64, efi_blob: &[u8]) -> Result<(), ()> {
+    const BYTES_PER_SECTOR: usize = 512;
+    const RESERVED_SECTORS: u32 = 32;
+    const FAT_COUNT: u32 = 2;
+    const SECTORS_PER_CLUSTER: u32 = 1;
+    const ROOT_CLUSTER: u32 = 2;
+    const EFI_CLUSTER: u32 = 3;
+    const BOOT_CLUSTER: u32 = 4;
+    const FILE_FIRST_CLUSTER: u32 = 5;
+
+    if efi_blob.is_empty() || efi_blob.len() > u32::MAX as usize || ESP_SECTORS > u32::MAX as u64
+        || start_lba > u32::MAX as u64
+    {
         return Err(());
     }
 
-    let mut vbr = [0u8; 512];
-    vbr[0..3].copy_from_slice(&[0xEB, 0x3C, 0x90]);
-    vbr[3..11].copy_from_slice(b"MSDOS5.0");
-    vbr[11..13].copy_from_slice(&512u16.to_le_bytes());
-    vbr[13] = 4;
-    vbr[14..16].copy_from_slice(&4u16.to_le_bytes());
-    vbr[16] = 2;
-    vbr[17..19].copy_from_slice(&512u16.to_le_bytes());
-    vbr[21] = 0xF8;
-    vbr[22..24].copy_from_slice(&64u16.to_le_bytes());
-    vbr[24..26].copy_from_slice(&32u16.to_le_bytes());
-    vbr[26..28].copy_from_slice(&64u16.to_le_bytes());
-    vbr[28..32].copy_from_slice(&(start_lba as u32).to_le_bytes());
-    vbr[32..36].copy_from_slice(&65536u32.to_le_bytes());
-    vbr[36] = 0x80;
-    vbr[38] = 0x29;
-    vbr[39..43].copy_from_slice(&0x4E54_5A43u32.to_le_bytes());
-    vbr[43..54].copy_from_slice(b"NETIZEN_ESP");
-    vbr[54..62].copy_from_slice(b"FAT16   ");
-    vbr[510] = 0x55;
-    vbr[511] = 0xAA;
-    device.write_blocks(start_lba, 1, &vbr)?;
+    let total_sectors = ESP_SECTORS as u32;
+    let file_clusters = ((efi_blob.len() + BYTES_PER_SECTOR - 1) / BYTES_PER_SECTOR).max(1) as u32;
 
-    let clusters_needed = ((efi_blob.len() + 2047) / 2048).max(1);
-    let end_cluster = 4 + clusters_needed;
-    for s in 0..64usize {
-        let mut sec = [0u8; 512];
-        for i in 0..256usize {
-            let c = s * 256 + i;
-            let v: u16 = match c {
-                0 => 0xFFF8,
-                1 | 2 | 3 => 0xFFFF,
-                c if c >= 4 && c < end_cluster => {
-                    if c + 1 < end_cluster { (c + 1) as u16 } else { 0xFFFF }
-                }
-                _ => 0,
-            };
-            sec[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+    // FAT32 FAT length is solved iteratively because the FAT itself reduces data-cluster count.
+    let mut fat_sectors = 1u32;
+    let cluster_count = loop {
+        let data_sectors = total_sectors.checked_sub(RESERVED_SECTORS)
+            .and_then(|n| n.checked_sub(FAT_COUNT.checked_mul(fat_sectors)?))
+            .ok_or(())?;
+        let clusters = data_sectors / SECTORS_PER_CLUSTER;
+        let needed_fat = clusters.checked_add(2).and_then(|n| n.checked_mul(4))
+            .and_then(|n| n.checked_add((BYTES_PER_SECTOR as u32) - 1))
+            .ok_or(())? / BYTES_PER_SECTOR as u32;
+        if needed_fat <= fat_sectors { break clusters; }
+        fat_sectors = needed_fat;
+    };
+
+    // FAT32 requires at least 65,525 data clusters (not merely a "FAT32" label).
+    if cluster_count < 65_525 || FILE_FIRST_CLUSTER.checked_add(file_clusters)
+        .filter(|end| *end <= cluster_count + 2).is_none()
+    {
+        return Err(());
+    }
+
+    let data_relative = RESERVED_SECTORS
+        .checked_add(FAT_COUNT.checked_mul(fat_sectors).ok_or(())?)
+        .ok_or(())?;
+    let data_start_lba = start_lba.checked_add(data_relative as u64).ok_or(())?;
+
+    let mut boot = [0u8; 512];
+    boot[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+    boot[3..11].copy_from_slice(b"MSDOS5.0");
+    boot[11..13].copy_from_slice(&(BYTES_PER_SECTOR as u16).to_le_bytes());
+    boot[13] = SECTORS_PER_CLUSTER as u8;
+    boot[14..16].copy_from_slice(&(RESERVED_SECTORS as u16).to_le_bytes());
+    boot[16] = FAT_COUNT as u8;
+    boot[17..19].copy_from_slice(&0u16.to_le_bytes());
+    boot[19..21].copy_from_slice(&0u16.to_le_bytes());
+    boot[21] = 0xF8;
+    boot[22..24].copy_from_slice(&0u16.to_le_bytes());
+    boot[24..26].copy_from_slice(&63u16.to_le_bytes());
+    boot[26..28].copy_from_slice(&255u16.to_le_bytes());
+    boot[28..32].copy_from_slice(&(start_lba as u32).to_le_bytes());
+    boot[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+    boot[36..40].copy_from_slice(&fat_sectors.to_le_bytes());
+    boot[40..42].copy_from_slice(&0u16.to_le_bytes());
+    boot[42..44].copy_from_slice(&0u16.to_le_bytes());
+    boot[44..48].copy_from_slice(&ROOT_CLUSTER.to_le_bytes());
+    boot[48..50].copy_from_slice(&1u16.to_le_bytes());
+    boot[50..52].copy_from_slice(&6u16.to_le_bytes());
+    boot[64] = 0x80;
+    boot[66] = 0x29;
+    boot[67..71].copy_from_slice(&0x4E54_5A43u32.to_le_bytes());
+    boot[71..82].copy_from_slice(b"NETIZEN ESP");
+    boot[82..90].copy_from_slice(b"FAT32   ");
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+
+    let mut fs_info = [0u8; 512];
+    fs_info[0..4].copy_from_slice(&0x4161_5252u32.to_le_bytes());
+    fs_info[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes());
+    let free_clusters = cluster_count - (3 + file_clusters);
+    let next_free_cluster = if free_clusters == 0 {
+        u32::MAX
+    } else {
+        FILE_FIRST_CLUSTER + file_clusters
+    };
+    fs_info[488..492].copy_from_slice(&free_clusters.to_le_bytes());
+    fs_info[492..496].copy_from_slice(&next_free_cluster.to_le_bytes());
+    fs_info[508..512].copy_from_slice(&0xAA55_0000u32.to_le_bytes());
+
+    device.write_sector(start_lba, &boot)?;
+    device.write_sector(start_lba + 1, &fs_info)?;
+    device.write_sector(start_lba + 6, &boot)?;
+    device.write_sector(start_lba + 7, &fs_info)?;
+
+    // Write both FAT copies. Clusters 2..4 are directories; the EFI image starts at cluster 5.
+    for fat_copy in 0..FAT_COUNT {
+        let fat_base = start_lba + RESERVED_SECTORS as u64 + (fat_copy * fat_sectors) as u64;
+        for sector_idx in 0..fat_sectors {
+            let mut fat_sector = [0u8; 512];
+            for slot in 0..128u32 {
+                let cluster = sector_idx * 128 + slot;
+                let value = match cluster {
+                    0 => 0x0FFF_FFF8,
+                    1 | ROOT_CLUSTER | EFI_CLUSTER | BOOT_CLUSTER => 0x0FFF_FFFF,
+                    c if c >= FILE_FIRST_CLUSTER && c < FILE_FIRST_CLUSTER + file_clusters => {
+                        if c + 1 < FILE_FIRST_CLUSTER + file_clusters { c + 1 } else { 0x0FFF_FFFF }
+                    }
+                    _ => 0,
+                };
+                let off = slot as usize * 4;
+                fat_sector[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            device.write_sector(fat_base + sector_idx as u64, &fat_sector)?;
         }
-        device.write_blocks(start_lba + 4 + s as u64, 1, &sec)?;
-        device.write_blocks(start_lba + 68 + s as u64, 1, &sec)?;
     }
 
-    let zero = [0u8; 512];
-    let mut root_dir = [0u8; 512];
-    root_dir[0..11].copy_from_slice(b"EFI        ");
-    root_dir[11] = 0x10;
-    root_dir[26..28].copy_from_slice(&2u16.to_le_bytes());
-    device.write_blocks(start_lba + 132, 1, &root_dir)?;
-    for s in 1..32 {
-        device.write_blocks(start_lba + 132 + s, 1, &zero)?;
-    }
-
-    let data_base = start_lba + 164;
+    let put_cluster = |entry: &mut [u8], cluster: u32| {
+        entry[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+        entry[26..28].copy_from_slice(&(cluster as u16).to_le_bytes());
+    };
+    let mut root = [0u8; 512];
+    root[0..11].copy_from_slice(b"EFI        ");
+    root[11] = 0x10;
+    put_cluster(&mut root[0..32], EFI_CLUSTER);
+    device.write_sector(data_start_lba, &root)?;
 
     let mut efi_dir = [0u8; 512];
     efi_dir[0..11].copy_from_slice(b".          ");
     efi_dir[11] = 0x10;
-    efi_dir[26..28].copy_from_slice(&2u16.to_le_bytes());
+    put_cluster(&mut efi_dir[0..32], EFI_CLUSTER);
     efi_dir[32..43].copy_from_slice(b"..         ");
     efi_dir[43] = 0x10;
-    efi_dir[58..60].copy_from_slice(&0u16.to_le_bytes());
+    put_cluster(&mut efi_dir[32..64], ROOT_CLUSTER);
     efi_dir[64..75].copy_from_slice(b"BOOT       ");
     efi_dir[75] = 0x10;
-    efi_dir[90..92].copy_from_slice(&3u16.to_le_bytes());
-    device.write_blocks(data_base, 1, &efi_dir)?;
-    for s in 1..4 {
-        device.write_blocks(data_base + s, 1, &zero)?;
-    }
+    put_cluster(&mut efi_dir[64..96], BOOT_CLUSTER);
+    device.write_sector(data_start_lba + 1, &efi_dir)?;
 
     let mut boot_dir = [0u8; 512];
     boot_dir[0..11].copy_from_slice(b".          ");
     boot_dir[11] = 0x10;
-    boot_dir[26..28].copy_from_slice(&3u16.to_le_bytes());
+    put_cluster(&mut boot_dir[0..32], BOOT_CLUSTER);
     boot_dir[32..43].copy_from_slice(b"..         ");
     boot_dir[43] = 0x10;
-    boot_dir[58..60].copy_from_slice(&2u16.to_le_bytes());
+    put_cluster(&mut boot_dir[32..64], EFI_CLUSTER);
     boot_dir[64..75].copy_from_slice(b"BOOTX64 EFI");
     boot_dir[75] = 0x20;
-    boot_dir[90..92].copy_from_slice(&4u16.to_le_bytes());
+    put_cluster(&mut boot_dir[64..96], FILE_FIRST_CLUSTER);
     boot_dir[92..96].copy_from_slice(&(efi_blob.len() as u32).to_le_bytes());
-    device.write_blocks(data_base + 4, 1, &boot_dir)?;
-    for s in 1..4 {
-        device.write_blocks(data_base + 4 + s, 1, &zero)?;
+    device.write_sector(data_start_lba + 2, &boot_dir)?;
+
+    let file_lba = data_start_lba.checked_add((FILE_FIRST_CLUSTER - 2) as u64).ok_or(())?;
+    device.write_stream_padded(file_lba, efi_blob)?;
+    device.flush()?;
+
+    // Read-back: boot sector, both FAT headers, path entries, file size and every file byte.
+    let mut verify = [0u8; 512];
+    device.read_sector(start_lba, &mut verify)?;
+    if verify != boot { return Err(()); }
+    device.read_sector(start_lba + 1, &mut verify)?;
+    if verify != fs_info { return Err(()); }
+    device.read_sector(start_lba + 6, &mut verify)?;
+    if verify != boot { return Err(()); }
+    device.read_sector(start_lba + 7, &mut verify)?;
+    if verify != fs_info { return Err(()); }
+    device.read_sector(data_start_lba, &mut verify)?;
+    if verify != root { return Err(()); }
+    device.read_sector(data_start_lba + 1, &mut verify)?;
+    if verify != efi_dir { return Err(()); }
+    device.read_sector(data_start_lba + 2, &mut verify)?;
+    if verify != boot_dir || &verify[64..75] != b"BOOTX64 EFI"
+        || u32::from_le_bytes(verify[92..96].try_into().map_err(|_| ())?) != efi_blob.len() as u32
+    { return Err(()); }
+
+    // Validate every FAT sector containing the allocated directory and EFI file clusters.
+    let last_used_cluster = FILE_FIRST_CLUSTER.checked_add(file_clusters).ok_or(())?;
+    let used_fat_sectors = (last_used_cluster.checked_mul(4).ok_or(())? + 511) / 512;
+    for fat_copy in 0..FAT_COUNT {
+        let fat_base = start_lba + RESERVED_SECTORS as u64 + (fat_copy * fat_sectors) as u64;
+        for sector_idx in 0..used_fat_sectors {
+            let mut expected_fat = [0u8; 512];
+            for slot in 0..128u32 {
+                let cluster = sector_idx * 128 + slot;
+                let value = match cluster {
+                    0 => 0x0FFF_FFF8,
+                    1 | ROOT_CLUSTER | EFI_CLUSTER | BOOT_CLUSTER => 0x0FFF_FFFF,
+                    c if c >= FILE_FIRST_CLUSTER && c < FILE_FIRST_CLUSTER + file_clusters => {
+                        if c + 1 < FILE_FIRST_CLUSTER + file_clusters { c + 1 } else { 0x0FFF_FFFF }
+                    }
+                    _ => 0,
+                };
+                let off = slot as usize * 4;
+                expected_fat[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            device.read_sector(fat_base + sector_idx as u64, &mut verify)?;
+            if verify != expected_fat { return Err(()); }
+        }
     }
 
-    device.write_stream_padded(data_base + 8, efi_blob)?;
+    for (i, chunk) in efi_blob.chunks(512).enumerate() {
+        device.read_sector(file_lba + i as u64, &mut verify)?;
+        if &verify[..chunk.len()] != chunk { return Err(()); }
+    }
     Ok(())
 }
 
@@ -928,9 +1039,9 @@ pub fn install_to_disk(
     if device.info.device_type != DeviceType::HardDisk || device.info.block_size != 512 {
         return Err(());
     }
-    // Backup GPT tablosu için son 34 sektörü ayır, 128 GiB LBA28 kesmesini KALDIR!
-    let usable_sectors = device.info.block_count.saturating_sub(34);
-    if usable_sectors < MIN_INSTALL_SECTORS {
+    // GPT backup array/header occupy the final 33 sectors; LastUsableLBA is N - 34.
+    let last_usable_lba = device.info.block_count.checked_sub(34).ok_or(())?;
+    if device.info.block_count < MIN_INSTALL_SECTORS {
         return Err(());
     }
     if stage2.is_empty() || kernel.is_empty() {
@@ -948,113 +1059,104 @@ pub fn install_to_disk(
     }
 
     if let Some(efi_blob) = uefi_boot {
-        if efi_blob.is_empty() || efi_blob.len() > (65_536 - 172) * 512 {
+        if efi_blob.is_empty() || efi_blob.len() > u32::MAX as usize {
             return Err(());
         }
     }
 
-    let esp_start: u64 = 65_536;
-    let esp_sectors: u64 = 65_536;
+    let esp_start: u64 = ESP_START_LBA;
+    let esp_sectors: u64 = ESP_SECTORS;
     let system_start: u64 = SYSTEM_START_LBA;
     let system_sectors: u64 = SYSTEM_SECTORS;
     let security_start: u64 = SECURITY_START_LBA;
     let security_sectors: u64 = SECURITY_SECTORS;
     let data_start: u64 = DATA_START_LBA;
-    let data_sectors_64: u64 = usable_sectors.checked_sub(DATA_START_LBA).ok_or(())?;
+    let data_sectors_64: u64 = last_usable_lba
+        .checked_sub(data_start)
+        .and_then(|last_delta| last_delta.checked_add(1))
+        .ok_or(())?;
 
     if data_sectors_64 < MIN_DATA_SECTORS {
         return Err(());
     }
 
-    device.write_stream_padded(2048, stage2)?;
-    device.write_stream_padded(2048 + stage2_sectors, kernel)?;
-
-    if let Some(efi_blob) = uefi_boot {
-        write_esp_fat16(device, esp_start, efi_blob)?;
-    }
-
-    write_system_erofs(device, system_start)?;
-    write_data_exfat(device, data_start)?;
-    seal_security_vault(device)?;
-
-    // 64-bit GPT Tablolarını (Primary LBA 1..2 ve Backup son LBA'lar) yaz
+    // Generate all identifiers before touching the target disk.
+    let disk_guid = gpt::random_guid()?;
     let gpt_entries = [
         gpt::GptPartitionEntry {
             type_guid: gpt::GUID_EFI_SYSTEM,
-            unique_guid: [1; 16],
+            unique_guid: gpt::random_guid()? ,
             first_lba: esp_start,
             last_lba: esp_start + esp_sectors - 1,
             attributes: 1,
         },
         gpt::GptPartitionEntry {
             type_guid: gpt::GUID_LINUX_FS,
-            unique_guid: [2; 16],
+            unique_guid: gpt::random_guid()? ,
             first_lba: system_start,
             last_lba: system_start + system_sectors - 1,
             attributes: 0,
         },
         gpt::GptPartitionEntry {
             type_guid: gpt::GUID_LINUX_FS,
-            unique_guid: [3; 16],
+            unique_guid: gpt::random_guid()? ,
             first_lba: security_start,
             last_lba: security_start + security_sectors - 1,
             attributes: 0,
         },
         gpt::GptPartitionEntry {
             type_guid: gpt::GUID_BASIC_DATA,
-            unique_guid: [4; 16],
+            unique_guid: gpt::random_guid()? ,
             first_lba: data_start,
             last_lba: data_start + data_sectors_64 - 1,
             attributes: 0,
         },
     ];
-    let _ = gpt::write_gpt_tables(device, &gpt_entries);
+    if gpt_entries.iter().any(|entry| entry.unique_guid == disk_guid)
+        || gpt_entries.iter().enumerate().any(|(i, entry)|
+            gpt_entries.iter().skip(i + 1).any(|other| entry.unique_guid == other.unique_guid))
+    { return Err(()); }
 
-    // Legacy BIOS (mbr.asm) ve DysonSphere imza kontrolü için LBA 0 Hybrid MBR commit
-    let mut mbr = [0u8; 512];
-    let _ = device.read_sector(0, &mut mbr);
-    let code_len = MBR_CODE.len().min(440);
-    mbr[..code_len].copy_from_slice(&MBR_CODE[..code_len]);
-    for b in &mut mbr[code_len..440] {
-        *b = 0;
+    device.write_stream_padded(2048, stage2)?;
+    device.write_stream_padded(2048 + stage2_sectors, kernel)?;
+
+    if let Some(efi_blob) = uefi_boot {
+        write_esp_fat32(device, esp_start, efi_blob)?;
     }
 
-    let write_entry = |mbr: &mut [u8; 512],
-                       index: usize,
-                       bootable: bool,
-                       p_type: u8,
-                       start_lba: u32,
-                       count: u32| {
-        let offset = 446 + index * 16;
-        mbr[offset] = if bootable { 0x80 } else { 0x00 };
-        mbr[offset + 1] = 0xFE;
-        mbr[offset + 2] = 0xFF;
-        mbr[offset + 3] = 0xFF;
-        mbr[offset + 4] = p_type;
-        mbr[offset + 5] = 0xFE;
-        mbr[offset + 6] = 0xFF;
-        mbr[offset + 7] = 0xFF;
-        mbr[offset + 8..offset + 12].copy_from_slice(&start_lba.to_le_bytes());
-        mbr[offset + 12..offset + 16].copy_from_slice(&count.to_le_bytes());
-    };
+    device.flush()?;
+    write_system_erofs(device, system_start)?;
+    write_data_exfat(device, data_start)?;
+    seal_security_vault(device)?;
 
-    let mbr_data_sectors = data_sectors_64.min(u32::MAX as u64) as u32;
-    write_entry(&mut mbr, 0, true, 0xEF, esp_start as u32, esp_sectors as u32);
-    write_entry(&mut mbr, 1, false, 0x83, system_start as u32, system_sectors as u32);
-    write_entry(&mut mbr, 2, false, 0x83, security_start as u32, security_sectors as u32);
-    write_entry(&mut mbr, 3, false, 0x83, data_start as u32, mbr_data_sectors);
+    // Commit GPT only after all payload writes have completed and reached the device.
+    device.flush()?;
+    gpt::write_gpt_tables(device, &gpt_entries, disk_guid)?;
+    device.flush()?;
+    gpt::verify_gpt_tables(device, &gpt_entries)?;
 
+    // Protective MBR: preserve the legacy boot code area, but expose one 0xEE record only.
+    let mut mbr = [0u8; 512];
+    let code_len = MBR_CODE.len().min(440);
+    mbr[..code_len].copy_from_slice(&MBR_CODE[..code_len]);
+    mbr[446] = 0x00;
+    mbr[447..450].copy_from_slice(&[0x00, 0x02, 0x00]);
+    mbr[450] = 0xEE;
+    mbr[451..454].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
+    let protective_count = device.info.block_count.saturating_sub(1).min(u32::MAX as u64) as u32;
+    mbr[458..462].copy_from_slice(&protective_count.to_le_bytes());
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
 
     device.write_sector(0, &mbr)?;
     device.flush()?;
-
     let mut verify_mbr = [0u8; 512];
     device.read_sector(0, &mut verify_mbr)?;
-    if verify_mbr != mbr {
+    if verify_mbr != mbr || verify_mbr[450] != 0xEE || verify_mbr[462..510].iter().any(|b| *b != 0) {
         return Err(());
     }
+    gpt::verify_gpt_tables(device, &gpt_entries)?;
     Ok(())
 }
 
@@ -1240,11 +1342,11 @@ pub fn find_external_usb_disk() -> Option<(AtaDevice, u64, u64)> {
                     if &sec0[3..11] == b"EXFAT   " || &sec0[82..87] == b"FAT32" {
                         return Some((dev, 0, dev.info.block_count));
                     }
-                    let parts = parse_mbr_partitions(&mut dev);
-                    for p_opt in parts.iter().flatten() {
-                        let end = p_opt.start_lba.checked_add(p_opt.sector_count)?;
-                        if p_opt.sector_count > 0 && end <= dev.info.block_count {
-                            return Some((dev, p_opt.start_lba, p_opt.sector_count));
+                    let parts = parse_partitions(&mut dev)?;
+                    for partition in parts {
+                        let end = partition.start_lba.checked_add(partition.sector_count)?;
+                        if partition.sector_count > 0 && end <= dev.info.block_count {
+                            return Some((dev, partition.start_lba, partition.sector_count));
                         }
                     }
                 }

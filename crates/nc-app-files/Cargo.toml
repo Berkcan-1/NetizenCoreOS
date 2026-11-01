@@ -13,3 +13,4 @@ nc-fs = { path = "../nc-fs" }
 nc-app-settings = { path = "../nc-app-settings" }
 nc-app-system = { path = "../nc-app-system" }
 nc-app-stopwatch = { path = "../nc-app-stopwatch" }
+nc-media = { path = "../nc-media" }

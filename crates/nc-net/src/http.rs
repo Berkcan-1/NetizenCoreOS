@@ -8,6 +8,13 @@ use crate::tcp::{build_ethernet_frame, build_ipv4_packet, build_tcp_segment, TCP
 use crate::tls13::Tls13;
 use crate::NetworkStack;
 
+const MAX_HTTP_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
+const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
+const MAX_HTTP_REQUEST_BODY_BYTES: usize = 128 * 1024;
+const MAX_HTTP_REQUEST_HEADER_BYTES: usize = 16 * 1024;
+const MAX_HTTP_REQUEST_HEADERS: usize = 64;
+const MAX_HTTP_URL_BYTES: usize = 4096;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HttpState {
     Idle,
@@ -32,6 +39,9 @@ pub struct TcpHttpClient {
     pub local_seq: u32,
     pub remote_seq: u32,
     pub response_data: Vec<u8>,
+    chunked_scan_offset: usize,
+    response_header_end: Option<usize>,
+    header_scan_offset: usize,
     pub raw_body: Vec<u8>,
     pub html_body: String,
     pub status_code: u16,
@@ -74,6 +84,9 @@ impl TcpHttpClient {
             local_seq: 1000,
             remote_seq: 0,
             response_data: Vec::new(),
+            chunked_scan_offset: 0,
+            response_header_end: None,
+            header_scan_offset: 0,
             raw_body: Vec::new(),
             html_body: String::new(),
             status_code: 0,
@@ -111,6 +124,21 @@ impl TcpHttpClient {
 
     /// Like `navigate` but with an arbitrary method, extra headers and a body.
     pub fn request(&mut self, method: &str, url: &str, headers: &[(String, String)], body: &[u8], net: &mut NetworkStack) {
+        if body.len() > MAX_HTTP_REQUEST_BODY_BYTES || headers.len() > MAX_HTTP_REQUEST_HEADERS {
+            self.state = HttpState::Failed;
+            self.html_body = String::new();
+            self.raw_body.clear();
+            self.response_data.clear();
+            return;
+        }
+        let header_bytes = headers.iter().fold(0usize, |n, (k, v)| n.saturating_add(k.len()).saturating_add(v.len()));
+        if header_bytes > MAX_HTTP_REQUEST_HEADER_BYTES {
+            self.state = HttpState::Failed;
+            self.html_body = String::new();
+            self.raw_body.clear();
+            self.response_data.clear();
+            return;
+        }
         self.redirects = 0;
         self.req_method = method.chars().filter(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_uppercase();
         if self.req_method.is_empty() {
@@ -128,6 +156,11 @@ impl TcpHttpClient {
     }
 
     fn start(&mut self, url: &str, net: &mut NetworkStack) {
+        if url.len() > MAX_HTTP_URL_BYTES {
+            self.state = HttpState::Failed;
+            self.pending = None;
+            return;
+        }
         let clean = url.trim();
         let lower_url = clean.to_ascii_lowercase();
         let explicit_http = lower_url.starts_with("http://");
@@ -187,6 +220,9 @@ impl TcpHttpClient {
         self.https = is_https;
         self.remote_port = custom_port.unwrap_or(if is_https { 443 } else { 80 });
         self.response_data.clear();
+        self.chunked_scan_offset = 0;
+        self.response_header_end = None;
+        self.header_scan_offset = 0;
         self.raw_body.clear();
         self.html_body.clear();
         self.tls = None;
@@ -200,7 +236,6 @@ impl TcpHttpClient {
         self.local_port = 49152 + (self.port_counter % 12000);
         self.local_seq = HardwareRng::next_u64() as u32;
         self.remote_seq = 0;
-        net.inbox.clear();
 
         if !net.is_ready() {
             self.pending = Some(String::from(url));
@@ -275,26 +310,65 @@ impl TcpHttpClient {
     }
 
     pub fn poll(&mut self, net: &mut NetworkStack) {
-        for _ in 0..64 {
-            net.poll();
-        }
         if matches!(self.state, HttpState::Idle | HttpState::Complete | HttpState::Failed) {
-            net.inbox.clear();
             return;
         }
-        while !net.inbox.is_empty() {
-            let pkt = net.inbox.remove(0);
+
+        // A small bounded receive burst keeps networking from monopolizing a browser frame.
+        for _ in 0..8 {
+            net.poll();
+        }
+
+        let mut packets = core::mem::take(&mut net.inbox).into_iter();
+        let mut processed = 0usize;
+        let mut pending: Vec<Vec<u8>> = Vec::new();
+        while processed < 32 {
+            let Some(pkt) = packets.next() else { break; };
+            if !self.packet_for_client(&pkt) {
+                pending.push(pkt);
+                continue;
+            }
+            processed += 1;
             let old_port = self.local_port;
             self.process_packet(&pkt, net);
             if matches!(self.state, HttpState::Complete | HttpState::Failed) || self.local_port != old_port {
                 break;
             }
         }
+        pending.extend(packets);
+        pending.append(&mut net.inbox);
+        net.inbox = pending;
         if !matches!(self.state, HttpState::Complete | HttpState::Failed) {
             self.poll_calls = self.poll_calls.wrapping_add(1);
             if self.tick_every <= 1 || self.poll_calls % self.tick_every == 0 {
                 self.tick(net);
             }
+        }
+    }
+
+    fn packet_for_client(&self, pkt: &[u8]) -> bool {
+        if pkt.len() < 42 || u16::from_be_bytes([pkt[12], pkt[13]]) != 0x0800 {
+            return false;
+        }
+        let ip_len = u16::from_be_bytes([pkt[16], pkt[17]]) as usize;
+        let end = (14usize.saturating_add(ip_len)).min(pkt.len());
+        if end < 42 {
+            return false;
+        }
+        match pkt[23] {
+            17 => {
+                self.state == HttpState::ResolvingDns
+                    && u16::from_be_bytes([pkt[34], pkt[35]]) == 53
+                    && u16::from_be_bytes([pkt[36], pkt[37]]) == 5353
+                    && end >= 44
+                    && u16::from_be_bytes([pkt[42], pkt[43]]) == self.dns_tx_id
+            }
+            6 => {
+                end >= 54
+                    && u16::from_be_bytes([pkt[34], pkt[35]]) == self.remote_port
+                    && u16::from_be_bytes([pkt[36], pkt[37]]) == self.local_port
+            }
+            _ => false,
         }
     }
 
@@ -328,7 +402,7 @@ impl TcpHttpClient {
                 }
             }
             HttpState::ReceivingData => {
-                if is_http_response_complete(&self.response_data) || self.ticks > 120 {
+                if self.response_complete() || self.ticks > 120 {
                     self.finish(net);
                 }
             }
@@ -360,12 +434,14 @@ impl TcpHttpClient {
     }
 
     fn on_payload(&mut self, payload: &[u8], net: &mut NetworkStack) {
-        const MAX_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
         if !self.https {
             self.state = HttpState::ReceivingData;
-            let space = MAX_RESPONSE_BYTES.saturating_sub(self.response_data.len());
+            let space = MAX_HTTP_RESPONSE_BYTES.saturating_sub(self.response_data.len());
             self.response_data.extend_from_slice(&payload[..payload.len().min(space)]);
-            if is_http_response_complete(&self.response_data) || self.response_data.len() >= MAX_RESPONSE_BYTES {
+            let complete = self.response_complete();
+            if self.response_header_end.map_or(self.response_data.len() > MAX_HTTP_HEADER_BYTES, |end| end > MAX_HTTP_HEADER_BYTES) {
+                self.state = HttpState::Failed;
+            } else if complete || self.response_data.len() >= MAX_HTTP_RESPONSE_BYTES {
                 self.finish(net);
             }
             return;
@@ -403,14 +479,69 @@ impl TcpHttpClient {
         }
         if !app.is_empty() {
             self.state = HttpState::ReceivingData;
-            let space = MAX_RESPONSE_BYTES.saturating_sub(self.response_data.len());
+            let space = MAX_HTTP_RESPONSE_BYTES.saturating_sub(self.response_data.len());
             self.response_data.extend_from_slice(&app[..app.len().min(space)]);
         }
-        if closed || is_http_response_complete(&self.response_data) || self.response_data.len() >= MAX_RESPONSE_BYTES {
+        let complete = self.response_complete();
+        if self.response_header_end.map_or(self.response_data.len() > MAX_HTTP_HEADER_BYTES, |end| end > MAX_HTTP_HEADER_BYTES) {
+            self.state = HttpState::Failed;
+        } else if closed || complete || self.response_data.len() >= MAX_HTTP_RESPONSE_BYTES {
             self.send_ack(net, TCP_ACK | TCP_FIN, &[]);
             self.local_seq = self.local_seq.wrapping_add(1);
             self.finish(net);
         }
+    }
+
+    fn response_complete(&mut self) -> bool {
+        let header_end = if let Some(end) = self.response_header_end {
+            end
+        } else {
+            let scan_start = self.header_scan_offset.saturating_sub(3);
+            let found = self.response_data[scan_start..]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|offset| scan_start + offset);
+            self.header_scan_offset = self.response_data.len();
+            match found {
+                Some(end) => {
+                    self.response_header_end = Some(end);
+                    end
+                }
+                None => return false,
+            }
+        };
+        if header_end > MAX_HTTP_HEADER_BYTES {
+            return false;
+        }
+        let header_bytes = &self.response_data[..header_end];
+        let body_start = header_end + 4;
+        let body_len = self.response_data.len().saturating_sub(body_start);
+        let Ok(header_text) = core::str::from_utf8(header_bytes) else {
+            return false;
+        };
+        let mut is_chunked = false;
+        for line in header_text.lines().skip(1) {
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim();
+                if key.eq_ignore_ascii_case("content-length") {
+                    if let Ok(expected) = value.parse::<usize>() {
+                        return body_len >= expected;
+                    }
+                } else if key.eq_ignore_ascii_case("transfer-encoding") {
+                    is_chunked = value.to_ascii_lowercase().contains("chunked");
+                }
+            }
+        }
+        if !is_chunked {
+            return false;
+        }
+        let scan_start = self.chunked_scan_offset.max(body_start).saturating_sub(4);
+        let complete = self.response_data[scan_start..]
+            .windows(5)
+            .any(|w| w == b"0\r\n\r\n");
+        self.chunked_scan_offset = self.response_data.len();
+        complete
     }
 
     fn process_packet(&mut self, pkt: &[u8], net: &mut NetworkStack) {
@@ -552,37 +683,13 @@ impl TcpHttpClient {
         self.last_headers = header_lines(&self.response_data);
         self.raw_body = raw_bytes;
         self.html_body = html_str;
+        self.response_data = Vec::new();
         self.state = HttpState::Complete;
     }
 
     pub fn decode_chunked_body(&self, data: &[u8]) -> Vec<u8> {
         decode_chunked_body(data)
     }
-}
-
-fn is_http_response_complete(raw: &[u8]) -> bool {
-    let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return false;
-    };
-    let header_bytes = &raw[..header_end];
-    let body_bytes = &raw[header_end + 4..];
-    let Ok(header_str) = core::str::from_utf8(header_bytes) else {
-        return false;
-    };
-    for line in header_str.lines().skip(1) {
-        if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim();
-            let val = v.trim();
-            if key.eq_ignore_ascii_case("content-length") {
-                if let Ok(expected_len) = val.parse::<usize>() {
-                    return body_bytes.len() >= expected_len;
-                }
-            } else if key.eq_ignore_ascii_case("transfer-encoding") && val.to_ascii_lowercase().contains("chunked") {
-                return body_bytes.windows(5).any(|w| w == b"0\r\n\r\n");
-            }
-        }
-    }
-    false
 }
 
 pub fn header_values(raw: &[u8], name: &str) -> Vec<String> {
@@ -729,7 +836,26 @@ pub fn parse_http_payload_bytes(raw_response: &[u8]) -> (u16, Vec<u8>, String) {
         body_bytes.to_vec()
     };
 
-    let html_string = decode_text_with_charset(&clean_body, &lower_headers);
+    let binary_body = lower_headers.lines().any(|line| {
+        line.split_once(':').map_or(false, |(key, value)| {
+            if !key.trim().eq_ignore_ascii_case("content-type") {
+                return false;
+            }
+            let mime = value.trim().split(';').next().unwrap_or("").trim();
+            mime.starts_with("image/")
+                || mime.starts_with("audio/")
+                || mime.starts_with("video/")
+                || mime.starts_with("font/")
+                || mime == "application/octet-stream"
+                || mime == "application/pdf"
+                || mime == "application/wasm"
+        })
+    });
+    let html_string = if binary_body {
+        String::new()
+    } else {
+        decode_text_with_charset(&clean_body, &lower_headers)
+    };
     (status_code, clean_body, html_string)
 }
 
