@@ -23,7 +23,7 @@ use core::cell::RefCell;
 use nc_app::theme::SIDEBAR;
 use nc_app::{App, AppInfo, Context, Icon, Input, KeyCode, Update};
 use nc_font::{text_width, Style};
-use nc_gfx::{rgb, Canvas, Rect};
+use nc_gfx::{lerp_color, rgb, Canvas, Rect};
 use nc_js::{Interp, Value};
 use nc_net::{global as net_global, HttpState, TcpHttpClient};
 use nc_ui::{
@@ -36,7 +36,7 @@ use crate::css::Stylesheet;
 use crate::dom::{DomTree, NodeType};
 use crate::html::{sanitize_text, HtmlParser, MAX_HTML_BYTES};
 use crate::image::DecodedImage;
-use crate::jsdom::{create_runtime, pending_scripts, pump_step, run_js_call, run_script, JsHost};
+use crate::jsdom::{create_runtime, has_pending_script, next_pending_script, pump_step, run_js_call, run_script, JsHost};
 use crate::layout::{
     page_text_style, set_viewport, LayoutBox, LayoutEngine, WidgetKind, DECO_LINE_THROUGH, DECO_OVERLINE,
     DECO_UNDERLINE,
@@ -46,9 +46,45 @@ use crate::url::{build_form_url, normalize_input_url, resolve_url};
 const MAX_SUGGESTIONS: usize = 6;
 const SUGGEST_DEBOUNCE_TICKS: u32 = 12;
 const MAX_CSS_TRIED: usize = 40;
-const MAX_IMG_TRIED: usize = 60;
+const MAX_EXTERNAL_CSS_BYTES: usize = 256 * 1024;
+const MAX_IMG_TRIED: usize = 24;
+const MAX_IMAGES_PER_PAGE: usize = 12;
+const MAX_PAGE_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_SCRIPTS: usize = 80;
-const IMG_MAX_SIDE: u32 = 640;
+const MAX_PAGE_SCRIPT_BYTES: usize = 1024 * 1024;
+
+fn draw_linear_gradient(canvas: &mut Canvas<'_>, clipped: Rect, full: Rect, start: u32, end: u32, horizontal: bool) {
+    let span = if horizontal { full.width } else { full.height };
+    if span <= 1 {
+        canvas.fill_rect(clipped.x, clipped.y, clipped.width, clipped.height, end);
+        return;
+    }
+    if horizontal {
+        let right = clipped.x.saturating_add(clipped.width);
+        for x in clipped.x..right {
+            let offset = x.saturating_sub(full.x).clamp(0, span - 1);
+            let t = (offset.saturating_mul(255) / (span - 1)) as u32;
+            canvas.fill_rect(x, clipped.y, 1, clipped.height, lerp_color(start, end, t));
+        }
+    } else {
+        let bottom = clipped.y.saturating_add(clipped.height);
+        for y in clipped.y..bottom {
+            let offset = y.saturating_sub(full.y).clamp(0, span - 1);
+            let t = (offset.saturating_mul(255) / (span - 1)) as u32;
+            canvas.fill_rect(clipped.x, y, clipped.width, 1, lerp_color(start, end, t));
+        }
+    }
+}
+
+fn draw_rect_border(canvas: &mut Canvas<'_>, r: Rect, width: i32, color: u32) {
+    let w = width.max(0).min(r.width / 2).min(r.height / 2);
+    if w == 0 { return; }
+    canvas.fill_rect(r.x, r.y, r.width, w, color);
+    canvas.fill_rect(r.x, r.y + r.height - w, r.width, w, color);
+    canvas.fill_rect(r.x, r.y + w, w, (r.height - 2 * w).max(0), color);
+    canvas.fill_rect(r.x + r.width - w, r.y + w, w, (r.height - 2 * w).max(0), color);
+}
+const IMG_MAX_SIDE: u32 = 512;
 const MAX_REFRESH_HOPS: u8 = 3;
 const MAX_HISTORY: usize = 64;
 const LAYOUT_MIN_TICKS: u32 = 4;
@@ -107,6 +143,7 @@ pub struct BrowserApp {
     cookies: Rc<RefCell<CookieJar>>,
     stylesheet: Stylesheet,
     css_external: Vec<String>,
+    css_external_bytes: usize,
     images: Vec<(String, DecodedImage)>,
     css_queue: Vec<String>,
     img_queue: Vec<(String, String)>,
@@ -136,6 +173,9 @@ pub struct BrowserApp {
     js: Option<Interp>,
     jshost: Option<Rc<JsHost>>,
     scripts_done: Vec<usize>,
+    scripts_bytes: usize,
+    scripts_pending: bool,
+    script_work_tick: u32,
     js_ready: bool,
     js_now: f64,
     style_sig: usize,
@@ -254,30 +294,36 @@ fn fit_tail(text: &str, st: &Style, max_w: i32) -> String {
     if text_width(text, st) <= max_w {
         return String::from(text);
     }
-    let idxs: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-    for &start in idxs.iter() {
-        let slice = &text[start..];
-        if text_width(slice, st) <= max_w {
-            return String::from(slice);
+    let starts: Vec<usize> = text.char_indices().map(|(i, _)| i).chain(core::iter::once(text.len())).collect();
+    let mut low = 0usize;
+    let mut high = starts.len();
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if text_width(&text[starts[mid]..], st) <= max_w {
+            high = mid;
+        } else {
+            low = mid + 1;
         }
     }
-    String::new()
+    starts.get(low).map(|&start| String::from(&text[start..])).unwrap_or_default()
 }
 
 fn fit_head(text: &str, st: &Style, max_w: i32) -> String {
     if text_width(text, st) <= max_w {
         return String::from(text);
     }
-    let mut end_list: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-    end_list.push(text.len());
-    let mut best = 0usize;
-    for &e in end_list.iter() {
-        if text_width(&text[..e], st) <= max_w {
-            best = e;
+    let ends: Vec<usize> = text.char_indices().map(|(i, _)| i).chain(core::iter::once(text.len())).collect();
+    let mut low = 0usize;
+    let mut high = ends.len();
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if text_width(&text[..ends[mid]], st) <= max_w {
+            low = mid + 1;
         } else {
-            break;
+            high = mid;
         }
     }
+    let best = ends.get(low.saturating_sub(1)).copied().unwrap_or(0);
     String::from(&text[..best])
 }
 
@@ -291,7 +337,12 @@ fn looks_like_query(q: &str) -> bool {
 }
 
 fn parse_suggestions(body: &str) -> Vec<String> {
-    let c: Vec<char> = body.chars().collect();
+    const MAX_SUGGESTION_BODY_BYTES: usize = 64 * 1024;
+    let mut safe_len = body.len().min(MAX_SUGGESTION_BODY_BYTES);
+    while safe_len > 0 && !body.is_char_boundary(safe_len) {
+        safe_len -= 1;
+    }
+    let c: Vec<char> = body[..safe_len].chars().collect();
     let mut out: Vec<String> = Vec::new();
     let mut depth = 0i32;
     let mut i = 0usize;
@@ -366,7 +417,7 @@ impl BrowserApp {
             return;
         }
         self.suggest_want = None;
-        if !looks_like_query(&q) {
+        if q.len() > 256 || !looks_like_query(&q) {
             return;
         }
         let url = build_form_url(
@@ -396,6 +447,7 @@ impl BrowserApp {
             cookies: Rc::new(RefCell::new(CookieJar::new())),
             stylesheet: Stylesheet::new(),
             css_external: Vec::new(),
+            css_external_bytes: 0,
             images: Vec::new(),
             css_queue: Vec::new(),
             img_queue: Vec::new(),
@@ -425,6 +477,9 @@ impl BrowserApp {
             js: None,
             jshost: None,
             scripts_done: Vec::new(),
+            scripts_bytes: 0,
+            scripts_pending: false,
+            script_work_tick: u32::MAX,
             js_ready: false,
             js_now: 0.0,
             style_sig: 0,
@@ -445,6 +500,7 @@ impl BrowserApp {
         self.img_tried.clear();
         self.img_skipped.clear();
         self.css_external.clear();
+        self.css_external_bytes = 0;
         self.img_total = 0;
         self.img_done = 0;
         self.images.clear();
@@ -455,13 +511,37 @@ impl BrowserApp {
         self.js = None;
         self.jshost = None;
         self.scripts_done.clear();
+        self.scripts_bytes = 0;
+        self.scripts_pending = false;
+        self.script_work_tick = u32::MAX;
         self.js_ready = false;
         self.js_now = 0.0;
         self.pending_nav = None;
     }
 
     fn style_signature(&self) -> usize {
-        self.tree.borrow().collect_style_texts().iter().map(|s| s.len() + 1).sum()
+        let tree = self.tree.borrow();
+        let mut hash = 0x811C9DC5usize;
+        for node in &tree.nodes {
+            if let NodeType::Element { tag, .. } = &node.node_type {
+                if tag != "style" {
+                    continue;
+                }
+                hash ^= 0xFF;
+                hash = hash.wrapping_mul(0x01000193);
+                for &child in &node.children {
+                    if let Some(child_node) = tree.nodes.get(child) {
+                        if let NodeType::Text(text) = &child_node.node_type {
+                            for byte in text.bytes() {
+                                hash ^= byte as usize;
+                                hash = hash.wrapping_mul(0x01000193);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        hash
     }
 
     fn rebuild_stylesheet(&mut self) {
@@ -544,6 +624,10 @@ impl BrowserApp {
 
     fn go(&mut self, raw: &str, push_history: bool) {
         let trimmed = raw.trim();
+        if trimmed.len() > 4096 {
+            self.show_error("about:blank", "URL exceeds the 4096-byte safety limit");
+            return;
+        }
         if trimmed.is_empty() {
             return;
         }
@@ -644,7 +728,7 @@ impl BrowserApp {
 
     fn follow_link(&mut self, href: &str) {
         let h = href.trim();
-        if h.is_empty() || h.starts_with('#') {
+        if h.len() > 4096 || h.is_empty() || h.starts_with('#') {
             return;
         }
         let target = if h.eq_ignore_ascii_case("about:home")
@@ -727,7 +811,17 @@ impl BrowserApp {
             Some(n) => self.input_value(n),
             None => String::new(),
         };
-        let dest = build_form_url(&self.current_url, action, name, &value);
+        let mut safe_value = value;
+        let mut safe_len = safe_value.len().min(4096);
+        while safe_len > 0 && !safe_value.is_char_boundary(safe_len) { safe_len -= 1; }
+        safe_value.truncate(safe_len);
+        let mut action_len = action.len().min(2048);
+        while action_len > 0 && !action.is_char_boundary(action_len) { action_len -= 1; }
+        let mut name_len = name.len().min(256);
+        while name_len > 0 && !name.is_char_boundary(name_len) { name_len -= 1; }
+        let safe_action = &action[..action_len];
+        let safe_name = &name[..name_len];
+        let dest = build_form_url(&self.current_url, safe_action, safe_name, &safe_value);
         self.refresh_hops = 0;
         self.go(&dest, true);
     }
@@ -821,7 +915,8 @@ impl BrowserApp {
     fn on_main_loaded(&mut self) {
         let status = self.client.status_code;
         let final_url = self.final_url_from_client();
-        let mut body = self.client.html_body.clone();
+        let mut body = core::mem::take(&mut self.client.html_body);
+        self.client.raw_body = Vec::new();
         if body.len() > MAX_HTML_BYTES {
             let mut cut = MAX_HTML_BYTES;
             while cut > 0 && !body.is_char_boundary(cut) {
@@ -879,6 +974,7 @@ impl BrowserApp {
             (t.collect_stylesheet_links(), t.collect_image_sources())
         };
         for l in links {
+            if l.len() > 2048 { continue; }
             let full = resolve_url(&base, &l);
             if (full.starts_with("http://") || full.starts_with("https://")) && !self.css_tried.contains(&full) && self.css_tried.len() < MAX_CSS_TRIED {
                 self.css_tried.push(full.clone());
@@ -886,6 +982,7 @@ impl BrowserApp {
             }
         }
         for src in imgs {
+            if src.len() > 2048 { continue; }
             if let Some(reason) = image_skip_reason(&src) {
                 if !reason.is_empty() && self.img_skipped.len() < 200 && !self.img_skipped.iter().any(|(k, _)| *k == src) {
                     self.img_skipped.push((src.clone(), reason));
@@ -951,35 +1048,50 @@ impl BrowserApp {
         self.sync_after_js();
     }
 
-    /// Runs inline scripts in document order; starts a fetch (and returns true) at the first external one.
+    /// Executes at most one script item per frame, preserving document order.
     fn advance_scripts(&mut self) -> bool {
-        let mut guard = 0;
-        loop {
-            guard += 1;
-            if guard > 400 || self.pending_nav.is_some() {
-                return false;
+        if self.pending_nav.is_some() {
+            self.scripts_pending = false;
+            return false;
+        }
+        if self.scripts_done.len() >= MAX_SCRIPTS {
+            self.scripts_pending = false;
+            if self.js.is_some() && !self.js_ready {
+                self.js_ready = true;
+                self.fire_ready();
+                self.sync_after_js();
             }
-            let first = {
-                let t = self.tree.borrow();
-                pending_scripts(&t, &self.scripts_done).into_iter().next()
-            };
-            let item = match first {
-                Some(i) => i,
-                None => {
-                    if self.js.is_some() && !self.js_ready {
-                        self.js_ready = true;
-                        self.fire_ready();
-                        continue;
+            self.start_next_fetch();
+            return false;
+        }
+
+        let item = {
+            let t = self.tree.borrow();
+            next_pending_script(&t, &self.scripts_done)
+        };
+        let Some(item) = item else {
+            if self.js.is_some() && !self.js_ready {
+                self.js_ready = true;
+                self.fire_ready();
+                self.sync_after_js();
+            }
+            self.scripts_pending = false;
+            self.start_next_fetch();
+            self.script_work_tick = self.tick;
+            return false;
+        };
+
+        self.scripts_done.push(item.node);
+        match item.src {
+            None => {
+                let remaining = MAX_PAGE_SCRIPT_BYTES.saturating_sub(self.scripts_bytes);
+                if item.code.len() > remaining {
+                    self.ensure_js();
+                    if let Some(h) = &self.jshost {
+                        h.note_error("page JavaScript source budget exceeded".into());
                     }
-                    return false;
-                }
-            };
-            if self.scripts_done.len() >= MAX_SCRIPTS {
-                return false;
-            }
-            self.scripts_done.push(item.node);
-            match item.src {
-                None => {
+                } else {
+                    self.scripts_bytes = self.scripts_bytes.saturating_add(item.code.len());
                     self.ensure_js();
                     let label = alloc::format!("inline script {}", item.node);
                     if let Some(js) = self.js.as_mut() {
@@ -987,16 +1099,28 @@ impl BrowserApp {
                     }
                     self.sync_after_js();
                 }
-                Some(src) => {
-                    let full = resolve_url(&self.current_url, &src);
-                    if !(full.starts_with("http://") || full.starts_with("https://")) {
-                        continue;
-                    }
-                    self.ensure_js();
-                    self.active = Active::Script(item.node);
-                    self.nav(&full);
+                self.scripts_pending = true;
+                self.script_work_tick = self.tick;
+                true
+            }
+            Some(src) => {
+                if src.len() > 2048 {
+                    self.scripts_pending = true;
+                    self.script_work_tick = self.tick;
                     return true;
                 }
+                let full = resolve_url(&self.current_url, &src);
+                if !(full.starts_with("http://") || full.starts_with("https://")) {
+                    self.scripts_pending = true;
+                    self.script_work_tick = self.tick;
+                    return true;
+                }
+                self.ensure_js();
+                self.active = Active::Script(item.node);
+                self.scripts_pending = false;
+                self.script_work_tick = self.tick;
+                self.nav(&full);
+                true
             }
         }
     }
@@ -1007,7 +1131,17 @@ impl BrowserApp {
             self.nav(&css_url);
             return;
         }
-        if self.advance_scripts() {
+        if self.scripts_pending {
+            return;
+        }
+        let has_pending_script = if self.scripts_done.len() < MAX_SCRIPTS {
+            let t = self.tree.borrow();
+            has_pending_script(&t, &self.scripts_done)
+        } else {
+            false
+        };
+        if has_pending_script || (self.js.is_some() && !self.js_ready) {
+            self.scripts_pending = true;
             return;
         }
         self.queue_new_resources();
@@ -1064,43 +1198,75 @@ impl BrowserApp {
                 }
                 Active::Css => {
                     if ok {
-                        let text = self.client.html_body.clone();
-                        self.stylesheet.append_css(&text);
-                        self.css_external.push(text);
+                        let remaining = MAX_EXTERNAL_CSS_BYTES.saturating_sub(self.css_external_bytes);
+                        let mut safe_len = self.client.html_body.len().min(remaining);
+                        while safe_len > 0 && !self.client.html_body.is_char_boundary(safe_len) {
+                            safe_len -= 1;
+                        }
+                        if safe_len > 0 {
+                            let text = String::from(&self.client.html_body[..safe_len]);
+                            self.stylesheet.append_css(&text);
+                            self.css_external_bytes = self.css_external_bytes.saturating_add(safe_len);
+                            self.css_external.push(text);
+                        }
                     }
+                    self.client.html_body = String::new();
+                    self.client.raw_body = Vec::new();
+                    self.active = Active::None;
                     self.start_next_fetch();
                 }
                 Active::Script(node) => {
                     let loaded = ok && self.client.status_code < 400;
                     if loaded {
-                        let code = self.client.html_body.clone();
-                        let full = self.final_url_from_client();
-                        let short: String = full.chars().rev().take(70).collect::<Vec<char>>().into_iter().rev().collect();
-                        let label = alloc::format!("script#{} {}", node, short);
-                        if let Some(js) = self.js.as_mut() {
-                            run_script(js, &label, &code);
+                        let code = core::mem::take(&mut self.client.html_body);
+                        self.client.raw_body = Vec::new();
+                        let remaining = MAX_PAGE_SCRIPT_BYTES.saturating_sub(self.scripts_bytes);
+                        if code.len() <= remaining {
+                            self.scripts_bytes = self.scripts_bytes.saturating_add(code.len());
+                            let full = self.final_url_from_client();
+                            let short: String = full.chars().rev().take(70).collect::<Vec<char>>().into_iter().rev().collect();
+                            let label = alloc::format!("script#{} {}", node, short);
+                            if let Some(js) = self.js.as_mut() {
+                                run_script(js, &label, &code);
+                            }
+                        } else if let Some(h) = &self.jshost {
+                            h.note_error("page JavaScript source budget exceeded".into());
                         }
                     } else if let Some(h) = &self.jshost {
                         h.note_error(alloc::format!("script {} failed to load (HTTP {})", node, self.client.status_code));
                     }
+                    if !loaded {
+                        self.client.html_body = String::new();
+                        self.client.raw_body = Vec::new();
+                    }
                     self.sync_after_js();
                     self.fire_load(node, loaded);
+                    self.active = Active::None;
+                    self.scripts_pending = true;
+                    self.script_work_tick = self.tick;
                     self.start_next_fetch();
                 }
                 Active::Img(key) => {
-                    if ok && self.client.status_code < 400 {
-                        let bytes = self.client.raw_body.clone();
-                        if let Some(img) = DecodedImage::from_bytes(&bytes, IMG_MAX_SIDE) {
-                            self.images.push((key, img));
+                    if ok && self.client.status_code < 400 && self.images.len() < MAX_IMAGES_PER_PAGE {
+                        if let Some(img) = DecodedImage::from_bytes(&self.client.raw_body, IMG_MAX_SIDE) {
+                            let bytes = img.rgba.len();
+                            let used_bytes = self.images.iter().map(|(_, image)| image.rgba.len()).sum::<usize>();
+                            if used_bytes.saturating_add(bytes) <= MAX_PAGE_IMAGE_BYTES {
+                                self.images.push((key, img));
+                            }
                         }
                     }
+                    self.client.raw_body = Vec::new();
+                    self.client.html_body = String::new();
                     self.img_done += 1;
+                    self.active = Active::None;
                     self.start_next_fetch();
                 }
                 Active::Suggest => {
                     if ok && self.url_focused {
-                        let body = self.client.html_body.clone();
-                        self.suggestions = parse_suggestions(&body);
+                        self.suggestions = parse_suggestions(&self.client.html_body);
+                        self.client.html_body = String::new();
+                        self.client.raw_body = Vec::new();
                     }
                     self.active = Active::None;
                 }
@@ -1120,6 +1286,10 @@ impl BrowserApp {
 
     /// Per-frame JavaScript work: timers, JS network requests, resource discovery.
     fn js_frame(&mut self) -> bool {
+        if self.active == Active::None && self.scripts_pending && self.script_work_tick != self.tick {
+            self.advance_scripts();
+            return true;
+        }
         if self.js.is_none() {
             return false;
         }
@@ -1130,8 +1300,13 @@ impl BrowserApp {
             if js.now_ms > self.js_now {
                 self.js_now = js.now_ms;
             }
-            let n = js.run_timers(self.js_now, 20);
+            let n = js.run_timers(self.js_now, 4);
             if n > 0 {
+                redraw = true;
+            }
+            let had_microtasks = js.microtasks_pending();
+            if had_microtasks {
+                js.run_microtasks();
                 redraw = true;
             }
             if idle {
@@ -1427,13 +1602,24 @@ impl BrowserApp {
         if b.style.sides_custom {
             // Different border per side (e.g. only `border-bottom`): background first, then four strips.
             if let Some(bg) = b.style.bg_color {
-                if bg != under_bg {
+                if bg != under_bg || b.style.bg_gradient.is_some() {
                     if let Some(r) = self.clip_to_viewport(b.rect, vp) {
-                        let radius = b.style.border_radius.max(0).min(r.height / 2);
-                        draw_panel(canvas, r, radius, bg, 255, bg, 0);
+                        if let Some((start, end, horizontal)) = b.style.bg_gradient {
+                            let full = Rect::new(vp.x + b.rect.x, vp.y + b.rect.y - self.scroll_y, b.rect.width, b.rect.height);
+                            draw_linear_gradient(canvas, r, full, start, end, horizontal);
+                        } else {
+                            let radius = b.style.border_radius.max(0).min(r.height / 2);
+                            draw_panel(canvas, r, radius, bg, 255, bg, 0);
+                        }
                     }
                 }
-                child_bg = bg;
+                child_bg = if b.style.bg_gradient.is_some() { u32::MAX } else { bg };
+            } else if let Some((start, end, horizontal)) = b.style.bg_gradient {
+                if let Some(r) = self.clip_to_viewport(b.rect, vp) {
+                    let full = Rect::new(vp.x + b.rect.x, vp.y + b.rect.y - self.scroll_y, b.rect.width, b.rect.height);
+                    draw_linear_gradient(canvas, r, full, start, end, horizontal);
+                }
+                child_bg = u32::MAX;
             }
             let rc = b.rect;
             let w = b.style.border_sides;
@@ -1453,23 +1639,46 @@ impl BrowserApp {
             }
         } else if let Some(bg) = b.style.bg_color {
             let has_border = b.style.border_width > 0 && b.style.border_color.is_some();
-            if bg != under_bg || has_border {
+            if bg != under_bg || has_border || b.style.bg_gradient.is_some() {
                 if let Some(r) = self.clip_to_viewport(b.rect, vp) {
-                    let radius = b.style.border_radius.max(0).min(r.height / 2);
-                    if has_border {
-                        let bc = b.style.border_color.unwrap_or(bg);
-                        draw_panel(canvas, r, radius, bg, 255, bc, 255);
+                    if let Some((start, end, horizontal)) = b.style.bg_gradient {
+                        let full = Rect::new(vp.x + b.rect.x, vp.y + b.rect.y - self.scroll_y, b.rect.width, b.rect.height);
+                        draw_linear_gradient(canvas, r, full, start, end, horizontal);
+                        if has_border {
+                            draw_rect_border(canvas, r, b.style.border_width, b.style.border_color.unwrap_or(bg));
+                        }
                     } else {
-                        draw_panel(canvas, r, radius, bg, 255, bg, 0);
+                        let radius = b.style.border_radius.max(0).min(r.height / 2);
+                        if has_border {
+                            let bc = b.style.border_color.unwrap_or(bg);
+                            draw_panel(canvas, r, radius, bg, 255, bc, 255);
+                        } else {
+                            draw_panel(canvas, r, radius, bg, 255, bg, 0);
+                        }
                     }
                 }
             }
-            child_bg = bg;
+            child_bg = if b.style.bg_gradient.is_some() { u32::MAX } else { bg };
+        } else if let Some((start, end, horizontal)) = b.style.bg_gradient {
+            if let Some(r) = self.clip_to_viewport(b.rect, vp) {
+                let full = Rect::new(vp.x + b.rect.x, vp.y + b.rect.y - self.scroll_y, b.rect.width, b.rect.height);
+                draw_linear_gradient(canvas, r, full, start, end, horizontal);
+                if b.style.border_width > 0 {
+                    if let Some(bc) = b.style.border_color {
+                        draw_rect_border(canvas, r, b.style.border_width, bc);
+                    }
+                }
+            }
+            child_bg = u32::MAX;
         } else if b.style.border_width > 0 {
             if let Some(bc) = b.style.border_color {
                 if let Some(r) = self.clip_to_viewport(b.rect, vp) {
-                    let radius = b.style.border_radius.max(0).min(r.height / 2);
-                    draw_panel(canvas, r, radius, under_bg, 255, bc, 255);
+                    if under_bg == u32::MAX {
+                        draw_rect_border(canvas, r, b.style.border_width, bc);
+                    } else {
+                        let radius = b.style.border_radius.max(0).min(r.height / 2);
+                        draw_panel(canvas, r, radius, under_bg, 255, bc, 255);
+                    }
                 }
             }
         }
@@ -1595,9 +1804,11 @@ impl App for BrowserApp {
                 }
                 KeyCode::Char(ch) => {
                     if self.url_focused {
-                        self.url_input.push(ch);
-                        self.note_typed();
-                        redraw = true;
+                        if self.url_input.len() < 2048 {
+                            self.url_input.push(ch);
+                            self.note_typed();
+                            redraw = true;
+                        }
                     } else if let Some(n) = self.focused_input {
                         let mut v = self.input_value(n);
                         if v.len() < 256 {

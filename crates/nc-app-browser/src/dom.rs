@@ -1,7 +1,14 @@
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+pub const MAX_RUNTIME_DOM_NODES: usize = 12_000;
+const MAX_DOM_TEXT_BYTES: usize = 8 * 1024;
+const MAX_DOM_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_DOM_INNER_HTML_BYTES: usize = 256 * 1024;
+const MAX_DOM_TREE_DEPTH: usize = 64;
 
 #[derive(Clone, Debug)]
 pub enum NodeType {
@@ -52,6 +59,9 @@ impl DomTree {
     }
 
     pub fn add_node(&mut self, node_type: NodeType, parent_id: usize) -> usize {
+        if self.nodes.len() >= MAX_RUNTIME_DOM_NODES || parent_id >= self.nodes.len() {
+            return 0;
+        }
         let id = self.nodes.len();
         let node = DomNode {
             id,
@@ -102,11 +112,14 @@ impl DomTree {
 
     pub fn text_content(&self, node_id: usize) -> String {
         let mut out = String::new();
-        self.collect_text_recursive(node_id, &mut out);
+        self.collect_text_recursive(node_id, &mut out, 0);
         out
     }
 
-    fn collect_text_recursive(&self, node_id: usize, out: &mut String) {
+    fn collect_text_recursive(&self, node_id: usize, out: &mut String, depth: usize) {
+        if out.len() >= MAX_DOM_OUTPUT_BYTES || depth > MAX_DOM_TREE_DEPTH {
+            return;
+        }
         let Some(node) = self.nodes.get(node_id) else {
             return;
         };
@@ -115,14 +128,18 @@ impl DomTree {
                 if !out.is_empty() && !out.ends_with(' ') && !t.starts_with(' ') {
                     out.push(' ');
                 }
-                out.push_str(t);
+                let remaining = MAX_DOM_OUTPUT_BYTES.saturating_sub(out.len());
+                let mut end = t.len().min(remaining);
+                while end > 0 && !t.is_char_boundary(end) { end -= 1; }
+                out.push_str(&t[..end]);
             }
             NodeType::Element { tag, .. } => {
                 if tag == "script" || tag == "style" {
                     return;
                 }
                 for &child in &node.children {
-                    self.collect_text_recursive(child, out);
+                    if out.len() >= MAX_DOM_OUTPUT_BYTES { break; }
+                    self.collect_text_recursive(child, out, depth + 1);
                 }
             }
         }
@@ -170,13 +187,20 @@ impl DomTree {
 
     pub fn collect_stylesheet_links(&self) -> Vec<String> {
         let mut links = Vec::new();
+        let mut seen = BTreeSet::new();
         for node in &self.nodes {
             if let NodeType::Element { ref tag, .. } = node.node_type {
                 if tag == "link" {
                     let rel = self.attr(node.id, "rel").unwrap_or("");
                     let href = self.attr(node.id, "href").unwrap_or("");
                     if (rel.eq_ignore_ascii_case("stylesheet") || href.ends_with(".css")) && !href.is_empty() {
-                        links.push(String::from(href));
+                        let value = String::from(href);
+                        if seen.insert(value.clone()) {
+                            links.push(value);
+                            if links.len() >= 40 {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -186,12 +210,19 @@ impl DomTree {
 
     pub fn collect_image_sources(&self) -> Vec<String> {
         let mut srcs = Vec::new();
+        let mut seen = BTreeSet::new();
         for node in &self.nodes {
             if let NodeType::Element { ref tag, .. } = node.node_type {
                 if tag == "img" {
                     let src = self.attr(node.id, "src").or_else(|| self.attr(node.id, "data-src")).unwrap_or("");
-                    if !src.is_empty() && !srcs.iter().any(|s| s == src) {
-                        srcs.push(String::from(src));
+                    if !src.is_empty() {
+                        let value = String::from(src);
+                        if seen.insert(value.clone()) {
+                            srcs.push(value);
+                            if srcs.len() >= 60 {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -202,6 +233,9 @@ impl DomTree {
     // ---------- mutation API (used by the JS bridge) ----------
 
     pub fn create_element(&mut self, tag: &str) -> usize {
+        if self.nodes.len() >= MAX_RUNTIME_DOM_NODES {
+            return 0;
+        }
         let id = self.nodes.len();
         self.nodes.push(DomNode {
             id,
@@ -213,8 +247,13 @@ impl DomTree {
     }
 
     pub fn create_text(&mut self, text: &str) -> usize {
+        if self.nodes.len() >= MAX_RUNTIME_DOM_NODES {
+            return 0;
+        }
+        let mut safe_len = text.len().min(MAX_DOM_TEXT_BYTES);
+        while safe_len > 0 && !text.is_char_boundary(safe_len) { safe_len -= 1; }
         let id = self.nodes.len();
-        self.nodes.push(DomNode { id, node_type: NodeType::Text(String::from(text)), children: Vec::new(), parent: None });
+        self.nodes.push(DomNode { id, node_type: NodeType::Text(String::from(&text[..safe_len])), children: Vec::new(), parent: None });
         id
     }
 
@@ -312,14 +351,20 @@ impl DomTree {
     }
 
     fn raw_text_into(&self, id: usize, out: &mut String, depth: usize) {
-        if depth > 200 {
+        if depth > MAX_DOM_TREE_DEPTH || out.len() >= MAX_DOM_OUTPUT_BYTES {
             return;
         }
         if let Some(n) = self.nodes.get(id) {
             match &n.node_type {
-                NodeType::Text(t) => out.push_str(t),
+                NodeType::Text(t) => {
+                    let remaining = MAX_DOM_OUTPUT_BYTES.saturating_sub(out.len());
+                    let mut end = t.len().min(remaining);
+                    while end > 0 && !t.is_char_boundary(end) { end -= 1; }
+                    out.push_str(&t[..end]);
+                }
                 NodeType::Element { .. } => {
                     for &c in &n.children {
+                        if out.len() >= MAX_DOM_OUTPUT_BYTES { break; }
                         self.raw_text_into(c, out, depth + 1);
                     }
                 }
@@ -331,13 +376,15 @@ impl DomTree {
         if id >= self.nodes.len() {
             return;
         }
+        let mut safe_len = text.len().min(MAX_DOM_TEXT_BYTES);
+        while safe_len > 0 && !text.is_char_boundary(safe_len) { safe_len -= 1; }
         if let NodeType::Text(t) = &mut self.nodes[id].node_type {
-            *t = String::from(text);
+            *t = String::from(&text[..safe_len]);
             return;
         }
         self.clear_children(id);
-        if !text.is_empty() {
-            let t = self.create_text(text);
+        if safe_len > 0 {
+            let t = self.create_text(&text[..safe_len]);
             self.append_child(id, t);
         }
     }
@@ -354,19 +401,26 @@ impl DomTree {
     }
 
     fn import_node(&mut self, src: &DomTree, id: usize, dest_parent: usize, depth: usize) {
-        if depth > 200 {
+        if depth > MAX_DOM_TREE_DEPTH || self.nodes.len() >= MAX_RUNTIME_DOM_NODES {
             return;
         }
-        let nt = src.nodes[id].node_type.clone();
+        let Some(source) = src.nodes.get(id) else { return; };
+        let nt = source.node_type.clone();
         let new_id = self.add_node(nt, dest_parent);
-        let kids = src.nodes[id].children.clone();
+        if new_id == 0 { return; }
+        let kids = source.children.clone();
         for k in kids {
+            if self.nodes.len() >= MAX_RUNTIME_DOM_NODES { break; }
             self.import_node(src, k, new_id, depth + 1);
         }
     }
 
     pub fn clone_node(&mut self, id: usize, deep: bool) -> usize {
-        if id >= self.nodes.len() {
+        self.clone_node_inner(id, deep, 0)
+    }
+
+    fn clone_node_inner(&mut self, id: usize, deep: bool, depth: usize) -> usize {
+        if id >= self.nodes.len() || depth > MAX_DOM_TREE_DEPTH || self.nodes.len() >= MAX_RUNTIME_DOM_NODES {
             return 0;
         }
         let nt = self.nodes[id].node_type.clone();
@@ -375,8 +429,9 @@ impl DomTree {
         if deep {
             let kids = self.nodes[id].children.clone();
             for k in kids {
-                let c = self.clone_node(k, true);
-                self.append_child(new_id, c);
+                if self.nodes.len() >= MAX_RUNTIME_DOM_NODES { break; }
+                let c = self.clone_node_inner(k, true, depth + 1);
+                if c != 0 { self.append_child(new_id, c); }
             }
         }
         new_id
@@ -386,7 +441,9 @@ impl DomTree {
         if id >= self.nodes.len() || matches!(self.nodes[id].node_type, NodeType::Text(_)) {
             return;
         }
-        let parsed = crate::html::HtmlParser::parse(html_text);
+        let mut safe_len = html_text.len().min(MAX_DOM_INNER_HTML_BYTES);
+        while safe_len > 0 && !html_text.is_char_boundary(safe_len) { safe_len -= 1; }
+        let parsed = crate::html::HtmlParser::parse(&html_text[..safe_len]);
         let mut base = parsed.root;
         for n in parsed.nodes.iter() {
             if let NodeType::Element { tag, .. } = &n.node_type {
@@ -407,7 +464,7 @@ impl DomTree {
     }
 
     fn serialize_into(&self, id: usize, include_self: bool, out: &mut String, depth: usize) {
-        if depth > 200 {
+        if depth > MAX_DOM_TREE_DEPTH || out.len() >= MAX_DOM_OUTPUT_BYTES {
             return;
         }
         let n = match self.nodes.get(id) {
@@ -418,9 +475,13 @@ impl DomTree {
             NodeType::Text(t) => {
                 let raw_parent = n.parent.and_then(|p| self.tag(p)).map(|t| t == "script" || t == "style").unwrap_or(false);
                 if raw_parent {
-                    out.push_str(t);
+                    let remaining = MAX_DOM_OUTPUT_BYTES.saturating_sub(out.len());
+                    let mut end = t.len().min(remaining);
+                    while end > 0 && !t.is_char_boundary(end) { end -= 1; }
+                    out.push_str(&t[..end]);
                 } else {
                     for c in t.chars() {
+                        if out.len() >= MAX_DOM_OUTPUT_BYTES { break; }
                         match c {
                             '&' => out.push_str("&amp;"),
                             '<' => out.push_str("&lt;"),
@@ -435,10 +496,12 @@ impl DomTree {
                     out.push('<');
                     out.push_str(tag);
                     for (k, v) in attributes {
+                        if out.len() >= MAX_DOM_OUTPUT_BYTES { break; }
                         out.push(' ');
                         out.push_str(k);
                         out.push_str("=\"");
                         for c in v.chars() {
+                            if out.len() >= MAX_DOM_OUTPUT_BYTES { break; }
                             match c {
                                 '&' => out.push_str("&amp;"),
                                 '"' => out.push_str("&quot;"),
@@ -453,6 +516,7 @@ impl DomTree {
                     }
                 }
                 for &c in &n.children {
+                    if out.len() >= MAX_DOM_OUTPUT_BYTES { break; }
                     self.serialize_into(c, true, out, depth + 1);
                 }
                 if include_self && id != self.root {

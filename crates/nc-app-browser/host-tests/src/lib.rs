@@ -3,6 +3,11 @@
 //!
 //! Gercek kaynak dosyalar `#[path]` ile dogrudan dahil edilir; kopya yoktur.
 extern crate alloc;
+extern crate self as nc_gfx;
+
+pub const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
+    ((red as u32) << 16) | ((green as u32) << 8) | (blue as u32)
+}
 
 /// `css.rs` nc-gfx'e bagli oldugu icin sadece html.rs'in kullandigi yardimci burada aynalanir.
 /// (Govde css.rs::floor_utf8_boundary ile birebir aynidir.)
@@ -42,6 +47,8 @@ pub mod gif_fixtures;
 pub mod gif;
 #[path = "../../src/cssvalues.rs"]
 pub mod cssvalues;
+#[path = "../../src/css.rs"]
+pub mod css_engine;
 #[path = "../../src/supports.rs"]
 pub mod supports;
 
@@ -62,5 +69,60 @@ mod sync_tests {
         js_list.sort();
         rs_list.sort();
         assert_eq!(js_list, rs_list);
+    }
+}
+
+#[cfg(test)]
+mod css_index_tests {
+    use crate::css_engine::Stylesheet;
+    use crate::dom::{DomTree, NodeType};
+
+    #[test]
+    fn selector_index_preserves_tag_id_class_and_universal_matches() {
+        let mut tree = DomTree::new();
+        let root = tree.root;
+        let node = tree.add_node(
+            NodeType::Element {
+                tag: String::from("div"),
+                attributes: vec![
+                    (String::from("id"), String::from("target")),
+                    (String::from("class"), String::from("card active")),
+                ],
+            },
+            root,
+        );
+        let mut css = Stylesheet::new();
+        css.append_css(
+            "div { color: red; } #target { width: 10px; } .card { height: 20px; } * { display: block; } span { color: blue; }",
+        );
+
+        let declarations = css.matching_declarations(&tree, node);
+        let values: Vec<(&str, &str)> = declarations
+            .iter()
+            .map(|d| (d.property.as_str(), d.value.as_str()))
+            .collect();
+        assert!(values.contains(&("color", "red")));
+        assert!(values.contains(&("width", "10px")));
+        assert!(values.contains(&("height", "20px")));
+        assert!(values.contains(&("display", "block")));
+        assert!(!values.contains(&("color", "blue")));
+    }
+
+    #[test]
+    fn indexed_rules_keep_media_activation() {
+        let mut tree = DomTree::new();
+        let root = tree.root;
+        let node = tree.add_node(
+            NodeType::Element {
+                tag: String::from("p"),
+                attributes: Vec::new(),
+            },
+            root,
+        );
+        let mut css = Stylesheet::new();
+        css.append_css("@media (min-width: 700px) { p { color: green; } }");
+        assert!(css.matching_declarations(&tree, node).iter().any(|d| d.property == "color"));
+        css.set_viewport(600, 800);
+        assert!(!css.matching_declarations(&tree, node).iter().any(|d| d.property == "color"));
     }
 }

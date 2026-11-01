@@ -16,6 +16,10 @@ use crate::image::{rasterize_svg_tree, DecodedImage};
 /// (`build_node_box` + `layout_flow_children`), so 60 allows about 30 nested elements.
 /// It used to be 22 (about 11 elements deep), which silently dropped deeply nested content.
 const MAX_LAYOUT_DEPTH: usize = 60;
+const MAX_LAYOUT_ITEMS: usize = 16_384;
+const MAX_LAYOUT_TEXT_BYTES: usize = 32 * 1024;
+const MAX_LAYOUT_IMAGES: usize = 12;
+const MAX_LAYOUT_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 // Old caps (96 / 64 / 200 / 600) silently flattened real designs; these only guard against absurd values.
 const MAX_MARGIN: i32 = 480;
 const MAX_PADDING: i32 = 320;
@@ -117,6 +121,8 @@ pub struct ComputedStyle {
     pub font_size: i32,
     pub color: u32,
     pub bg_color: Option<u32>,
+    /// Native two-stop linear gradient (start, end, horizontal).
+    pub bg_gradient: Option<(u32, u32, bool)>,
     pub border_color: Option<u32>,
     pub border_width: i32,
     pub border_radius: i32,
@@ -186,6 +192,8 @@ pub struct ComputedStyle {
     pub border_sides: [i32; 4],
     pub border_side_colors: [Option<u32>; 4],
     pub sides_custom: bool,
+    /// Inherited CSS custom properties, kept per element so descendant scopes do not leak.
+    pub custom_properties: Vec<(String, String)>,
 }
 
 impl ComputedStyle {
@@ -559,6 +567,9 @@ impl LayoutEngine {
             return;
         }
         for &nid in node_ids {
+            if out.len() >= MAX_LAYOUT_ITEMS {
+                break;
+            }
             match &tree.nodes[nid].node_type {
                 NodeType::Text(raw_text) => {
                     let mut st = parent_style.clone();
@@ -567,11 +578,16 @@ impl LayoutEngine {
                     st.margin_right = (st.font_size / 2).max(5);
                     let font = page_text_style(&st);
                     let lh = line_height_px(&st);
-                    let shown_text = apply_text_transform(&sanitize_text(raw_text), st.text_transform);
+                    let mut safe_len = raw_text.len().min(MAX_LAYOUT_TEXT_BYTES);
+                    while safe_len > 0 && !raw_text.is_char_boundary(safe_len) {
+                        safe_len -= 1;
+                    }
+                    let shown_text = apply_text_transform(&sanitize_text(&raw_text[..safe_len]), st.text_transform);
                     let keep_newlines = matches!(st.white_space, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine);
                     let pieces: Vec<&str> = if keep_newlines { shown_text.split('\n').collect() } else { alloc::vec![shown_text.as_str()] };
                     for (pi, piece) in pieces.iter().enumerate() {
                         if pi > 0 {
+                            if out.len() >= MAX_LAYOUT_ITEMS { return; }
                             // same zero-width marker a <br> produces: forces a new line
                             out.push(LayoutBox {
                                 node_id: nid,
@@ -584,6 +600,7 @@ impl LayoutEngine {
                             });
                         }
                         for word in piece.split_whitespace() {
+                            if out.len() >= MAX_LAYOUT_ITEMS { return; }
                             let ww = text_width(word, &font).sclamp(6, max_width);
                             out.push(LayoutBox {
                                 node_id: nid,
@@ -602,6 +619,7 @@ impl LayoutEngine {
                         continue;
                     }
                     if tag == "br" {
+                        if out.len() >= MAX_LAYOUT_ITEMS { return; }
                         out.push(LayoutBox {
                             node_id: nid,
                             rect: Rect::new(0, 0, -1, 0),
@@ -801,9 +819,18 @@ impl LayoutEngine {
                         return None;
                     }
                     let alt = sanitize_text(tree.attr(node_id, "alt").unwrap_or("IMAGE"));
-                    if src.starts_with("data:") && !images.iter().any(|(k, _)| k == src) {
-                        if let Some(decoded) = DecodedImage::from_data_uri(src, available_width as u32) {
-                            images.push((String::from(src), decoded));
+                    if src.starts_with("data:")
+                        && !images.iter().any(|(k, _)| k == src)
+                        && images.len() < MAX_LAYOUT_IMAGES
+                    {
+                        let used_bytes = images.iter().map(|(_, img)| img.rgba.len()).sum::<usize>();
+                        let max_single_decode = 8 * 1024 * 1024;
+                        if used_bytes.saturating_add(max_single_decode) <= MAX_LAYOUT_IMAGE_BYTES {
+                            if let Some(decoded) = DecodedImage::from_data_uri(src, available_width as u32) {
+                                if used_bytes.saturating_add(decoded.rgba.len()) <= MAX_LAYOUT_IMAGE_BYTES {
+                                    images.push((String::from(src), decoded));
+                                }
+                            }
                         }
                     }
                     let decoded_dims = images
@@ -1970,6 +1997,7 @@ fn default_computed_style() -> ComputedStyle {
         font_size: 12,
         color: TEXT_PRIMARY,
         bg_color: None,
+        bg_gradient: None,
         border_color: None,
         border_width: 0,
         border_radius: 0,
@@ -2028,6 +2056,7 @@ fn default_computed_style() -> ComputedStyle {
         border_sides: [0; 4],
         border_side_colors: [None; 4],
         sides_custom: false,
+        custom_properties: Vec::new(),
     }
 }
 
@@ -2051,6 +2080,7 @@ fn compute_node_style(
         style.text_transform = p.text_transform;
         style.letter_spacing = p.letter_spacing;
         style.white_space = p.white_space;
+        style.custom_properties = p.custom_properties.clone();
     }
 
     let tag = tree.tag(node_id).unwrap_or("");
@@ -2234,29 +2264,68 @@ fn compute_node_style(
     // Cascade order (CSS Cascade 4): normal sheet < normal inline < !important sheet < !important inline.
     let sheet_decls = stylesheet.matching_declarations(tree, node_id);
     let inline_decls: Vec<Declaration> = match tree.attr(node_id, "style") {
-        Some(inline_css) => parse_declarations(inline_css)
-            .into_iter()
-            .map(|mut d| {
-                d.value = stylesheet.resolve_all_vars(&d.value);
-                d
-            })
-            .collect(),
+        Some(inline_css) => parse_declarations(inline_css),
         None => Vec::new(),
     };
-    for d in sheet_decls.iter().filter(|d| !d.important) {
-        apply_expanded(&mut style, d, container_width);
+    let inherited_custom_properties = style.custom_properties.clone();
+
+    for d in sheet_decls.iter().filter(|d| !d.important && d.property.starts_with("--")) {
+        apply_custom_property(&mut style, d, &inherited_custom_properties);
     }
-    for d in inline_decls.iter().filter(|d| !d.important) {
-        apply_expanded(&mut style, d, container_width);
+    for d in inline_decls.iter().filter(|d| !d.important && d.property.starts_with("--")) {
+        apply_custom_property(&mut style, d, &inherited_custom_properties);
     }
-    for d in sheet_decls.iter().filter(|d| d.important) {
-        apply_expanded(&mut style, d, container_width);
+    for d in sheet_decls.iter().filter(|d| d.important && d.property.starts_with("--")) {
+        apply_custom_property(&mut style, d, &inherited_custom_properties);
     }
-    for d in inline_decls.iter().filter(|d| d.important) {
-        apply_expanded(&mut style, d, container_width);
+    for d in inline_decls.iter().filter(|d| d.important && d.property.starts_with("--")) {
+        apply_custom_property(&mut style, d, &inherited_custom_properties);
+    }
+
+    for d in sheet_decls.iter().filter(|d| !d.important && !d.property.starts_with("--")) {
+        apply_resolved_declaration(&mut style, d, container_width);
+    }
+    for d in inline_decls.iter().filter(|d| !d.important && !d.property.starts_with("--")) {
+        apply_resolved_declaration(&mut style, d, container_width);
+    }
+    for d in sheet_decls.iter().filter(|d| d.important && !d.property.starts_with("--")) {
+        apply_resolved_declaration(&mut style, d, container_width);
+    }
+    for d in inline_decls.iter().filter(|d| d.important && !d.property.starts_with("--")) {
+        apply_resolved_declaration(&mut style, d, container_width);
     }
 
     style
+}
+
+fn apply_custom_property(style: &mut ComputedStyle, decl: &Declaration, inherited: &[(String, String)]) {
+    let name = decl.property.as_str();
+    if !name.starts_with("--") || name.len() <= 2 { return; }
+    if decl.value.eq_ignore_ascii_case("initial") {
+        style.custom_properties.retain(|(key, _)| key.as_str() != name);
+        return;
+    }
+    if decl.value.eq_ignore_ascii_case("inherit") || decl.value.eq_ignore_ascii_case("unset") {
+        let parent_value = inherited.iter().rev().find(|(key, _)| key.as_str() == name).map(|(_, value)| value.clone());
+        style.custom_properties.retain(|(key, _)| key.as_str() != name);
+        if let Some(value) = parent_value {
+            style.custom_properties.push((String::from(name), value));
+        }
+        return;
+    }
+    if let Some((_, value)) = style.custom_properties.iter_mut().find(|(key, _)| key.as_str() == name) {
+        *value = decl.value.clone();
+    } else if style.custom_properties.len() < 128 && decl.value.len() <= 4096 {
+        style.custom_properties.push((String::from(name), decl.value.clone()));
+    }
+}
+
+fn apply_resolved_declaration(style: &mut ComputedStyle, decl: &Declaration, container_width: i32) {
+    let Some(value) = cssvalues::resolve_custom_vars(&decl.value, &style.custom_properties, &mut Vec::new(), 0) else {
+        return;
+    };
+    let resolved = Declaration { property: decl.property.clone(), value, important: decl.important };
+    apply_expanded(style, &resolved, container_width);
 }
 
 /// Expands shorthands (`border`, `font`, `background`, `overflow`, `inset`, `text-decoration`, ...)
@@ -2781,20 +2850,33 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, container_wi
             style.border_box = val.to_ascii_lowercase().starts_with("border");
         }
         "background-image" => {
-            // Gradients are approximated by the mean of their first and last stop; url() images are not drawn yet.
+            let lower = val.trim().to_ascii_lowercase();
             let cols = cssvalues::gradient_colors(val);
-            if cols.len() >= 2 {
-                if let (Some(a), Some(b)) = (parse_css_color(&cols[0]), parse_css_color(&cols[cols.len() - 1])) {
-                    let mix = |sa: u32, sb: u32| ((sa + sb) / 2) & 0xFF;
-                    let r = mix((a >> 16) & 0xFF, (b >> 16) & 0xFF);
-                    let g = mix((a >> 8) & 0xFF, (b >> 8) & 0xFF);
-                    let bl = mix(a & 0xFF, b & 0xFF);
-                    style.bg_color = Some(rgb(r as u8, g as u8, bl as u8));
+            if lower.starts_with("linear-gradient(") && cols.len() >= 2 {
+                if let (Some(mut start), Some(mut end)) = (
+                    parse_css_color(&cols[0]),
+                    parse_css_color(&cols[cols.len() - 1]),
+                ) {
+                    let direction = lower.split_once('(').map(|(_, body)| body.split(',').next().unwrap_or("").trim()).unwrap_or("");
+                    let horizontal = matches!(direction, "to right" | "to left" | "90deg" | "270deg");
+                    let reverse = matches!(direction, "to left" | "to top" | "270deg" | "0deg");
+                    if reverse { core::mem::swap(&mut start, &mut end); }
+                    style.bg_gradient = Some((start, end, horizontal));
                 }
             } else if cols.len() == 1 {
+                style.bg_gradient = None;
                 if let Some(a) = parse_css_color(&cols[0]) {
                     style.bg_color = Some(a);
                 }
+            } else if lower == "none"
+                || lower.starts_with("url(")
+                || lower.starts_with("radial-gradient(")
+                || lower.starts_with("conic-gradient(")
+                || lower.starts_with("repeating-linear-gradient(")
+                || lower.starts_with("repeating-radial-gradient(")
+                || lower.starts_with("image-set(")
+            {
+                style.bg_gradient = None;
             }
         }
         _ => {

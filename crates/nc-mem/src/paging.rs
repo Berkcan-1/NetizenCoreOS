@@ -1,11 +1,13 @@
 // crates/nc-mem/src/paging.rs
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::arch::x86_64::{__cpuid, __cpuid_count};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub const PAGE_SIZE: usize = 4096;
-// 512 GiB sınırı: PML4 Index 1'in tam başlangıcı (PML4[0] çekirdeğe aittir)
+
 pub const USER_SPACE_START: u64 = 0x0000_0080_0000_0000;
-pub const USER_SPACE_END: u64   = 0x0000_7FFF_FFFF_F000;
+pub const USER_SPACE_END: u64   = 0x0000_7FFF_FFFF_FFFF;
 
 pub const PTE_PRESENT: u64  = 1 << 0;
 pub const PTE_WRITABLE: u64 = 1 << 1;
@@ -13,6 +15,7 @@ pub const PTE_USER: u64     = 1 << 2;
 pub const PTE_PWT: u64      = 1 << 3;
 pub const PTE_PCD: u64      = 1 << 4;
 pub const PTE_HUGE: u64     = 1 << 7;
+pub const PTE_COW: u64      = 1 << 9; // Faz 5: Copy-on-Write yazılım biti (Bit 9)
 pub const PTE_NO_EXEC: u64  = 1 << 63;
 
 pub const ADDR_MASK_4K: u64 = 0x000F_FFFF_FFFF_F000;
@@ -28,33 +31,24 @@ pub struct PagePermissions {
 
 impl PagePermissions {
     pub const KERNEL_RO: Self = Self { readable: true, writable: false, executable: false, user: false };
-    pub const KERNEL_RW: Self = Self { readable: true, writable: true,  executable: false, user: false };
-    pub const KERNEL_RX: Self = Self { readable: true, writable: false, executable: true,  user: false };
-    pub const USER_RO: Self   = Self { readable: true, writable: false, executable: false, user: true };
-    pub const USER_RW: Self   = Self { readable: true, writable: true,  executable: false, user: true };
-    pub const USER_RX: Self   = Self { readable: true, writable: false, executable: true,  user: true };
+    pub const KERNEL_RW: Self = Self { readable: true, writable: true, executable: false, user: false };
+    pub const KERNEL_RX: Self = Self { readable: true, writable: false, executable: true, user: false };
+
+    pub const USER_RO: Self = Self { readable: true, writable: false, executable: false, user: true };
+    pub const USER_RW: Self = Self { readable: true, writable: true, executable: false, user: true };
+    pub const USER_RX: Self = Self { readable: true, writable: false, executable: true, user: true };
 
     #[inline]
     pub fn validate_wx(&self) -> Result<(), VmError> {
-        if self.writable && self.executable {
-            Err(VmError::WxViolation)
-        } else {
-            Ok(())
-        }
+        if self.writable && self.executable { Err(VmError::WxViolation) } else { Ok(()) }
     }
 
     #[inline]
-    pub fn to_pte_flags(&self, nx_supported: bool) -> u64 {
+    pub fn to_pte_flags(&self, nx_enabled: bool) -> u64 {
         let mut flags = PTE_PRESENT;
-        if self.writable {
-            flags |= PTE_WRITABLE;
-        }
-        if self.user {
-            flags |= PTE_USER;
-        }
-        if !self.executable && nx_supported {
-            flags |= PTE_NO_EXEC;
-        }
+        if self.writable { flags |= PTE_WRITABLE; }
+        if self.user { flags |= PTE_USER; }
+        if !self.executable && nx_enabled { flags |= PTE_NO_EXEC; }
         flags
     }
 }
@@ -69,126 +63,318 @@ pub enum VmError {
     NotMapped,
     SupervisorOverlap,
     AddressOverflow,
+    InvalidFrame,
+    UnmanagedFrame,
+    DoubleFree,
+    InvalidMemoryMap,
+    TransactionCapacity,
 }
 
-// 4 GiB'a kadar 4 KiB fiziksel sayfa çerçevelerini izleyen bitmap (1M frame = 128 KiB)
-const MAX_FRAMES: usize = 1024 * 1024;
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PhysicalRegion {
+    pub start: u64,
+    pub end: u64,
+}
+
+pub const MAX_PHYSICAL_ADDRESS: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_FRAMES: usize = (MAX_PHYSICAL_ADDRESS as usize) / PAGE_SIZE;
 const BITMAP_WORDS: usize = MAX_FRAMES / 64;
+const FIRST_MANAGED_FRAME: usize = (16 * 1024 * 1024) / PAGE_SIZE;
+
+// 1 MiB statik dizi yerine kompakt 512 elemanlık (8 KiB) paylaşımlı referans tablosu (.bss'i şişirmez)
+const MAX_SHARED_SLOTS: usize = 512;
+
+#[derive(Clone, Copy)]
+struct SharedRefEntry {
+    phys: u64,
+    extra_refs: u32,
+}
+
+impl SharedRefEntry {
+    const EMPTY: Self = Self { phys: 0, extra_refs: 0 };
+}
 
 pub struct FrameAllocator {
-    bitmap: [u64; BITMAP_WORDS],
+    free_bitmap: [u64; BITMAP_WORDS],
+    managed_bitmap: [u64; BITMAP_WORDS],
+    shared_table: [SharedRefEntry; MAX_SHARED_SLOTS],
     total_free: usize,
-    nx_supported: bool,
+    max_frames: usize,
+    nx_enabled: bool,
 }
 
 static PMM_LOCK: AtomicBool = AtomicBool::new(false);
-static mut GLOBAL_PMM: FrameAllocator = FrameAllocator {
-    bitmap: [0; BITMAP_WORDS], // 0 = Rezerve/Kullanımda, 1 = Boş (Varsayılan güvenli: tümü rezerve)
-    total_free: 0,
-    nx_supported: false,
-};
+static INVALID_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-fn lock_pmm() {
-    while PMM_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
+struct PmmCell(UnsafeCell<FrameAllocator>);
+unsafe impl Sync for PmmCell {}
+
+static GLOBAL_PMM: PmmCell = PmmCell(UnsafeCell::new(FrameAllocator {
+    free_bitmap: [0; BITMAP_WORDS],
+    managed_bitmap: [0; BITMAP_WORDS],
+    shared_table: [SharedRefEntry::EMPTY; MAX_SHARED_SLOTS],
+    total_free: 0,
+    max_frames: MAX_FRAMES,
+    nx_enabled: false,
+}));
+
+fn lock_pmm() -> u64 {
+    let flags: u64;
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) flags);
+        asm!("cli", options(nomem, nostack));
+    }
+    while PMM_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         core::hint::spin_loop();
     }
+    flags
 }
 
-fn unlock_pmm() {
+fn unlock_pmm(flags: u64) {
     PMM_LOCK.store(false, Ordering::Release);
+    unsafe { asm!("push {}", "popfq", in(reg) flags); }
+}
+
+fn detected_physical_limit() -> u64 {
+    let max_ext = __cpuid(0x8000_0000).eax;
+    if max_ext < 0x8000_0008 { return 1u64 << 32; }
+    let physical_bits = __cpuid_count(0x8000_0008, 0).eax & 0xFF;
+    if !(32..=52).contains(&physical_bits) { return 1u64 << 32; }
+    (1u64 << physical_bits).min(MAX_PHYSICAL_ADDRESS)
 }
 
 #[inline]
 pub fn cpu_supports_nx() -> bool {
-    let edx: u32;
+    if __cpuid(0x8000_0000).eax < 0x8000_0001 { return false; }
+    let feature_edx = __cpuid_count(0x8000_0001, 0).edx;
+    if (feature_edx & (1 << 20)) == 0 { return false; }
+    let efer_low: u32;
     unsafe {
         asm!(
-            "mov eax, 0x80000001",
-            "cpuid",
-            out("eax") _,
-            out("ecx") _,
-            out("edx") edx,
-            options(nomem, nostack, preserves_flags)
+            "rdmsr",
+            in("ecx") 0xC000_0080u32,
+            out("eax") efer_low,
+            out("edx") _,
+            options(nomem, nostack)
         );
     }
-    (edx & (1 << 20)) != 0
+    (efer_low & (1 << 11)) != 0
 }
 
-pub unsafe fn init_pmm(free_phys_start: u64, free_phys_end: u64) {
-    lock_pmm();
-    GLOBAL_PMM.nx_supported = cpu_supports_nx();
-    let mut start_frame = ((free_phys_start + 0xFFF) / 4096) as usize;
-    let mut end_frame = (free_phys_end / 4096) as usize;
+#[inline]
+fn bit_is_set(bitmap: &[u64; BITMAP_WORDS], frame: usize) -> bool {
+    (bitmap[frame / 64] & (1u64 << (frame % 64))) != 0
+}
 
-    // Eğer parametreler geçersizse veya 16 MiB altındaysa, garantili 32 MiB .. 48 MiB aralığına yerleş
-    if end_frame <= start_frame || end_frame < 4096 {
-        start_frame = 8192;  // 32 MiB
-        end_frame = 12288;  // 48 MiB (4096 frame)
-    }
+pub unsafe fn init_pmm(regions: &[PhysicalRegion]) -> Result<(), VmError> {
+    if regions.is_empty() { return Err(VmError::InvalidMemoryMap); }
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &mut *GLOBAL_PMM.0.get() };
+    pmm.free_bitmap.fill(0);
+    pmm.managed_bitmap.fill(0);
+    pmm.shared_table.fill(SharedRefEntry::EMPTY);
+    pmm.total_free = 0;
+    pmm.max_frames = (detected_physical_limit() as usize) / PAGE_SIZE;
+    pmm.nx_enabled = cpu_supports_nx();
 
-    let safe_start = start_frame.max(4096); // 16 MiB altı (kernel/boot) asla PMM'e verilmez
-    let safe_end = end_frame.min(MAX_FRAMES);
-
-    if safe_end > safe_start {
-        for frame in safe_start..safe_end {
+    for region in regions {
+        if region.end <= region.start { continue; }
+        let Some(start_aligned) = region.start.checked_add((PAGE_SIZE as u64) - 1) else { continue; };
+        let start = start_aligned & !((PAGE_SIZE as u64) - 1);
+        let end = region.end & !((PAGE_SIZE as u64) - 1);
+        let first = ((start / PAGE_SIZE as u64) as usize).max(FIRST_MANAGED_FRAME);
+        let last = ((end / PAGE_SIZE as u64) as usize).min(pmm.max_frames);
+        if last <= first { continue; }
+        for frame in first..last {
             let word = frame / 64;
-            let bit = frame % 64;
-            if (GLOBAL_PMM.bitmap[word] & (1u64 << bit)) == 0 {
-                GLOBAL_PMM.bitmap[word] |= 1u64 << bit;
-                GLOBAL_PMM.total_free += 1;
+            let mask = 1u64 << (frame % 64);
+            if (pmm.managed_bitmap[word] & mask) == 0 {
+                pmm.managed_bitmap[word] |= mask;
+                pmm.free_bitmap[word] |= mask;
+                pmm.total_free += 1;
             }
         }
     }
-    unlock_pmm();
+    let has_frames = pmm.total_free != 0;
+    unlock_pmm(irq_flags);
+    if has_frames { Ok(()) } else { Err(VmError::InvalidMemoryMap) }
+}
+
+#[inline]
+fn frame_is_allocated(frame: usize) -> bool {
+    if frame < FIRST_MANAGED_FRAME || frame >= MAX_FRAMES { return false; }
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &*GLOBAL_PMM.0.get() };
+    let allocated = frame < pmm.max_frames
+        && bit_is_set(&pmm.managed_bitmap, frame)
+        && !bit_is_set(&pmm.free_bitmap, frame);
+    unlock_pmm(irq_flags);
+    allocated
 }
 
 pub fn alloc_frame() -> Option<u64> {
-    lock_pmm();
-    let mut found: Option<u64> = None;
-    unsafe {
-        for word_idx in 64..BITMAP_WORDS {
-            let w = GLOBAL_PMM.bitmap[word_idx];
-            if w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                GLOBAL_PMM.bitmap[word_idx] &= !(1u64 << bit);
-                GLOBAL_PMM.total_free = GLOBAL_PMM.total_free.saturating_sub(1);
-                let phys = ((word_idx * 64 + bit) * PAGE_SIZE) as u64;
-                core::ptr::write_bytes(phys as *mut u8, 0, PAGE_SIZE);
-                found = Some(phys);
-                break;
-            }
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &mut *GLOBAL_PMM.0.get() };
+    let mut found = None;
+    for word_idx in FIRST_MANAGED_FRAME / 64..(pmm.max_frames + 63) / 64 {
+        let available = pmm.free_bitmap[word_idx] & pmm.managed_bitmap[word_idx];
+        if available != 0 {
+            let bit = available.trailing_zeros() as usize;
+            let frame = word_idx * 64 + bit;
+            pmm.free_bitmap[word_idx] &= !(1u64 << bit);
+            pmm.total_free = pmm.total_free.saturating_sub(1);
+            let phys = (frame * PAGE_SIZE) as u64;
+            unsafe { core::ptr::write_bytes(phys as *mut u8, 0, PAGE_SIZE); }
+            found = Some(phys);
+            break;
         }
     }
-    unlock_pmm();
+    unlock_pmm(irq_flags);
     found
 }
 
-pub unsafe fn free_frame(phys_addr: u64) {
-    if (phys_addr & 0xFFF) != 0 || phys_addr < 0x0100_0000 {
-        return;
+pub fn retain_frame(phys_addr: u64) -> Result<(), VmError> {
+    if (phys_addr & 0xFFF) != 0
+        || phys_addr < (FIRST_MANAGED_FRAME as u64 * PAGE_SIZE as u64)
+        || phys_addr >= MAX_PHYSICAL_ADDRESS
+    {
+        return Err(VmError::InvalidFrame);
     }
-    let frame = (phys_addr as usize) / PAGE_SIZE;
-    if frame >= MAX_FRAMES {
-        return;
+    let frame = (phys_addr / PAGE_SIZE as u64) as usize;
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &mut *GLOBAL_PMM.0.get() };
+    if frame >= pmm.max_frames
+        || !bit_is_set(&pmm.managed_bitmap, frame)
+        || bit_is_set(&pmm.free_bitmap, frame)
+    {
+        unlock_pmm(irq_flags);
+        return Err(VmError::InvalidFrame);
     }
-    lock_pmm();
+
+    let mut found_slot = None;
+    let mut empty_slot = None;
+    for i in 0..MAX_SHARED_SLOTS {
+        if pmm.shared_table[i].phys == phys_addr {
+            found_slot = Some(i);
+            break;
+        } else if empty_slot.is_none() && pmm.shared_table[i].phys == 0 {
+            empty_slot = Some(i);
+        }
+    }
+
+    let res = if let Some(idx) = found_slot {
+        pmm.shared_table[idx].extra_refs = pmm.shared_table[idx].extra_refs.saturating_add(1);
+        Ok(())
+    } else if let Some(idx) = empty_slot {
+        pmm.shared_table[idx] = SharedRefEntry { phys: phys_addr, extra_refs: 1 };
+        Ok(())
+    } else {
+        Err(VmError::OutOfMemory)
+    };
+
+    unlock_pmm(irq_flags);
+    res
+}
+
+pub fn frame_ref_count(phys_addr: u64) -> usize {
+    if (phys_addr & 0xFFF) != 0
+        || phys_addr < (FIRST_MANAGED_FRAME as u64 * PAGE_SIZE as u64)
+        || phys_addr >= MAX_PHYSICAL_ADDRESS
+    {
+        return 0;
+    }
+    let frame = (phys_addr / PAGE_SIZE as u64) as usize;
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &*GLOBAL_PMM.0.get() };
+    let count = if frame < pmm.max_frames
+        && bit_is_set(&pmm.managed_bitmap, frame)
+        && !bit_is_set(&pmm.free_bitmap, frame)
+    {
+        let extra = pmm.shared_table.iter()
+            .find(|entry| entry.phys == phys_addr)
+            .map(|entry| entry.extra_refs as usize)
+            .unwrap_or(0);
+        1 + extra
+    } else {
+        0
+    };
+    unlock_pmm(irq_flags);
+    count
+}
+
+pub unsafe fn free_frame_checked(phys_addr: u64) -> Result<(), VmError> {
+    if (phys_addr & 0xFFF) != 0
+        || phys_addr < (FIRST_MANAGED_FRAME as u64 * PAGE_SIZE as u64)
+        || phys_addr >= MAX_PHYSICAL_ADDRESS
+    {
+        INVALID_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+        return Err(VmError::InvalidFrame);
+    }
+    let frame = (phys_addr / PAGE_SIZE as u64) as usize;
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &mut *GLOBAL_PMM.0.get() };
+    if frame >= pmm.max_frames {
+        unlock_pmm(irq_flags);
+        INVALID_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+        return Err(VmError::InvalidFrame);
+    }
     let word = frame / 64;
     let bit = frame % 64;
-    if (GLOBAL_PMM.bitmap[word] & (1u64 << bit)) == 0 {
-        GLOBAL_PMM.bitmap[word] |= 1u64 << bit;
-        GLOBAL_PMM.total_free += 1;
-    }
-    unlock_pmm();
+    let mask = 1u64 << bit;
+
+    let shared_idx = pmm.shared_table.iter().position(|entry| entry.phys == phys_addr);
+
+    let result = if (pmm.managed_bitmap[word] & mask) == 0 {
+        Err(VmError::UnmanagedFrame)
+    } else if (pmm.free_bitmap[word] & mask) != 0 {
+        Err(VmError::DoubleFree)
+    } else if let Some(idx) = shared_idx {
+        if pmm.shared_table[idx].extra_refs > 1 {
+            pmm.shared_table[idx].extra_refs -= 1;
+        } else {
+            pmm.shared_table[idx] = SharedRefEntry::EMPTY;
+        }
+        Ok(())
+    } else {
+        pmm.free_bitmap[word] |= mask;
+        pmm.total_free += 1;
+        Ok(())
+    };
+    unlock_pmm(irq_flags);
+    if result.is_err() { INVALID_FREE_COUNT.fetch_add(1, Ordering::Relaxed); }
+    result
 }
 
 pub fn free_frame_count() -> usize {
-    lock_pmm();
-    let count = unsafe { GLOBAL_PMM.total_free };
-    unlock_pmm();
+    let irq_flags = lock_pmm();
+    let count = unsafe { (*GLOBAL_PMM.0.get()).total_free };
+    unlock_pmm(irq_flags);
     count
+}
+
+pub fn managed_frame_count() -> usize {
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &*GLOBAL_PMM.0.get() };
+    let count = pmm.managed_bitmap.iter().map(|word| word.count_ones() as usize).sum();
+    unlock_pmm(irq_flags);
+    count
+}
+
+#[inline]
+fn pmm_mapping_config() -> (u64, bool) {
+    let irq_flags = lock_pmm();
+    let pmm = unsafe { &*GLOBAL_PMM.0.get() };
+    let config = ((pmm.max_frames as u64) * PAGE_SIZE as u64, pmm.nx_enabled);
+    unlock_pmm(irq_flags);
+    config
+}
+
+pub unsafe fn free_frame(phys_addr: u64) {
+    let _ = free_frame_checked(phys_addr);
+}
+
+pub fn invalid_free_count() -> usize {
+    INVALID_FREE_COUNT.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -218,6 +404,39 @@ pub fn flush_tlb_page(vaddr: u64) {
     }
 }
 
+struct MapTransaction {
+    entries: [*mut u64; 4],
+    old_values: [u64; 4],
+    allocated_frames: [u64; 4],
+    len: usize,
+}
+
+impl MapTransaction {
+    const fn new() -> Self {
+        Self { entries: [core::ptr::null_mut(); 4], old_values: [0; 4], allocated_frames: [0; 4], len: 0 }
+    }
+
+    unsafe fn record(&mut self, entry: *mut u64, old: u64, allocated: u64) -> Result<(), VmError> {
+        if self.len >= self.entries.len() { return Err(VmError::TransactionCapacity); }
+        self.entries[self.len] = entry;
+        self.old_values[self.len] = old;
+        self.allocated_frames[self.len] = allocated;
+        self.len += 1;
+        Ok(())
+    }
+
+    unsafe fn rollback(&mut self) {
+        while self.len > 0 {
+            self.len -= 1;
+            core::ptr::write_volatile(self.entries[self.len], self.old_values[self.len]);
+            let frame = self.allocated_frames[self.len];
+            if frame != 0 { free_frame(frame); }
+        }
+    }
+
+    fn commit(&mut self) { self.len = 0; }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AddressSpace {
     pub pml4_phys: u64,
@@ -229,23 +448,36 @@ impl AddressSpace {
         Self { pml4_phys: read_cr3() }
     }
 
-    /// Aktif çekirdek eşlemelerini kopyalar ancak çekirdeğin kendi tablolarına asla yazmaz
     pub fn create_user_space() -> Result<Self, VmError> {
         let new_pml4 = alloc_frame().ok_or(VmError::OutOfMemory)?;
         let cur_pml4 = read_cr3();
+
         unsafe {
             let src = cur_pml4 as *const u64;
             let dst = new_pml4 as *mut u64;
-
-            // 512 PML4 girişinin tamamını temizle
             core::ptr::write_bytes(dst, 0, 512);
-
-            // PML4[0] (0..512 GiB Çekirdek, MMIO, Framebuffer kimlik haritası)
-            // U/S=0 (Supervisor Only) olarak güvenli şekilde kopyalanır
             let kernel_entry = core::ptr::read_volatile(src.add(0)) & !PTE_USER;
             core::ptr::write_volatile(dst.add(0), kernel_entry);
         }
+
         Ok(Self { pml4_phys: new_pml4 })
+    }
+
+    pub unsafe fn free_owned_page_tables(&self) {
+        unsafe fn free_children(table_phys: u64, level: u8, first: usize, end: usize) {
+            if level <= 1 { return; }
+            let table = table_phys as *const u64;
+            for index in first..end {
+                let entry = core::ptr::read_volatile(table.add(index));
+                if (entry & PTE_PRESENT) == 0 || (entry & PTE_HUGE) != 0 { continue; }
+                let child = entry & ADDR_MASK_4K;
+                free_children(child, level - 1, 0, 512);
+                free_frame(child);
+            }
+        }
+
+        free_children(self.pml4_phys, 4, 1, 256);
+        free_frame(self.pml4_phys);
     }
 
     pub fn map_4k(
@@ -254,56 +486,90 @@ impl AddressSpace {
         paddr: u64,
         perms: PagePermissions,
     ) -> Result<(), VmError> {
-        if (vaddr & 0xFFF) != 0 || (paddr & 0xFFF) != 0 {
-            return Err(VmError::UnalignedAddress);
-        }
-        if !is_canonical(vaddr) {
-            return Err(VmError::NonCanonicalAddress);
-        }
-        perms.validate_wx()?;
+        self.map_4k_with_extra_flags(vaddr, paddr, perms, 0)
+    }
 
-        if perms.user && vaddr < USER_SPACE_START {
+    pub fn map_4k_with_extra_flags(
+        &mut self,
+        vaddr: u64,
+        paddr: u64,
+        perms: PagePermissions,
+        extra_pte_flags: u64,
+    ) -> Result<(), VmError> {
+        if (vaddr & 0xFFF) != 0 || (paddr & 0xFFF) != 0 { return Err(VmError::UnalignedAddress); }
+        if !is_canonical(vaddr) { return Err(VmError::NonCanonicalAddress); }
+        let page_end = vaddr.checked_add(PAGE_SIZE as u64 - 1).ok_or(VmError::AddressOverflow)?;
+        perms.validate_wx()?;
+        if perms.user && (vaddr < USER_SPACE_START || page_end > USER_SPACE_END) {
             return Err(VmError::SupervisorOverlap);
         }
-
-        let nx = unsafe { GLOBAL_PMM.nx_supported };
-        let pml4_idx = ((vaddr >> 39) & 0x1FF) as usize;
-        let pdpt_idx = ((vaddr >> 30) & 0x1FF) as usize;
-        let pd_idx   = ((vaddr >> 21) & 0x1FF) as usize;
-        let pt_idx   = ((vaddr >> 12) & 0x1FF) as usize;
-
-        let dir_flags = PTE_PRESENT | PTE_WRITABLE | if perms.user { PTE_USER } else { 0 };
-
-        unsafe {
-            let pml4 = self.pml4_phys as *mut u64;
-            let pdpt_phys = Self::ensure_next_table(pml4.add(pml4_idx), dir_flags)?;
-
-            let pdpt = pdpt_phys as *mut u64;
-            let pd_phys = Self::ensure_next_table(pdpt.add(pdpt_idx), dir_flags)?;
-
-            let pd = pd_phys as *mut u64;
-            let pde_ptr = pd.add(pd_idx);
-            let pde = core::ptr::read_volatile(pde_ptr);
-
-            let pt_phys = if (pde & PTE_PRESENT) != 0 && (pde & PTE_HUGE) != 0 {
-                Self::split_2m_huge_page(pde_ptr, pde)?
-            } else {
-                Self::ensure_next_table(pde_ptr, dir_flags)?
-            };
-
-            let pt = pt_phys as *mut u64;
-            let pte_ptr = pt.add(pt_idx);
-            let old_pte = core::ptr::read_volatile(pte_ptr);
-            if (old_pte & PTE_PRESENT) != 0 {
-                return Err(VmError::AlreadyMapped);
-            }
-
-            let leaf_flags = perms.to_pte_flags(nx);
-            core::ptr::write_volatile(pte_ptr, (paddr & ADDR_MASK_4K) | leaf_flags);
+        if paddr >= MAX_PHYSICAL_ADDRESS { return Err(VmError::InvalidFrame); }
+        let (physical_limit, nx) = pmm_mapping_config();
+        if paddr >= physical_limit { return Err(VmError::InvalidFrame); }
+        if perms.user && !frame_is_allocated((paddr / PAGE_SIZE as u64) as usize) {
+            return Err(VmError::InvalidFrame);
         }
 
+        let pml4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+        let pdpt_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        let pd_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        let pt_idx = ((vaddr >> 12) & 0x1FF) as usize;
+
+        let dir_flags = PTE_PRESENT | PTE_WRITABLE | if perms.user { PTE_USER } else { 0 };
+        let mut transaction = MapTransaction::new();
+
+        let result = (|| -> Result<(), VmError> {
+            unsafe {
+                let pml4 = self.pml4_phys as *mut u64;
+                let pdpt_phys = Self::ensure_next_table_tx(pml4.add(pml4_idx), dir_flags, &mut transaction)?;
+                let pdpt = pdpt_phys as *mut u64;
+                let pd_phys = Self::ensure_next_table_tx(pdpt.add(pdpt_idx), dir_flags, &mut transaction)?;
+                let pd = pd_phys as *mut u64;
+                let pde_ptr = pd.add(pd_idx);
+                let pde = core::ptr::read_volatile(pde_ptr);
+                let pt_phys = if (pde & PTE_PRESENT) != 0 && (pde & PTE_HUGE) != 0 {
+                    Self::split_2m_huge_page_tx(pde_ptr, pde, dir_flags, &mut transaction)?
+                } else {
+                    Self::ensure_next_table_tx(pde_ptr, dir_flags, &mut transaction)?
+                };
+                let pt = pt_phys as *mut u64;
+                let pte_ptr = pt.add(pt_idx);
+                if (core::ptr::read_volatile(pte_ptr) & PTE_PRESENT) != 0 {
+                    return Err(VmError::AlreadyMapped);
+                }
+                let final_flags = perms.to_pte_flags(nx) | (extra_pte_flags & PTE_COW);
+                core::ptr::write_volatile(pte_ptr, (paddr & ADDR_MASK_4K) | final_flags);
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            unsafe { transaction.rollback(); }
+            flush_tlb_page(vaddr);
+            return Err(error);
+        }
+
+        transaction.commit();
         flush_tlb_page(vaddr);
         Ok(())
+    }
+
+    pub fn mark_4k_cow(&mut self, vaddr: u64) -> Result<u64, VmError> {
+        if (vaddr & 0xFFF) != 0 {
+            return Err(VmError::UnalignedAddress);
+        }
+        let pte_ptr = unsafe { self.walk_to_pte(vaddr)? };
+        let phys = unsafe {
+            let old = core::ptr::read_volatile(pte_ptr);
+            if (old & PTE_PRESENT) == 0 || (old & PTE_USER) == 0 {
+                return Err(VmError::NotMapped);
+            }
+            let new_pte = (old & !PTE_WRITABLE) | PTE_COW;
+            core::ptr::write_volatile(pte_ptr, new_pte);
+            old & ADDR_MASK_4K
+        };
+        flush_tlb_page(vaddr);
+        Ok(phys)
     }
 
     pub fn protect_4k(&mut self, vaddr: u64, perms: PagePermissions) -> Result<(), VmError> {
@@ -311,15 +577,22 @@ impl AddressSpace {
             return Err(VmError::UnalignedAddress);
         }
         perms.validate_wx()?;
-        if perms.user && vaddr < USER_SPACE_START {
+        let page_end = vaddr.checked_add(PAGE_SIZE as u64 - 1).ok_or(VmError::AddressOverflow)?;
+        if perms.user && (vaddr < USER_SPACE_START || page_end > USER_SPACE_END) {
             return Err(VmError::SupervisorOverlap);
         }
-        let nx = unsafe { GLOBAL_PMM.nx_supported };
+        let (_, nx) = pmm_mapping_config();
         let pte_ptr = unsafe { self.walk_to_pte(vaddr)? };
         unsafe {
             let old = core::ptr::read_volatile(pte_ptr);
             if (old & PTE_PRESENT) == 0 {
                 return Err(VmError::NotMapped);
+            }
+            if perms.user {
+                let (_, effective_flags) = self.translate_with_flags(vaddr).ok_or(VmError::NotMapped)?;
+                if (effective_flags & PTE_USER) == 0 {
+                    return Err(VmError::SupervisorOverlap);
+                }
             }
             let phys = old & ADDR_MASK_4K;
             let new_flags = perms.to_pte_flags(nx);
@@ -386,51 +659,66 @@ impl AddressSpace {
             if (pte & PTE_PRESENT) == 0 {
                 return None;
             }
-
             let eff_user = dir_user && ((pte & PTE_USER) != 0);
             let eff_write = dir_write && ((pte & PTE_WRITABLE) != 0);
             let eff_nx = dir_nx || ((pte & PTE_NO_EXEC) != 0);
 
             let paddr = (pte & ADDR_MASK_4K) | (vaddr & 0xFFF);
-            let mut flags = PTE_PRESENT;
+            let mut flags = PTE_PRESENT | (pte & PTE_COW);
             if eff_user { flags |= PTE_USER; }
             if eff_write { flags |= PTE_WRITABLE; }
             if eff_nx { flags |= PTE_NO_EXEC; }
-
             Some((paddr, flags))
         }
     }
 
-    unsafe fn ensure_next_table(entry_ptr: *mut u64, req_flags: u64) -> Result<u64, VmError> {
-        let cur = core::ptr::read_volatile(entry_ptr);
-        if (cur & PTE_PRESENT) != 0 {
-            let need_user = (req_flags & PTE_USER) != 0 && (cur & PTE_USER) == 0;
-            let need_write = (req_flags & PTE_WRITABLE) != 0 && (cur & PTE_WRITABLE) == 0;
+    unsafe fn ensure_next_table_tx(
+        entry_ptr: *mut u64,
+        req_flags: u64,
+        transaction: &mut MapTransaction,
+    ) -> Result<u64, VmError> {
+        let current = core::ptr::read_volatile(entry_ptr);
+        if (current & PTE_PRESENT) != 0 {
+            let need_user = (req_flags & PTE_USER) != 0 && (current & PTE_USER) == 0;
+            let need_write = (req_flags & PTE_WRITABLE) != 0 && (current & PTE_WRITABLE) == 0;
             if need_user || need_write {
-                let phys = cur & ADDR_MASK_4K;
-                // Yalnızca PMM tarafından yönetilen dinamik RAM tablolarına izin güncellemesi yap
-                if phys >= 0x0100_0000 && phys < 0x2000_0000 {
-                    core::ptr::write_volatile(entry_ptr, cur | (req_flags & (PTE_USER | PTE_WRITABLE)));
+                let physical = current & ADDR_MASK_4K;
+                if !frame_is_allocated((physical / PAGE_SIZE as u64) as usize) {
+                    return Err(VmError::SupervisorOverlap);
                 }
+                transaction.record(entry_ptr, current, 0)?;
+                core::ptr::write_volatile(entry_ptr, current | (req_flags & (PTE_USER | PTE_WRITABLE)));
             }
-            return Ok(cur & ADDR_MASK_4K);
+            return Ok(current & ADDR_MASK_4K);
         }
         let frame = alloc_frame().ok_or(VmError::OutOfMemory)?;
+        if let Err(error) = transaction.record(entry_ptr, current, frame) {
+            free_frame(frame);
+            return Err(error);
+        }
         core::ptr::write_volatile(entry_ptr, frame | req_flags);
         Ok(frame)
     }
 
-
-    unsafe fn split_2m_huge_page(pde_ptr: *mut u64, old_pde: u64) -> Result<u64, VmError> {
+    unsafe fn split_2m_huge_page_tx(
+        pde_ptr: *mut u64,
+        old_pde: u64,
+        req_flags: u64,
+        transaction: &mut MapTransaction,
+    ) -> Result<u64, VmError> {
         let new_pt = alloc_frame().ok_or(VmError::OutOfMemory)?;
+        if let Err(error) = transaction.record(pde_ptr, old_pde, new_pt) {
+            free_frame(new_pt);
+            return Err(error);
+        }
         let base_phys = old_pde & ADDR_MASK_2M;
         let inherited_flags = old_pde & (PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_PWT | PTE_PCD | PTE_NO_EXEC);
         let pt_ptr = new_pt as *mut u64;
         for i in 0..512usize {
-            let page_phys = base_phys + (i as u64) * 4096;
+            let page_phys = base_phys + (i as u64) * PAGE_SIZE as u64;
             core::ptr::write_volatile(pt_ptr.add(i), page_phys | inherited_flags);
         }
-        let dir_flags = PTE_PRESENT | PTE_WRITABLE | (old_pde & PTE_USER);
+        let dir_flags = PTE_PRESENT | PTE_WRITABLE | (old_pde & PTE_USER) | (req_flags & PTE_USER);
         core::ptr::write_volatile(pde_ptr, new_pt | dir_flags);
         Ok(new_pt)
     }
@@ -500,7 +788,6 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Kullanıcı adres alanından çekirdek tamponuna sayfa-sayfa sınır denetimli kopyalama
     pub fn copy_from_user(&self, user_src: u64, kernel_dst: &mut [u8]) -> Result<(), VmError> {
         let len = kernel_dst.len();
         if len == 0 {
@@ -532,7 +819,6 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Çekirdek tamponundan kullanıcı adres alanına sayfa-sayfa sınır ve yazma izni denetimli kopyalama
     pub fn copy_to_user(&self, user_dst: u64, kernel_src: &[u8]) -> Result<(), VmError> {
         let len = kernel_src.len();
         if len == 0 {
@@ -565,21 +851,16 @@ impl AddressSpace {
     }
 }
 
-/// Faz 1 Tamamlanma Testi: W^X, Supervisor Koruması, 4K Map/Unmap ve Kanonik Sınır Doğrulaması
 pub fn run_phase1_vm_self_test() -> Result<(), &'static str> {
     let cur_cr3 = read_cr3();
-
-    // 1. Çekirdek kod adresini doğrula (0x100000): U/S=0 olmalı
     let cur = AddressSpace { pml4_phys: cur_cr3 };
     let (_, k_flags) = cur.translate_with_flags(0x0010_0000).ok_or("Kernel code mapping bulunamadi")?;
     if (k_flags & PTE_USER) != 0 {
         return Err("Guvenlik Ihlali: Cekirdek sayfasi U/S=1 (User) olarak isaretlenmis!");
     }
 
-    // 2. Yeni ve izole kullanıcı adres alanı oluştur
     let mut user_space = AddressSpace::create_user_space().map_err(|_| "User address space olusturulamadi")?;
 
-    // 3. W^X Testi
     let test_frame = alloc_frame().ok_or("PMM test frame ayiramadi")?;
     let wx_perms = PagePermissions { readable: true, writable: true, executable: true, user: true };
     if user_space.map_4k(USER_SPACE_START, test_frame, wx_perms) != Err(VmError::WxViolation) {
@@ -587,28 +868,27 @@ pub fn run_phase1_vm_self_test() -> Result<(), &'static str> {
         return Err("W^X ihlali engellenmedi!");
     }
 
-    // 4. Supervisor Koruma Testi (0x0020_0000 çekirdek bölgesidir, kullanıcı eşlemesi reddedilmeli)
     if user_space.map_4k(0x0020_0000, test_frame, PagePermissions::USER_RW) != Err(VmError::SupervisorOverlap) {
         unsafe { free_frame(test_frame); }
         return Err("Supervisor bolgesine User eslemesi engellenmedi!");
     }
+    if user_space.map_4k(0xFFFF_8000_0000_0000, test_frame, PagePermissions::USER_RW) != Err(VmError::SupervisorOverlap) {
+        unsafe { free_frame(test_frame); }
+        return Err("Kernel-half User eslemesi engellenmedi!");
+    }
 
-    // 5. 4 KiB Kullanıcı Sayfası Eşle ve Doğrula
     user_space.map_4k(USER_SPACE_START, test_frame, PagePermissions::USER_RW)
         .map_err(|_| "Gecerli 4K User eslemesi basarisiz")?;
-
     let (mapped_phys, u_flags) = user_space.translate_with_flags(USER_SPACE_START)
         .ok_or("Eslenen 4K User sayfasi translate edilemedi")?;
     if mapped_phys != test_frame || (u_flags & PTE_USER) == 0 {
         return Err("4K User sayfasi fiziksel adresi veya U/S bayragi hatali");
     }
 
-    // Unmap ve serbest bırak
     let unmapped = user_space.unmap_4k(USER_SPACE_START).map_err(|_| "4K unmap basarisiz")?;
-    unsafe { 
+    unsafe {
         free_frame(unmapped);
-        free_frame(user_space.pml4_phys);
+        user_space.free_owned_page_tables();
     }
-
     Ok(())
 }

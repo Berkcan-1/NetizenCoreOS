@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 use nc_hal::FramebufferInfo;
 
 pub mod blur;
@@ -210,6 +213,84 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draws a packed 0x00RRGGBB source image into a destination rectangle using
+    /// bilinear sampling. Pixels are written directly to the framebuffer instead
+    /// of issuing one `fill_rect` call per pixel.
+    pub fn draw_image_bilinear(
+        &mut self,
+        source: &[u32],
+        source_width: u32,
+        source_height: u32,
+        destination: Rect,
+    ) {
+        if source_width == 0
+            || source_height == 0
+            || destination.width <= 0
+            || destination.height <= 0
+        {
+            return;
+        }
+        let source_count = match (source_width as usize).checked_mul(source_height as usize) {
+            Some(count) if count <= source.len() => count,
+            _ => return,
+        };
+        if source_count == 0 {
+            return;
+        }
+
+        let dst_left = (destination.x as i64).max(self.clip.x as i64).max(0);
+        let dst_top = (destination.y as i64).max(self.clip.y as i64).max(0);
+        let dst_right = (destination.x as i64 + destination.width as i64)
+            .min(self.clip.x as i64 + self.clip.width as i64)
+            .min(self.width as i64);
+        let dst_bottom = (destination.y as i64 + destination.height as i64)
+            .min(self.clip.y as i64 + self.clip.height as i64)
+            .min(self.height as i64);
+        if dst_right <= dst_left || dst_bottom <= dst_top {
+            return;
+        }
+
+        let src_w = source_width as u64;
+        let src_h = source_height as u64;
+        let dst_w = destination.width as u64;
+        let dst_h = destination.height as u64;
+        let max_x = source_width.saturating_sub(1) as usize;
+        let max_y = source_height.saturating_sub(1) as usize;
+
+        for y in dst_top..dst_bottom {
+            let local_y = (y - destination.y as i64) as u64;
+            let y_fp = if dst_h <= 1 {
+                0
+            } else {
+                local_y.saturating_mul(src_h.saturating_sub(1)).saturating_mul(65_536)
+                    / dst_h.saturating_sub(1)
+            };
+            let y0 = ((y_fp >> 16) as usize).min(max_y);
+            let y1 = (y0 + 1).min(max_y);
+            let ty = ((y_fp & 0xFFFF) >> 8) as u32;
+            let src_row0 = y0 * source_width as usize;
+            let src_row1 = y1 * source_width as usize;
+            let dst_row = y as usize * self.width;
+
+            for x in dst_left..dst_right {
+                let local_x = (x - destination.x as i64) as u64;
+                let x_fp = if dst_w <= 1 {
+                    0
+                } else {
+                    local_x.saturating_mul(src_w.saturating_sub(1)).saturating_mul(65_536)
+                        / dst_w.saturating_sub(1)
+                };
+                let x0 = ((x_fp >> 16) as usize).min(max_x);
+                let x1 = (x0 + 1).min(max_x);
+                let tx = ((x_fp & 0xFFFF) >> 8) as u32;
+
+                let top = lerp_color(source[src_row0 + x0], source[src_row0 + x1], tx);
+                let bottom = lerp_color(source[src_row1 + x0], source[src_row1 + x1], tx);
+                self.pixels[dst_row + x as usize] = lerp_color(top, bottom, ty);
+            }
+        }
+    }
+
     pub fn blend_pixel(&mut self, x: i32, y: i32, color: u32, alpha: u8) {
         if alpha == 0
             || x < self.clip.x
@@ -357,4 +438,40 @@ pub unsafe fn present(canvas: &Canvas, framebuffer: &FramebufferInfo) {
         framebuffer,
         Rect::new(0, 0, canvas.width() as i32, canvas.height() as i32),
     );
+}
+
+
+#[cfg(test)]
+mod image_blit_tests {
+    use super::*;
+
+    #[test]
+    fn bilinear_blit_writes_expected_pixels_without_touching_outside() {
+        let source = [
+            rgb(255, 0, 0), rgb(0, 255, 0),
+            rgb(0, 0, 255), rgb(255, 255, 255),
+        ];
+        let mut framebuffer = [0x0011_1111u32; 16];
+        let mut canvas = Canvas::new(&mut framebuffer, 4, 4).unwrap();
+        canvas.draw_image_bilinear(&source, 2, 2, Rect::new(1, 1, 2, 2));
+        assert_eq!(canvas.pixels()[5], rgb(255, 0, 0));
+        assert_eq!(canvas.pixels()[6], rgb(0, 255, 0));
+        assert_eq!(canvas.pixels()[9], rgb(0, 0, 255));
+        assert_eq!(canvas.pixels()[10], rgb(255, 255, 255));
+        assert_eq!(canvas.pixels()[0], 0x0011_1111);
+        assert_eq!(canvas.pixels()[15], 0x0011_1111);
+    }
+
+    #[test]
+    fn bilinear_blit_honors_clip_rectangle() {
+        let source = [rgb(255, 0, 0); 4];
+        let mut framebuffer = [0x0011_1111u32; 16];
+        let mut canvas = Canvas::new(&mut framebuffer, 4, 4).unwrap();
+        canvas.set_clip(Rect::new(2, 1, 1, 2));
+        canvas.draw_image_bilinear(&source, 2, 2, Rect::new(1, 1, 2, 2));
+        assert_eq!(canvas.pixels()[5], 0x0011_1111);
+        assert_eq!(canvas.pixels()[6], rgb(255, 0, 0));
+        assert_eq!(canvas.pixels()[9], 0x0011_1111);
+        assert_eq!(canvas.pixels()[10], rgb(255, 0, 0));
+    }
 }

@@ -10,24 +10,24 @@ use nc_ui::{draw_dot, draw_panel, draw_shadow, draw_text_color, text_style};
 pub const MAX_SETUP_DISKS: usize = 8;
 const MAX_PARTITIONS: usize = 8;
 
-const PORCELAIN_TOP: u32 = rgb(244, 249, 253);
-const PORCELAIN_BOT: u32 = rgb(230, 240, 248);
-const CARD_WHITE: u32 = rgb(253, 254, 255);
-const CARD_BORDER: u32 = rgb(210, 224, 236);
-const SUBTLE_FILL: u32 = rgb(240, 246, 251);
-const SUBTLE_HOVER: u32 = rgb(228, 240, 250);
+const PORCELAIN_TOP: u32 = rgb(4, 11, 20);
+const PORCELAIN_BOT: u32 = rgb(7, 24, 35);
+const CARD_WHITE: u32 = rgb(13, 29, 44);
+const CARD_BORDER: u32 = rgb(43, 76, 92);
+const SUBTLE_FILL: u32 = rgb(10, 23, 36);
+const SUBTLE_HOVER: u32 = rgb(17, 49, 62);
 
-const AZURE_BRIGHT: u32 = rgb(44, 138, 242);
-const AZURE_DEEP: u32 = rgb(24, 98, 206);
-const AQUA_MINT: u32 = rgb(26, 188, 168);
-const AQUA_SOFT: u32 = rgb(156, 236, 222);
-const AQUA_DEEP: u32 = rgb(16, 144, 130);
-const TINT_SELECTED: u32 = rgb(224, 242, 252);
+const AZURE_BRIGHT: u32 = rgb(45, 158, 255);
+const AZURE_DEEP: u32 = rgb(22, 105, 190);
+const AQUA_MINT: u32 = rgb(48, 222, 169);
+const AQUA_SOFT: u32 = rgb(30, 146, 145);
+const AQUA_DEEP: u32 = rgb(34, 194, 150);
+const TINT_SELECTED: u32 = rgb(12, 59, 61);
 
-const INK_DARK: u32 = rgb(16, 28, 44);
-const INK_BODY: u32 = rgb(58, 76, 96);
-const INK_MUTED: u32 = rgb(116, 134, 154);
-const INK_LIGHT: u32 = rgb(156, 172, 190);
+const INK_DARK: u32 = rgb(240, 248, 251);
+const INK_BODY: u32 = rgb(187, 208, 218);
+const INK_MUTED: u32 = rgb(128, 155, 171);
+const INK_LIGHT: u32 = rgb(83, 111, 128);
 
 static LAST_RENDER_HASH: AtomicU64 = AtomicU64::new(u64::MAX);
 
@@ -182,8 +182,8 @@ struct ShellLayout {
 }
 
 fn compute_shell(width: i32, height: i32) -> ShellLayout {
-    let shell_w = (width * 84 / 100).clamp(680, 920).min(width - 28);
-    let shell_h = (height * 82 / 100).clamp(470, 600).min(height - 28);
+    let shell_w = (width * 88 / 100).clamp(612, 1000).min(width - 24).max(280);
+    let shell_h = (height * 84 / 100).clamp(452, 620).min(height - 24).max(240);
     let shell_x = (width - shell_w) / 2;
     let shell_y = (height - shell_h) / 2;
 
@@ -191,23 +191,23 @@ fn compute_shell(width: i32, height: i32) -> ShellLayout {
     let probe_btn = Rect::new(top_pill.x + top_pill.width - 154, top_pill.y + 8, 142, 30);
 
     let main_y = top_pill.y + top_pill.height + 10;
-    let bottom_h = 52;
-    let main_h = shell_h - top_pill.height - bottom_h - 20;
+    let bottom_h = 50;
+    let main_h = (shell_h - top_pill.height - bottom_h - 20).max(1);
     let main_card = Rect::new(shell_x, main_y, shell_w, main_h);
 
-    let left_w = (shell_w * 33 / 100).clamp(210, 290);
-    let left_pane = Rect::new(main_card.x + 12, main_card.y + 12, left_w, main_card.height - 24);
+    let left_w = (shell_w * 30 / 100).clamp(190, 270).min((shell_w - 220).max(150));
+    let left_pane = Rect::new(main_card.x + 12, main_card.y + 12, left_w, (main_card.height - 24).max(1));
     let right_pane = Rect::new(
         left_pane.x + left_pane.width + 14,
         main_card.y + 12,
-        main_card.width - left_w - 38,
-        main_card.height - 24,
+        (main_card.width - left_w - 38).max(1),
+        (main_card.height - 24).max(1),
     );
 
     let bottom_bar = Rect::new(shell_x, main_card.y + main_card.height + 10, shell_w, bottom_h);
-    let next_btn = Rect::new(bottom_bar.x + bottom_bar.width - 168, bottom_bar.y + 9, 156, 34);
-    let back_btn = Rect::new(next_btn.x - 110, bottom_bar.y + 9, 100, 34);
-    let power_btn = Rect::new(bottom_bar.x + 12, bottom_bar.y + 9, 140, 34);
+    let next_btn = Rect::new(bottom_bar.x + bottom_bar.width - 168, bottom_bar.y + 8, 156, 34);
+    let back_btn = Rect::new(next_btn.x - 110, bottom_bar.y + 8, 100, 34);
+    let power_btn = Rect::new(bottom_bar.x + 12, bottom_bar.y + 8, 140, 34);
 
     ShellLayout {
         top_pill,
@@ -898,15 +898,29 @@ fn draw_clean_backdrop(canvas: &mut Canvas<'_>) {
     canvas.vertical_gradient(PORCELAIN_TOP, PORCELAIN_BOT);
     let w = canvas.width() as i32;
     let h = canvas.height() as i32;
-    canvas.blend_glow(w * 20 / 100, h * 22 / 100, h / 4, AQUA_SOFT, 65);
-    canvas.blend_glow(w * 82 / 100, h * 78 / 100, h / 4, rgb(180, 224, 255), 65);
+    let radius = (w.min(h) / 3).max(72);
+    canvas.blend_glow(w * 14 / 100, h * 18 / 100, radius, AQUA_SOFT, 52);
+    canvas.blend_glow(w * 86 / 100, h * 76 / 100, radius, AZURE_DEEP, 56);
+    canvas.blend_glow(w * 52 / 100, h * 48 / 100, radius / 2, AQUA_MINT, 18);
 }
 
 fn draw_surface_card(canvas: &mut Canvas<'_>, rect: Rect, radius: i32, shadow_strength: u32) {
-    if shadow_strength > 0 {
-        draw_shadow(canvas, rect, radius, 4, 12, rgb(20, 42, 66), shadow_strength);
+    if rect.width <= 0 || rect.height <= 0 {
+        return;
     }
-    draw_panel(canvas, rect, radius, CARD_WHITE, 248, CARD_BORDER, 255);
+    if shadow_strength > 0 {
+        draw_shadow(canvas, rect, radius, 5, 14, rgb(0, 5, 12), shadow_strength);
+    }
+    draw_panel(canvas, rect, radius, CARD_WHITE, 238, CARD_BORDER, 220);
+    if rect.width > 120 && rect.height > 48 {
+        canvas.blend_glow(
+            rect.x + rect.width / 4,
+            rect.y + 3,
+            (rect.width.min(rect.height) / 3).max(28),
+            AQUA_MINT,
+            10,
+        );
+    }
 }
 
 fn draw_pill_button(
@@ -932,7 +946,14 @@ fn draw_pill_button(
 
     if primary {
         let fill = if hovered { AZURE_DEEP } else { AZURE_BRIGHT };
-        draw_panel(canvas, rect, radius, fill, 255, AZURE_DEEP, 255);
+        draw_panel(canvas, rect, radius, fill, 255, AQUA_MINT, 205);
+        canvas.blend_glow(
+            rect.x + rect.width / 2,
+            rect.y + rect.height / 2,
+            radius + 12,
+            AQUA_MINT,
+            if hovered { 34 } else { 20 },
+        );
         draw_clipped(canvas, label, tx, ty, max_tw, &st, rgb(255, 255, 255));
     } else {
         let fill = if hovered { SUBTLE_HOVER } else { CARD_WHITE };
@@ -1049,14 +1070,17 @@ fn draw_top_navigation_pill(canvas: &mut Canvas<'_>, shell: &ShellLayout, state:
     };
 
     let steps = if state.lang_index == 0 {
-        ["1. Dil & Bolge", "2. Mimari", "3. Depolama", "4. Kurulum"]
+        ["1 Dil", "2 Mimari", "3 Disk", "4 Kurulum"]
     } else {
-        ["1. Language", "2. Architecture", "3. Storage", "4. Install"]
+        ["1 Language", "2 System", "3 Disk", "4 Install"]
     };
 
-    let step_w = 102;
+    let available_x = shell.top_pill.x + 166;
+    let available_right = shell.probe_btn.x - 10;
+    let available_w = (available_right - available_x).max(180);
+    let step_w = ((available_w - 18) / 4).clamp(42, 112);
     let total_steps_w = step_w * 4 + 18;
-    let start_x = shell.top_pill.x + (shell.top_pill.width - total_steps_w) / 2 + 10;
+    let start_x = available_x + (available_w - total_steps_w) / 2;
     let pill_y = shell.top_pill.y + 10;
     let st_font = text_style(9, 14);
 
@@ -1097,6 +1121,8 @@ fn draw_left_showcase(canvas: &mut Canvas<'_>, pane: Rect, platform: &str, state
     draw_panel(canvas, pane, 14, SUBTLE_FILL, 255, CARD_BORDER, 255);
 
     let cx = pane.x + pane.width / 2;
+    canvas.blend_glow(cx, pane.y + 78, 76, AZURE_DEEP, 34);
+    canvas.blend_glow(cx + pane.width / 4, pane.y + 92, 52, AQUA_MINT, 18);
     let art_cy = pane.y + 78;
     let orb_col = if state.phase == StepPhase::Failed {
         rgb(224, 68, 62)
@@ -1146,13 +1172,13 @@ fn draw_left_showcase(canvas: &mut Canvas<'_>, pane: Rect, platform: &str, state
 
     let max_w = pane.width - 20;
     let hw = text_width(headline, &title_st).min(max_w);
-    draw_clipped(canvas, headline, cx - hw / 2, pane.y + 136, max_w, &title_st, INK_DARK);
+    draw_clipped(canvas, headline, cx - hw / 2, pane.y + 128, max_w, &title_st, INK_DARK);
 
     let l1w = text_width(line1, &body_st).min(max_w);
-    draw_clipped(canvas, line1, cx - l1w / 2, pane.y + 160, max_w, &body_st, INK_BODY);
+    draw_clipped(canvas, line1, cx - l1w / 2, pane.y + 152, max_w, &body_st, INK_BODY);
 
     let l2w = text_width(line2, &body_st).min(max_w);
-    draw_clipped(canvas, line2, cx - l2w / 2, pane.y + 176, max_w, &body_st, INK_BODY);
+    draw_clipped(canvas, line2, cx - l2w / 2, pane.y + 168, max_w, &body_st, INK_BODY);
 
     let spec_card = Rect::new(pane.x + 12, pane.y + pane.height - 130, pane.width - 24, 118);
     draw_panel(canvas, spec_card, 10, CARD_WHITE, 255, CARD_BORDER, 255);
@@ -1510,41 +1536,43 @@ fn draw_step_storage(canvas: &mut Canvas<'_>, pane: Rect, state: &SetupState, mo
             }
             VolumeRole::BootCore => (
                 sel(state, "Bolum 1: ESP & Onyukleme (/boot)", "Partition 1: ESP & Boot (/boot)"),
-                "0xEF FAT16 (LBA 65536)",
+                "FAT16",
             ),
             VolumeRole::SystemErofs => (
                 sel(state, "Bolum 2: Sistem Agaci (/system)", "Partition 2: System (/system)"),
-                "0x83 EROFS (LBA 133120)",
+                "EROFS",
             ),
             VolumeRole::SecurityVault => (
                 sel(state, "Bolum 3: Ayrilmis Alan (/security)", "Partition 3: Reserved (/security)"),
-                "0x83 RAW (LBA 4327424)",
+                "RAW",
             ),
             VolumeRole::DataExfat => (
                 sel(state, "Bolum 4: Kisisel Disk (/data)", "Partition 4: Personal (/data)"),
-                "0x83 exFAT (LBA 4851712)",
+                "exFAT",
             ),
             VolumeRole::OpticalIso => (
                 sel(state, "Optik Kurulum Medyasi (Salt Okunur)", "Optical Media (Read-Only)"),
-                "ATAPI ISO9660",
+                "ISO9660",
             ),
         };
 
-        draw_clipped(canvas, title, r.x + 26, r.y + 10, 215, &row_st, INK_DARK);
-        draw_clipped(canvas, fs_tag, r.x + 245, r.y + 11, 130, &small_st, badge_col);
+        let tag_x = r.x + r.width - 126;
+        let title_w = (tag_x - (r.x + 26) - 8).max(72);
+        draw_clipped(canvas, title, r.x + 26, r.y + 10, title_w, &row_st, INK_DARK);
+        draw_clipped(canvas, fs_tag, tag_x, r.y + 11, 48, &small_st, badge_col);
 
         let mut cap_buf = [0u8; 24];
         let cap_len = format_capacity(vol.size_mb, &mut cap_buf);
         if let Ok(cap_str) = core::str::from_utf8(&cap_buf[..cap_len]) {
             let cw = text_width(cap_str, &row_st);
-            draw_text_color(canvas, cap_str, r.x + r.width - cw - 12, r.y + 10, &row_st, INK_BODY);
+            draw_text_color(canvas, cap_str, r.x + r.width - cw - 10, r.y + 10, &row_st, INK_BODY);
         }
     }
 
     let actions = if state.lang_index == 0 {
-        ["Disk Degistir", "Ham Diskler", "Otomatik Bolumle", "Donanim Detayi"]
+        ["Disk Sec", "Ham Liste", "Bolumle", "Donanim"]
     } else {
-        ["Switch Disk", "Raw Disks", "Auto Partition", "Disk Details"]
+        ["Select Disk", "Raw View", "Partition", "Details"]
     };
     for (idx, act_label) in actions.iter().enumerate() {
         let ar = storage_action_pill(pane, idx);
@@ -1655,6 +1683,7 @@ fn draw_step_installing(canvas: &mut Canvas<'_>, pane: Rect, state: &SetupState)
     if fill_w > 6 {
         let fill_r = Rect::new(track.x, track.y, fill_w, track.height);
         draw_panel(canvas, fill_r, 5, AZURE_BRIGHT, 255, AQUA_MINT, 0);
+        canvas.blend_glow(fill_r.x + fill_r.width / 2, fill_r.y + fill_r.height / 2, 24, AQUA_MINT, 32);
     }
 
     let current_stage = match pct {
@@ -1764,6 +1793,7 @@ fn draw_step_completed(canvas: &mut Canvas<'_>, pane: Rect, state: &SetupState) 
     if fill_w > 6 {
         let fr = Rect::new(bar.x, bar.y, fill_w, bar.height);
         draw_panel(canvas, fr, 5, AZURE_BRIGHT, 255, AQUA_MINT, 0);
+        canvas.blend_glow(fr.x + fr.width / 2, fr.y + fr.height / 2, 22, AQUA_MINT, 28);
     }
 }
 

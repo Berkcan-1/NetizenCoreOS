@@ -125,6 +125,9 @@ fn d_tag(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
 fn d_create(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
     let h = H!(it);
     let tag = astr(it, a, 0)?;
+    if tag.len() > 128 || h.tree.borrow().nodes.len() >= crate::dom::MAX_RUNTIME_DOM_NODES {
+        return Err(it.throw_err("RangeError", "DOM node or tag length limit exceeded"));
+    }
     let id = h.tree.borrow_mut().create_element(&tag);
     Ok(Value::Num(id as f64))
 }
@@ -132,6 +135,9 @@ fn d_create(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
 fn d_text(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
     let h = H!(it);
     let s = astr(it, a, 0)?;
+    if s.len() > 8 * 1024 || h.tree.borrow().nodes.len() >= crate::dom::MAX_RUNTIME_DOM_NODES {
+        return Err(it.throw_err("RangeError", "DOM text or node limit exceeded"));
+    }
     let id = h.tree.borrow_mut().create_text(&s);
     Ok(Value::Num(id as f64))
 }
@@ -150,6 +156,9 @@ fn d_set_value(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
     let h = H!(it);
     let id = aid(a, 0);
     let s = astr(it, a, 1)?;
+    if s.len() > 8 * 1024 {
+        return Err(it.throw_err("RangeError", "DOM text size limit exceeded"));
+    }
     if valid(&h, id) {
         h.tree.borrow_mut().set_text_content(id, &s);
         h.dirty.set(true);
@@ -213,6 +222,9 @@ fn d_set_attr(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
     let id = aid(a, 0);
     let name = astr(it, a, 1)?;
     let val = astr(it, a, 2)?;
+    if name.len() > 128 || val.len() > 4 * 1024 {
+        return Err(it.throw_err("RangeError", "DOM attribute size limit exceeded"));
+    }
     h.tree.borrow_mut().set_attr(id, &name, &val);
     h.dirty.set(true);
     Ok(Value::Undefined)
@@ -242,6 +254,9 @@ fn d_text_content(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
 fn d_set_text_content(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
     let h = H!(it);
     let s = astr(it, a, 1)?;
+    if s.len() > 8 * 1024 {
+        return Err(it.throw_err("RangeError", "DOM text size limit exceeded"));
+    }
     h.tree.borrow_mut().set_text_content(aid(a, 0), &s);
     h.dirty.set(true);
     Ok(Value::Undefined)
@@ -270,6 +285,9 @@ fn d_set_inner_html(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
 fn d_clone(it: &mut Interp, _t: &Value, a: &[Value]) -> Res<Value> {
     let h = H!(it);
     let deep = a.get(1).map(|v| v.truthy()).unwrap_or(false);
+    if h.tree.borrow().nodes.len() >= crate::dom::MAX_RUNTIME_DOM_NODES {
+        return Err(it.throw_err("RangeError", "DOM node limit exceeded"));
+    }
     let id = h.tree.borrow_mut().clone_node(aid(a, 0), deep);
     Ok(Value::Num(id as f64))
 }
@@ -540,7 +558,7 @@ pub fn pump_step(it: &mut Interp) -> bool {
     h.network_busy()
 }
 
-/// Used by `await`: spins the network until one request completes (or none are pending).
+/// Used by `await`: performs a small bounded poll burst; it never waits for a full network request.
 pub fn pump_blocking(it: &mut Interp) -> bool {
     let h = match host(it) {
         Some(h) => h,
@@ -550,7 +568,7 @@ pub fn pump_blocking(it: &mut Interp) -> bool {
     let start = h.completed.get();
     let mut busy = h.network_busy();
     let mut n = 0;
-    while busy && n < 300_000 {
+    while busy && n < 8 {
         busy = pump_step(it);
         if h.completed.get() != start {
             break;
@@ -603,23 +621,38 @@ fn script_type_ok(tree: &DomTree, id: usize) -> bool {
     }
 }
 
-/// Attached `<script>` elements in document order that have not been handled yet.
-pub fn pending_scripts(tree: &DomTree, done: &[usize]) -> Vec<ScriptItem> {
-    let mut out = Vec::new();
+/// Fast existence check used by the resource scheduler; it does not copy inline source text.
+pub fn has_pending_script(tree: &DomTree, done: &[usize]) -> bool {
     let mut stack: Vec<usize> = alloc::vec![tree.root];
     while let Some(id) = stack.pop() {
-        if let Some(n) = tree.nodes.get(id) {
-            for &c in n.children.iter().rev() {
-                stack.push(c);
-            }
-            if tree.tag(id) == Some("script") && !done.contains(&id) && script_type_ok(tree, id) {
-                let src = tree.attr(id, "src").map(String::from).filter(|s| !s.trim().is_empty());
-                let code = if src.is_some() { String::new() } else { tree.raw_text(id) };
-                if src.is_some() || !code.trim().is_empty() {
-                    out.push(ScriptItem { node: id, src, code });
-                }
-            }
+        let Some(n) = tree.nodes.get(id) else { continue; };
+        for &c in n.children.iter().rev() {
+            stack.push(c);
+        }
+        if tree.tag(id) == Some("script") && !done.contains(&id) && script_type_ok(tree, id) {
+            return true;
         }
     }
-    out
+    false
+}
+
+/// First attached `<script>` in document order that has not been handled yet.
+/// Returns immediately instead of allocating and copying every script on every frame.
+pub fn next_pending_script(tree: &DomTree, done: &[usize]) -> Option<ScriptItem> {
+    let mut stack: Vec<usize> = alloc::vec![tree.root];
+    while let Some(id) = stack.pop() {
+        let Some(n) = tree.nodes.get(id) else { continue; };
+        for &c in n.children.iter().rev() {
+            stack.push(c);
+        }
+        if tree.tag(id) != Some("script") || done.contains(&id) || !script_type_ok(tree, id) {
+            continue;
+        }
+        let src = tree.attr(id, "src").map(String::from).filter(|s| !s.trim().is_empty());
+        let code = if src.is_some() { String::new() } else { tree.raw_text(id) };
+        if src.is_some() || !code.trim().is_empty() {
+            return Some(ScriptItem { node: id, src, code });
+        }
+    }
+    None
 }

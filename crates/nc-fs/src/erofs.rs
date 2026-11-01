@@ -330,6 +330,41 @@ impl FileSystem for Erofs {
         self.read_inode_data(&inode)
     }
 
+    fn read_file_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let inode = self.resolve_path(path)?;
+        if inode.is_dir {
+            return Err(FsError::NotAFile);
+        }
+        if output.is_empty() || offset >= inode.size {
+            return Ok(0);
+        }
+        let remaining = usize::try_from(inode.size - offset).unwrap_or(usize::MAX);
+        let count = output.len().min(remaining);
+        let start = match inode.layout {
+            EROFS_INODE_FLAT_PLAIN => (inode.raw_blkaddr as u64)
+                .checked_mul(self.block_size as u64)
+                .and_then(|base| base.checked_add(offset))
+                .ok_or(FsError::Corrupted)?,
+            EROFS_INODE_FLAT_INLINE => inode
+                .inode_offset
+                .checked_add(32)
+                .and_then(|base| base.checked_add(offset))
+                .ok_or(FsError::Corrupted)?,
+            _ => {
+                // Compressed EROFS layouts are not implemented by this filesystem
+                // driver yet. Never expose compressed disk bytes as file contents.
+                return Err(FsError::Corrupted);
+            }
+        };
+        self.read_bytes(start, &mut output[..count])?;
+        Ok(count)
+    }
+
     fn file_size(&mut self, path: &str) -> Result<u64, FsError> {
         let inode = self.resolve_path(path)?;
         if inode.is_dir {

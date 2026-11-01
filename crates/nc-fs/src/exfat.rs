@@ -27,6 +27,14 @@ pub struct Exfat {
     max_cluster: u32,
     bitmap_first_cluster: Option<u32>,
     bitmap_size: u64,
+    range_cache: Option<RangeReadCache>,
+}
+
+struct RangeReadCache {
+    path: String,
+    next_offset: u64,
+    current_cluster: u32,
+    in_cluster: usize,
 }
 
 struct RawEntryLoc {
@@ -115,6 +123,7 @@ impl Exfat {
             max_cluster,
             bitmap_first_cluster: None,
             bitmap_size: 0,
+            range_cache: None,
         };
 
         // C-06: Kok dizinde standart exFAT Allocation Bitmap (0x81) varsa konumunu kaydet
@@ -697,6 +706,95 @@ impl FileSystem for Exfat {
         self.read_cluster_chain(cluster, no_fat, size)
     }
 
+    fn read_file_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let (start_cluster, no_fat_chain, file_size, is_dir) = self.resolve_path(path)?;
+        if is_dir {
+            return Err(FsError::NotAFile);
+        }
+        if output.is_empty() || offset >= file_size {
+            return Ok(0);
+        }
+
+        let remaining = usize::try_from(file_size - offset).unwrap_or(usize::MAX);
+        let wanted = output.len().min(remaining);
+        let cluster_bytes = self.cluster_size as usize;
+        if cluster_bytes == 0 {
+            return Err(FsError::Corrupted);
+        }
+
+        // Sequential VFS reads (the file-manager's preview loader) reuse the last
+        // cluster cursor instead of walking the FAT chain from the file's first
+        // cluster for every 256 KiB chunk.
+        let cached = self.range_cache.take().filter(|cache| {
+            cache.path.as_str() == path && cache.next_offset == offset
+        });
+        let (mut current_cluster, mut in_cluster, mut guard) = if let Some(cache) = cached {
+            (cache.current_cluster, cache.in_cluster, 0u64)
+        } else {
+            let mut cluster_index = offset / cluster_bytes as u64;
+            let mut current = start_cluster;
+            let mut traversed = 0u64;
+            while cluster_index > 0 {
+                if current < 2 || current >= self.max_cluster || traversed >= self.max_cluster as u64 {
+                    return Err(FsError::Corrupted);
+                }
+                current = if no_fat_chain {
+                    current.checked_add(1).ok_or(FsError::Corrupted)?
+                } else {
+                    self.read_fat_entry(current)?
+                };
+                cluster_index -= 1;
+                traversed += 1;
+            }
+            (current, (offset % cluster_bytes as u64) as usize, traversed)
+        };
+
+        let mut written = 0usize;
+        while written < wanted {
+            if current_cluster < 2 || current_cluster >= self.max_cluster || guard >= self.max_cluster as u64 {
+                return Err(FsError::Corrupted);
+            }
+            guard += 1;
+            let cluster = self.read_single_cluster(current_cluster)?;
+            if in_cluster >= cluster.len() {
+                return Err(FsError::Corrupted);
+            }
+            let count = (cluster.len() - in_cluster).min(wanted - written);
+            if count == 0 {
+                return Err(FsError::Corrupted);
+            }
+            output[written..written + count]
+                .copy_from_slice(&cluster[in_cluster..in_cluster + count]);
+            written += count;
+            in_cluster += count;
+
+            if in_cluster == cluster.len() && offset.saturating_add(written as u64) < file_size {
+                current_cluster = if no_fat_chain {
+                    current_cluster.checked_add(1).ok_or(FsError::Corrupted)?
+                } else {
+                    self.read_fat_entry(current_cluster)?
+                };
+                in_cluster = 0;
+            }
+        }
+
+        let next_offset = offset.saturating_add(written as u64);
+        if next_offset < file_size {
+            self.range_cache = Some(RangeReadCache {
+                path: String::from(path),
+                next_offset,
+                current_cluster,
+                in_cluster,
+            });
+        }
+        Ok(written)
+    }
+
     fn file_size(&mut self, path: &str) -> Result<u64, FsError> {
         let (_, _, size, is_dir) = self.resolve_path(path)?;
         if is_dir {
@@ -707,6 +805,7 @@ impl FileSystem for Exfat {
 
     // H-02: Once yeni kumelere yaz ve dizin girdisini commit et; eski zinciri YALNIZCA basarili commit sonrasinda birak
     fn write_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
+        self.range_cache = None;
         if content.len() as u64 > MAX_FILE_SIZE_BYTES {
             return Err(FsError::StorageFull);
         }
@@ -780,6 +879,7 @@ impl FileSystem for Exfat {
     }
 
     fn create_dir(&mut self, path: &str) -> Result<(), FsError> {
+        self.range_cache = None;
         let (parent_path, dir_name) = self.split_parent_and_name(path)?;
         let (parent_cluster, _, _, parent_is_dir) = self.resolve_path(parent_path)?;
         if !parent_is_dir {
@@ -818,6 +918,7 @@ impl FileSystem for Exfat {
 
     // H-03 & H-04: Bos olmayan klasoru silmeyi reddet, once dizin girdisini guncelle, sonra zinciri bosalt
     fn remove(&mut self, path: &str) -> Result<(), FsError> {
+        self.range_cache = None;
         let (parent_path, target_name) = self.split_parent_and_name(path)?;
         let (parent_cluster, _, _, parent_is_dir) = self.resolve_path(parent_path)?;
         if !parent_is_dir {

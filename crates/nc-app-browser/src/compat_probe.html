@@ -3,12 +3,13 @@
 (function () {
   var results = [];
   var cats = [];
-  function cat(name) { cats.push({ name: name, missing: [], total: 0 }); }
+  function cat(name) { cats.push({ name: name, missing: [], untested: [], total: 0 }); }
   function cur() { return cats[cats.length - 1]; }
   function rec(name, ok) {
     var c = cur();
     c.total++;
-    if (!ok) { c.missing.push(name); }
+    if (ok === null) { c.untested.push(name); }
+    else if (!ok) { c.missing.push(name); }
   }
   function test(name, fn) {
     var ok = false;
@@ -33,10 +34,12 @@
   }
   var canCompile = typeof Function === 'function';
   function syn(name, code) {
-    test(name, function () { if (!canCompile) { return false; } new Function(code); return true; });
+    if (!canCompile) { rec(name, null); return; }
+    test(name, function () { new Function(code); return true; });
   }
   function run(name, code, expected) {
-    test(name, function () { if (!canCompile) { return false; } return String(new Function(code)()) === expected; });
+    if (!canCompile) { rec(name, null); return; }
+    test(name, function () { return String(new Function(code)()) === expected; });
   }
 
   cat('ES globals');
@@ -178,11 +181,11 @@
   test('getComputedStyle().getPropertyValue', function () { var d = document.createElement('div'); document.body.appendChild(d); var v = getComputedStyle(d).getPropertyValue('display'); document.body.removeChild(d); return typeof v === 'string'; });
   test('matchMedia().matches', function () { return typeof matchMedia('(min-width: 1px)').matches === 'boolean'; });
 
-  var total = 0, missing = 0, root = document.getElementById('root') || document.body;
+  var total = 0, missing = 0, untested = 0, root = document.getElementById('root') || document.body;
   var summary = document.getElementById('status');
   if (!summary) { summary = document.createElement('p'); root.appendChild(summary); }
-  for (var i = 0; i < cats.length; i++) { total += cats[i].total; missing += cats[i].missing.length; }
-  summary.textContent = 'PASS ' + (total - missing) + ' / ' + total + ' - missing ' + missing + (canCompile ? '' : ' - NOTE: Function constructor is missing so syntax probes cannot run');
+  for (var i = 0; i < cats.length; i++) { total += cats[i].total; missing += cats[i].missing.length; untested += cats[i].untested.length; }
+  summary.textContent = 'PASS ' + (total - missing - untested) + ' / ' + total + ' - missing ' + missing + ' - untested ' + untested;
   function para(text, color) {
     var p = document.createElement('p');
     p.setAttribute('style', 'color:' + color);
@@ -192,11 +195,12 @@
   for (var j = 0; j < cats.length; j++) {
     var c = cats[j];
     var h = document.createElement('h3');
-    h.textContent = c.name + ': ' + (c.total - c.missing.length) + '/' + c.total;
+    h.textContent = c.name + ': ' + (c.total - c.missing.length - c.untested.length) + '/' + c.total;
     root.appendChild(h);
     if (c.missing.length) { para('MISSING: ' + c.missing.join(', '), '#b91c1c'); }
+    if (c.untested.length) { para('NOT TESTED (dynamic compiler unavailable): ' + c.untested.join(', '), '#a16207'); }
   }
   para('Send a screenshot of this page to get exactly these gaps fixed. Raw result: window.__compat', '#64748b');
-  window.__compat = { total: total, missing: missing, categories: cats };
+  window.__compat = { total: total, missing: missing, untested: untested, categories: cats };
 })();
 </script></body></html>

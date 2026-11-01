@@ -43,6 +43,29 @@ pub enum FsError {
 pub trait FileSystem {
     fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, FsError>;
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, FsError>;
+
+    /// Read a bounded range without requiring callers to allocate the whole file.
+    /// Filesystems should override this method with direct block/extent reads.
+    /// The default is intentionally compatible with older filesystem drivers.
+    fn read_file_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FsError> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let data = self.read_file(path)?;
+        let start = usize::try_from(offset).map_err(|_| FsError::Corrupted)?;
+        if start >= data.len() {
+            return Ok(0);
+        }
+        let count = output.len().min(data.len() - start);
+        output[..count].copy_from_slice(&data[start..start + count]);
+        Ok(count)
+    }
+
     fn file_size(&mut self, path: &str) -> Result<u64, FsError> {
         self.read_file(path).map(|v| v.len() as u64)
     }

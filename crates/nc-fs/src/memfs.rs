@@ -151,6 +151,28 @@ impl FileSystem for MemFs {
         Ok(node.content.clone())
     }
 
+    fn read_file_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let node = self.find_node(path)?;
+        if node.is_dir {
+            return Err(FsError::NotAFile);
+        }
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let start = usize::try_from(offset).map_err(|_| FsError::Corrupted)?;
+        if start >= node.content.len() {
+            return Ok(0);
+        }
+        let count = output.len().min(node.content.len() - start);
+        output[..count].copy_from_slice(&node.content[start..start + count]);
+        Ok(count)
+    }
+
     fn file_size(&mut self, path: &str) -> Result<u64, FsError> {
         let node = self.find_node(path)?;
         if node.is_dir {

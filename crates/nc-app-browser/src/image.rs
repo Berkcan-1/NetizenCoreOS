@@ -4,6 +4,9 @@ use alloc::vec::Vec;
 use crate::css::{parse_css_color, SafeClamp};
 use crate::dom::{DomTree, NodeType};
 
+const MAX_IMAGE_PIXELS: usize = 2_000_000;
+const MAX_DATA_IMAGE_URI_BYTES: usize = 512 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct DecodedImage {
     pub width: u32,
@@ -36,6 +39,9 @@ impl DecodedImage {
     }
 
     pub fn from_data_uri(uri: &str, max_side: u32) -> Option<Self> {
+        if uri.len() > MAX_DATA_IMAGE_URI_BYTES {
+            return None;
+        }
         let rest = uri.strip_prefix("data:")?;
         let comma = rest.find(',')?;
         let meta = &rest[..comma];
@@ -258,7 +264,7 @@ fn decode_bmp(data: &[u8]) -> Option<DecodedImage> {
     let top_down = height_raw < 0;
     let w = width as usize;
     let h = height_raw.unsigned_abs() as usize;
-    if w > 2048 || h > 2048 {
+    if w > 2048 || h > 2048 || w.checked_mul(h)? > MAX_IMAGE_PIXELS {
         return None;
     }
 
@@ -732,12 +738,12 @@ fn decode_png(data: &[u8]) -> Option<DecodedImage> {
                 color_type = chunk_data[9];
             }
             b"PLTE" => {
-                for rgb_chunk in chunk_data.chunks_exact(3) {
+                for rgb_chunk in chunk_data.chunks_exact(3).take(256) {
                     palette.push([rgb_chunk[0], rgb_chunk[1], rgb_chunk[2]]);
                 }
             }
             b"tRNS" => {
-                trns.extend_from_slice(chunk_data);
+                trns.extend_from_slice(&chunk_data[..chunk_data.len().min(256)]);
             }
             b"IDAT" => {
                 idat.extend_from_slice(chunk_data);
@@ -747,7 +753,13 @@ fn decode_png(data: &[u8]) -> Option<DecodedImage> {
         }
     }
 
-    if width == 0 || height == 0 || width > 2048 || height > 2048 || bit_depth != 8 {
+    if width == 0
+        || height == 0
+        || width > 2048
+        || height > 2048
+        || (width as usize).checked_mul(height as usize)? > MAX_IMAGE_PIXELS
+        || bit_depth != 8
+    {
         return None;
     }
 
@@ -760,11 +772,12 @@ fn decode_png(data: &[u8]) -> Option<DecodedImage> {
         _ => return None,
     };
 
-    let raw = inflate_zlib(&idat)?;
     let w = width as usize;
     let h = height as usize;
-    let stride = w * bpp;
-    if raw.len() < h * (stride + 1) {
+    let stride = w.checked_mul(bpp)?;
+    let expected_raw_len = h.checked_mul(stride.checked_add(1)?)?;
+    let raw = inflate_zlib(&idat, expected_raw_len)?;
+    if raw.len() < expected_raw_len {
         return None;
     }
 
@@ -965,12 +978,12 @@ impl HuffTable {
     }
 }
 
-fn inflate_zlib(zlib_data: &[u8]) -> Option<Vec<u8>> {
-    if zlib_data.len() < 6 {
+fn inflate_zlib(zlib_data: &[u8], max_output: usize) -> Option<Vec<u8>> {
+    if zlib_data.len() < 6 || max_output == 0 {
         return None;
     }
     let mut reader = BitReader::new(&zlib_data[2..]);
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(max_output.min(8 * 1024 * 1024));
 
     const LEN_BASE: [u16; 29] = [
         3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
@@ -1004,6 +1017,9 @@ fn inflate_zlib(zlib_data: &[u8]) -> Option<Vec<u8>> {
                 let _nlo = reader.read_bits(8)?;
                 let _nhi = reader.read_bits(8)?;
                 let len = (lo | (hi << 8)) as usize;
+                if out.len().checked_add(len)? > max_output {
+                    return None;
+                }
                 for _ in 0..len {
                     out.push(reader.read_bits(8)? as u8);
                 }
@@ -1075,6 +1091,9 @@ fn inflate_zlib(zlib_data: &[u8]) -> Option<Vec<u8>> {
                 loop {
                     let sym = lit_table.decode(&mut reader)?;
                     if sym < 256 {
+                        if out.len() >= max_output {
+                            return None;
+                        }
                         out.push(sym as u8);
                     } else if sym == 256 {
                         break;
@@ -1089,7 +1108,7 @@ fn inflate_zlib(zlib_data: &[u8]) -> Option<Vec<u8>> {
                             return None;
                         }
                         let distance = (DIST_BASE[dist_sym] + reader.read_bits(DIST_EXTRA[dist_sym])?) as usize;
-                        if distance == 0 || distance > out.len() {
+                        if distance == 0 || distance > out.len() || out.len().checked_add(length)? > max_output {
                             return None;
                         }
                         for _ in 0..length {

@@ -11,6 +11,9 @@ pub const MAX_HTML_BYTES: usize = 3 * 1024 * 1024;
 const MAX_TOKENS: usize = 16_000;
 const MAX_DOM_NODES: usize = 6_000;
 const MAX_DOM_DEPTH: usize = 28;
+const MAX_ATTRIBUTES_PER_ELEMENT: usize = 64;
+const MAX_ATTRIBUTE_NAME_BYTES: usize = 128;
+const MAX_ATTRIBUTE_VALUE_BYTES: usize = 4096;
 
 #[derive(Debug)]
 enum Token {
@@ -184,7 +187,9 @@ impl HtmlParser {
                                         // built-in font happens only when text is displayed (see `sanitize_text`).
                                         decode_entities(&v)
                                     };
-                                    attributes.push((k, clean_v));
+                                    if attributes.len() < MAX_ATTRIBUTES_PER_ELEMENT {
+                                        attributes.push((k, clean_v));
+                                    }
                                 }
                             }
                             None => break,
@@ -287,7 +292,9 @@ impl HtmlParser {
             if ch.is_whitespace() || ch == '=' || ch == '>' || ch == '/' {
                 break;
             }
-            key.push(ch.to_ascii_lowercase());
+            if key.len().saturating_add(ch.len_utf8()) <= MAX_ATTRIBUTE_NAME_BYTES {
+                key.push(ch.to_ascii_lowercase());
+            }
             self.next();
         }
         self.consume_whitespace();
@@ -302,7 +309,9 @@ impl HtmlParser {
                         if ch == quote {
                             break;
                         }
-                        val.push(ch);
+                        if val.len().saturating_add(ch.len_utf8()) <= MAX_ATTRIBUTE_VALUE_BYTES {
+                            val.push(ch);
+                        }
                     }
                 } else {
                     // WHATWG "attribute value (unquoted) state": only whitespace and '>' end the value.
@@ -312,7 +321,9 @@ impl HtmlParser {
                         if ch.is_whitespace() || ch == '>' {
                             break;
                         }
-                        val.push(ch);
+                        if val.len().saturating_add(ch.len_utf8()) <= MAX_ATTRIBUTE_VALUE_BYTES {
+                            val.push(ch);
+                        }
                         self.next();
                     }
                 }

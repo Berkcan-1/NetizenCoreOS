@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 /// Largest canvas decoded (pixels). Bigger images are rejected instead of exhausting memory.
-const MAX_PIXELS: usize = 4_000_000;
+const MAX_PIXELS: usize = 2_000_000;
 
 pub struct Gif {
     pub width: u32,

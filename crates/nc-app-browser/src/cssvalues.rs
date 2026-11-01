@@ -609,6 +609,70 @@ pub fn gradient_colors(val: &str) -> Vec<String> {
     out
 }
 
+/// Resolves CSS custom properties for one element's inherited variable environment.
+/// Cycles and missing variables invalidate the declaration unless a fallback is present.
+pub fn resolve_custom_vars(raw: &str, vars: &[(String, String)], stack: &mut Vec<String>, depth: u8) -> Option<String> {
+    if depth > 8 || raw.len() > 8192 { return None; }
+    let bytes = raw.as_bytes();
+    let mut probe = 0usize;
+    let mut quote_scan: Option<u8> = None;
+    let mut escaped_scan = false;
+    let mut found = None;
+    while probe + 3 < bytes.len() {
+        let b = bytes[probe];
+        if escaped_scan { escaped_scan = false; probe += 1; continue; }
+        if b == b'\\' { escaped_scan = true; probe += 1; continue; }
+        if let Some(q) = quote_scan {
+            if b == q { quote_scan = None; }
+            probe += 1;
+            continue;
+        }
+        if b == b'\'' || b == b'"' { quote_scan = Some(b); probe += 1; continue; }
+        if bytes[probe..probe + 4].eq_ignore_ascii_case(b"var(") { found = Some(probe); break; }
+        probe += 1;
+    }
+    let Some(start) = found else { return Some(String::from(raw)); };
+    let mut i = start + 4;
+    let mut nesting = 1i32;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped { escaped = false; i += 1; continue; }
+        if b == b'\\' { escaped = true; i += 1; continue; }
+        if let Some(q) = quote { if b == q { quote = None; } i += 1; continue; }
+        if b == b'\'' || b == b'"' { quote = Some(b); i += 1; continue; }
+        if b == b'(' { nesting += 1; }
+        else if b == b')' { nesting -= 1; if nesting == 0 { break; } }
+        i += 1;
+    }
+    if i >= bytes.len() { return None; }
+    let inner = &raw[start + 4..i];
+    let parts = split_top(inner, ',');
+    let name = parts.first()?.trim();
+    if !name.starts_with("--") { return None; }
+    let fallback = if parts.len() > 1 { Some(parts[1..].join(",")) } else { None };
+    let resolved_value = if stack.iter().any(|entry| entry == name) {
+        None
+    } else if let Some((_, value)) = vars.iter().rev().find(|(key, _)| key == name) {
+        stack.push(String::from(name));
+        let value = resolve_custom_vars(value, vars, stack, depth + 1);
+        stack.pop();
+        value
+    } else {
+        None
+    };
+    let replacement = match resolved_value {
+        Some(value) => value,
+        None => resolve_custom_vars(fallback.as_deref()?, vars, stack, depth + 1)?,
+    };
+    let mut combined = String::with_capacity(raw.len() + replacement.len());
+    combined.push_str(&raw[..start]);
+    combined.push_str(&replacement);
+    combined.push_str(&raw[i + 1..]);
+    resolve_custom_vars(&combined, vars, stack, depth + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +763,21 @@ mod tests {
         let g2 = gradient_colors("linear-gradient(45deg, red, blue)");
         assert_eq!(g2.len(), 2);
         assert!(gradient_colors("url(a.png)").is_empty());
+    }
+
+    #[test]
+    fn custom_properties_resolve_scope_fallback_and_cycles() {
+        let vars = alloc::vec![
+            (String::from("--brand"), String::from("#1769aa")),
+            (String::from("--copy"), String::from("var(--missing, white)")),
+            (String::from("--cycle-a"), String::from("var(--cycle-b)")),
+            (String::from("--cycle-b"), String::from("var(--cycle-a)")),
+        ];
+        assert_eq!(resolve_custom_vars("1px solid var(--brand)", &vars, &mut Vec::new(), 0), Some(String::from("1px solid #1769aa")));
+        assert_eq!(resolve_custom_vars("var(--copy)", &vars, &mut Vec::new(), 0), Some(String::from("white")));
+        assert_eq!(resolve_custom_vars("var(--cycle-a, red)", &vars, &mut Vec::new(), 0), Some(String::from("red")));
+        assert_eq!(resolve_custom_vars("var(--not-defined)", &vars, &mut Vec::new(), 0), None);
+        assert_eq!(resolve_custom_vars("content: 'var(--brand)'", &vars, &mut Vec::new(), 0), Some(String::from("content: 'var(--brand)'")));
     }
 
     #[test]

@@ -153,6 +153,19 @@ pub struct VfsManager {
     ram_fs: MemFs,
 }
 
+fn copy_file_range(data: &[u8], offset: u64, output: &mut [u8]) -> Result<usize, FsError> {
+    if output.is_empty() {
+        return Ok(0);
+    }
+    let start = usize::try_from(offset).map_err(|_| FsError::Corrupted)?;
+    if start >= data.len() {
+        return Ok(0);
+    }
+    let count = output.len().min(data.len() - start);
+    output[..count].copy_from_slice(&data[start..start + count]);
+    Ok(count)
+}
+
 impl VfsManager {
     // Bolum 5.6: Sabit 1 GiB yerine kurulu diskin gercek MBR bolum tablosundaki araliklari oku
     pub fn new() -> Self {
@@ -474,6 +487,46 @@ impl VfsManager {
                 }
             }
             "ram" => self.ram_fs.read_file(rel),
+            _ => Err(FsError::NotFound),
+        }
+    }
+
+    /// Reads at most `output.len()` bytes from a path without materializing the full file.
+    /// exFAT, FAT32, EROFS plain/inline files and MemFs implement direct range reads;
+    /// older/custom filesystems use the compatibility fallback in `FileSystem::read_file_range`.
+    pub fn read_file_range_path(
+        &mut self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FsError> {
+        validate_safe_path(path)?;
+        let (mount, rel) = self.split_mount_path(path);
+        match mount {
+            "system" => {
+                if let Some(ref mut fs) = self.system_fs {
+                    fs.read_file_range(rel, offset, output)
+                } else {
+                    let data = Self::fallback_read(PartitionTarget::System, rel)?;
+                    copy_file_range(&data, offset, output)
+                }
+            }
+            "data" => {
+                if let Some(ref mut fs) = self.data_fs {
+                    fs.read_file_range(rel, offset, output)
+                } else {
+                    let data = Self::fallback_read(PartitionTarget::Data, rel)?;
+                    copy_file_range(&data, offset, output)
+                }
+            }
+            "usb" => {
+                if let Some(ref mut fs) = self.usb_fs {
+                    fs.read_file_range(rel, offset, output)
+                } else {
+                    Err(FsError::NotFound)
+                }
+            }
+            "ram" => self.ram_fs.read_file_range(rel, offset, output),
             _ => Err(FsError::NotFound),
         }
     }

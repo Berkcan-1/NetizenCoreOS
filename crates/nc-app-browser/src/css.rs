@@ -1,5 +1,6 @@
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use nc_gfx::rgb;
@@ -67,6 +68,7 @@ pub enum Pseudo {
     Not(Vec<SelectorPart>),
     Is(Vec<SelectorPart>),
     Where(Vec<SelectorPart>),
+    Has(Vec<(Selector, bool)>),
     Link,
     Disabled,
     Enabled,
@@ -95,6 +97,17 @@ pub struct Selector {
     pub chain: Vec<SelectorPart>,
 }
 
+fn selector_specificity(selector: &Selector) -> (u16, u16, u16) {
+    let mut total = (0u16, 0u16, 0u16);
+    for part in &selector.chain {
+        let value = part_specificity(part);
+        total.0 = total.0.saturating_add(value.0);
+        total.1 = total.1.saturating_add(value.1);
+        total.2 = total.2.saturating_add(value.2);
+    }
+    total
+}
+
 fn part_specificity(p: &SelectorPart) -> (u16, u16, u16) {
     let mut ids: u16 = if p.id.is_some() { 1 } else { 0 };
     let mut classes: u16 = (p.classes.len() + p.attrs.len()) as u16;
@@ -108,9 +121,21 @@ fn part_specificity(p: &SelectorPart) -> (u16, u16, u16) {
             Pseudo::Not(args) | Pseudo::Is(args) => {
                 let mut best = (0u16, 0u16, 0u16);
                 for a in args {
-                    let s = part_specificity(a);
-                    if s > best {
-                        best = s;
+                    let candidate = part_specificity(a);
+                    if candidate > best {
+                        best = candidate;
+                    }
+                }
+                ids = ids.saturating_add(best.0);
+                classes = classes.saturating_add(best.1);
+                tags = tags.saturating_add(best.2);
+            }
+            Pseudo::Has(selectors) => {
+                let mut best = (0u16, 0u16, 0u16);
+                for (selector, _) in selectors {
+                    let candidate = selector_specificity(selector);
+                    if candidate > best {
+                        best = candidate;
                     }
                 }
                 ids = ids.saturating_add(best.0);
@@ -140,6 +165,7 @@ impl Selector {
             p.pseudos.iter().any(|ps| match ps {
                 Pseudo::Hover | Pseudo::Focus | Pseudo::FocusWithin => true,
                 Pseudo::Not(a) | Pseudo::Is(a) | Pseudo::Where(a) => a.iter().any(part_uses),
+                Pseudo::Has(selectors) => selectors.iter().any(|(s, _)| s.chain.iter().any(part_uses)),
                 _ => false,
             })
         }
@@ -169,26 +195,114 @@ pub struct CssRule {
 
 const MAX_RULES: usize = 1500;
 const MAX_CSS_BYTES: usize = 256 * 1024;
+const MAX_TOTAL_CSS_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Stylesheet {
     pub rules: Vec<CssRule>,
-    pub variables: Vec<(String, String)>,
     viewport_w: i32,
     viewport_h: i32,
     /// True when at least one rule depends on `:hover` / `:focus` state, so the browser
     /// only pays the cost of pointer-triggered relayout for pages that need it.
     pub has_state_rules: bool,
+    by_tag: BTreeMap<String, Vec<usize>>,
+    by_id: BTreeMap<String, Vec<usize>>,
+    by_class: BTreeMap<String, Vec<usize>>,
+    universal_rules: Vec<usize>,
+    css_bytes: usize,
+}
+
+fn find_css_delimiter(input: &str, start: usize, delimiters: &[u8]) -> Option<(usize, u8)> {
+    let bytes = input.as_bytes();
+    let mut i = start.min(bytes.len());
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped { escaped = false; i += 1; continue; }
+        if b == b'\\' && quote.is_some() { escaped = true; i += 1; continue; }
+        if let Some(q) = quote { if b == q { quote = None; } i += 1; continue; }
+        if b == b'\'' || b == b'"' { quote = Some(b); i += 1; continue; }
+        match b {
+            b'(' => parens += 1,
+            b')' => parens = (parens - 1).max(0),
+            b'[' => brackets += 1,
+            b']' => brackets = (brackets - 1).max(0),
+            _ => {}
+        }
+        if parens == 0 && brackets == 0 && delimiters.contains(&b) { return Some((i, b)); }
+        i += 1;
+    }
+    None
+}
+
+fn find_matching_css_brace(input: &str, open_at: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if bytes.get(open_at) != Some(&b'{') { return None; }
+    let mut i = open_at + 1;
+    let mut depth = 1i32;
+    let mut parens = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped { escaped = false; i += 1; continue; }
+        if b == b'\\' && quote.is_some() { escaped = true; i += 1; continue; }
+        if let Some(q) = quote { if b == q { quote = None; } i += 1; continue; }
+        if b == b'\'' || b == b'"' { quote = Some(b); i += 1; continue; }
+        match b {
+            b'(' => parens += 1,
+            b')' => parens = (parens - 1).max(0),
+            b'{' if parens == 0 => depth += 1,
+            b'}' if parens == 0 => {
+                depth -= 1;
+                if depth == 0 { return Some(i); }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 impl Stylesheet {
     pub fn new() -> Self {
         Stylesheet {
             rules: Vec::new(),
-            variables: Vec::new(),
             viewport_w: 1100,
             viewport_h: 800,
             has_state_rules: false,
+            by_tag: BTreeMap::new(),
+            by_id: BTreeMap::new(),
+            by_class: BTreeMap::new(),
+            universal_rules: Vec::new(),
+            css_bytes: 0,
+        }
+    }
+
+    fn index_rule(&mut self, rule_index: usize) {
+        let Some(rule) = self.rules.get(rule_index) else {
+            return;
+        };
+        for selector in &rule.selectors {
+            let Some(rightmost) = selector.chain.last() else {
+                continue;
+            };
+            if let Some(id) = &rightmost.id {
+                self.by_id.entry(id.to_ascii_lowercase()).or_default().push(rule_index);
+            } else if let Some(class) = rightmost.classes.first() {
+                self.by_class.entry(class.to_ascii_lowercase()).or_default().push(rule_index);
+            } else if let Some(tag) = &rightmost.tag {
+                if tag != "*" {
+                    self.by_tag.entry(tag.to_ascii_lowercase()).or_default().push(rule_index);
+                } else {
+                    self.universal_rules.push(rule_index);
+                }
+            } else {
+                self.universal_rules.push(rule_index);
+            }
         }
     }
 
@@ -208,7 +322,12 @@ impl Stylesheet {
         if self.rules.len() >= MAX_RULES {
             return;
         }
-        let limit = floor_utf8_boundary(css_text, MAX_CSS_BYTES);
+        let remaining = MAX_TOTAL_CSS_BYTES.saturating_sub(self.css_bytes);
+        let limit = floor_utf8_boundary(css_text, MAX_CSS_BYTES.min(remaining));
+        if limit == 0 {
+            return;
+        }
+        self.css_bytes = self.css_bytes.saturating_add(limit);
         let cleaned = strip_css_comments(&css_text[..limit]);
         self.parse_blocks(&cleaned, 0, &Vec::new());
     }
@@ -231,27 +350,17 @@ impl Stylesheet {
 
             if bytes[i] == b'@' {
                 let at_start = i;
-                while i < len && bytes[i] != b'{' && bytes[i] != b';' {
-                    i += 1;
-                }
-                if i < len && bytes[i] == b';' {
+                let Some((delimiter, kind)) = find_css_delimiter(input, i, &[b'{', b';']) else { break; };
+                i = delimiter;
+                if kind == b';' {
                     i += 1;
                     continue;
                 }
-                if i < len && bytes[i] == b'{' {
+                if kind == b'{' {
                     let header = safe_slice(input, at_start, i).trim();
-                    i += 1;
-                    let body_start = i;
-                    let mut depth = 1usize;
-                    while i < len && depth > 0 {
-                        if bytes[i] == b'{' {
-                            depth += 1;
-                        } else if bytes[i] == b'}' {
-                            depth -= 1;
-                        }
-                        i += 1;
-                    }
-                    let body_end = i.saturating_sub(1);
+                    let Some(body_end) = find_matching_css_brace(input, i) else { break; };
+                    let body_start = i + 1;
+                    i = body_end + 1;
                     let lower = header.to_ascii_lowercase();
                     let inner = safe_slice(input, body_start, body_end);
                     if lower.starts_with("@media") {
@@ -275,125 +384,61 @@ impl Stylesheet {
             }
 
             let sel_start = i;
-            while i < len && bytes[i] != b'{' {
-                i += 1;
-            }
-            if i >= len {
-                break;
-            }
-            let selector_str = safe_slice(input, sel_start, i).trim();
-            i += 1;
-
-            let decl_start = i;
-            let mut depth = 1usize;
-            while i < len && depth > 0 {
-                if bytes[i] == b'{' {
-                    depth += 1;
-                } else if bytes[i] == b'}' {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            let decl_end = i.saturating_sub(1);
+            let Some((open_at, _)) = find_css_delimiter(input, i, &[b'{']) else { break; };
+            let selector_str = safe_slice(input, sel_start, open_at).trim();
+            let Some(decl_end) = find_matching_css_brace(input, open_at) else { break; };
+            let decl_start = open_at + 1;
             let decl_str = safe_slice(input, decl_start, decl_end);
+            i = decl_end + 1;
 
             let declarations = parse_declarations(decl_str);
-            for d in &declarations {
-                if d.property.starts_with("--") && self.variables.len() < 256 {
-                    if let Some(existing) = self.variables.iter_mut().find(|(k, _)| k == &d.property) {
-                        existing.1 = d.value.clone();
-                    } else {
-                        self.variables.push((d.property.clone(), d.value.clone()));
-                    }
-                }
-            }
-
             let selectors = parse_selectors(selector_str);
             if !selectors.is_empty() && !declarations.is_empty() {
                 if selectors.iter().any(|s| s.uses_pointer_or_focus_state()) {
                     self.has_state_rules = true;
                 }
                 let active = conds.iter().all(|m| media_query_list_matches(m, self.viewport_w, self.viewport_h));
+                let rule_index = self.rules.len();
                 self.rules.push(CssRule {
                     selectors,
                     declarations,
                     media: conds.clone(),
                     active,
                 });
+                self.index_rule(rule_index);
             }
         }
-    }
-
-    pub fn resolve_all_vars(&self, raw: &str) -> String {
-        let mut cur = String::from(raw);
-        for _ in 0..4 {
-            let Some(start) = cur.find("var(") else {
-                break;
-            };
-            let mut depth = 0i32;
-            let mut end = None;
-            {
-                let bytes = cur.as_bytes();
-                let mut i = start + 3;
-                while i < bytes.len() {
-                    if bytes[i] == b'(' {
-                        depth += 1;
-                    } else if bytes[i] == b')' {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(i);
-                            break;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            let Some(end) = end else {
-                break;
-            };
-            let replacement: String = {
-                let inner = &cur[start + 4..end];
-                let (name, fallback) = match inner.find(',') {
-                    Some(c) => (inner[..c].trim(), Some(inner[c + 1..].trim())),
-                    None => (inner.trim(), None),
-                };
-                match self.variables.iter().find(|(k, _)| k == name) {
-                    Some((_, v)) => v.clone(),
-                    None => fallback.map(String::from).unwrap_or_default(),
-                }
-            };
-            let mut next = String::with_capacity(cur.len());
-            next.push_str(&cur[..start]);
-            next.push_str(&replacement);
-            next.push_str(&cur[end + 1..]);
-            cur = next;
-        }
-        cur
-    }
-
-    pub fn resolve_var<'a>(&'a self, raw: &'a str) -> &'a str {
-        let s = raw.trim();
-        if let Some(inner) = s.strip_prefix("var(").and_then(|v| v.strip_suffix(')')) {
-            let (var_name, fallback) = if let Some(comma) = inner.find(',') {
-                (inner[..comma].trim(), Some(inner[comma + 1..].trim()))
-            } else {
-                (inner.trim(), None)
-            };
-            if let Some((_, val)) = self.variables.iter().find(|(k, _)| k == var_name) {
-                return val.as_str();
-            }
-            if let Some(fb) = fallback {
-                return fb;
-            }
-        }
-        s
     }
 
     pub fn matching_declarations(&self, tree: &DomTree, node_id: usize) -> Vec<Declaration> {
-        let mut matched: Vec<((u16, u16, u16), usize, Declaration)> = Vec::new();
-        let mut order = 0usize;
+        let mut candidates: Vec<usize> = Vec::new();
+        if let Some(id) = tree.id_attr(node_id) {
+            if let Some(indices) = self.by_id.get(&id.to_ascii_lowercase()) {
+                candidates.extend_from_slice(indices);
+            }
+        }
+        if let Some(classes) = tree.attr(node_id, "class") {
+            for class in classes.split_whitespace() {
+                if let Some(indices) = self.by_class.get(&class.to_ascii_lowercase()) {
+                    candidates.extend_from_slice(indices);
+                }
+            }
+        }
+        if let Some(tag) = tree.tag(node_id) {
+            if let Some(indices) = self.by_tag.get(&tag.to_ascii_lowercase()) {
+                candidates.extend_from_slice(indices);
+            }
+        }
+        candidates.extend_from_slice(&self.universal_rules);
+        candidates.sort_unstable();
+        candidates.dedup();
 
-        for rule in &self.rules {
+        let mut matched: Vec<(bool, (u16, u16, u16), usize, Declaration)> = Vec::new();
+        let mut order = 0usize;
+        for rule_index in candidates {
+            let Some(rule) = self.rules.get(rule_index) else {
+                continue;
+            };
             if !rule.active {
                 continue;
             }
@@ -408,21 +453,13 @@ impl Stylesheet {
             }
             if let Some(spec) = best_spec {
                 for decl in &rule.declarations {
-                    if decl.property.starts_with("--") {
-                        continue;
-                    }
-                    let priority_spec = if decl.important {
-                        (spec.0.saturating_add(1000), spec.1, spec.2)
-                    } else {
-                        spec
-                    };
-                    let resolved_val = self.resolve_all_vars(&decl.value);
                     matched.push((
-                        priority_spec,
+                        decl.important,
+                        spec,
                         order,
                         Declaration {
                             property: decl.property.clone(),
-                            value: resolved_val,
+                            value: decl.value.clone(),
                             important: decl.important,
                         },
                     ));
@@ -431,8 +468,8 @@ impl Stylesheet {
             }
         }
 
-        matched.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        matched.into_iter().map(|(_, _, d)| d).collect()
+        matched.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        matched.into_iter().map(|(_, _, _, d)| d).collect()
     }
 }
 
@@ -482,7 +519,18 @@ fn media_len_px(v: &str) -> Option<i32> {
     }
     let num: f32 = v[..end].parse::<f32>().ok()?;
     let unit = v[end..].trim();
-    let px = if unit.starts_with("em") || unit.starts_with("rem") { num * 16.0 } else { num };
+    let px = match unit {
+        "" | "px" => num,
+        "em" | "rem" => num * 16.0,
+        "in" => num * 96.0,
+        "cm" => num * (96.0 / 2.54),
+        "mm" => num * (96.0 / 25.4),
+        "pt" => num * (96.0 / 72.0),
+        "pc" => num * 16.0,
+        "q" => num * (96.0 / 101.6),
+        _ => return None,
+    };
+    if !px.is_finite() || px.abs() > i32::MAX as f32 { return None; }
     Some(px as i32)
 }
 
@@ -494,7 +542,32 @@ fn media_ratio(v: &str) -> Option<f32> {
     }
     let num: f32 = v[..end].parse::<f32>().ok()?;
     let unit = v[end..].trim();
-    Some(if unit.starts_with("dpi") { num / 96.0 } else { num })
+    let ratio = match unit {
+        "" | "dppx" | "x" => num,
+        "dpi" => num / 96.0,
+        "dpcm" => num * 2.54 / 96.0,
+        _ => return None,
+    };
+    if !ratio.is_finite() { None } else { Some(ratio) }
+}
+
+fn media_aspect_ratio(v: &str) -> Option<(i64, i64)> {
+    let (num, den) = v.trim().split_once('/')?;
+    let n = num.trim().parse::<i64>().ok()?;
+    let d = den.trim().parse::<i64>().ok()?;
+    if n <= 0 || d <= 0 { None } else { Some((n, d)) }
+}
+
+fn ratio_feature_matches(name: &str, value: &str, vw: i32, vh: i32) -> bool {
+    let Some((n, d)) = media_aspect_ratio(value) else { return false; };
+    let lhs = (vw.max(0) as i64).saturating_mul(d);
+    let rhs = (vh.max(1) as i64).saturating_mul(n);
+    match name {
+        "min-aspect-ratio" => lhs >= rhs,
+        "max-aspect-ratio" => lhs <= rhs,
+        "aspect-ratio" => lhs == rhs,
+        _ => false,
+    }
 }
 
 fn media_operand(tok: &str, vw: i32, vh: i32) -> Option<i32> {
@@ -530,11 +603,11 @@ fn media_range_matches(g: &str, vw: i32, vh: i32) -> bool {
     }
     operands.push(cur);
     if operands.len() != ops.len() + 1 {
-        return true;
+        return false;
     }
     for k in 0..ops.len() {
         let (Some(a), Some(b)) = (media_operand(&operands[k], vw, vh), media_operand(&operands[k + 1], vw, vh)) else {
-            return true;
+            return false;
         };
         let ok = match ops[k].as_str() {
             "<" => a < b,
@@ -542,7 +615,7 @@ fn media_range_matches(g: &str, vw: i32, vh: i32) -> bool {
             ">" => a > b,
             ">=" => a >= b,
             "=" => a == b,
-            _ => true,
+            _ => false,
         };
         if !ok {
             return false;
@@ -560,35 +633,36 @@ fn media_feature_matches(g: &str, vw: i32, vh: i32) -> bool {
         None => (g.trim(), ""),
     };
     match name {
-        "min-width" | "min-device-width" => media_len_px(val).map_or(true, |n| vw >= n),
-        "max-width" | "max-device-width" => media_len_px(val).map_or(true, |n| vw <= n),
-        "width" | "device-width" => media_len_px(val).map_or(true, |n| vw == n),
-        "min-height" | "min-device-height" => media_len_px(val).map_or(true, |n| vh >= n),
-        "max-height" | "max-device-height" => media_len_px(val).map_or(true, |n| vh <= n),
-        "height" | "device-height" => media_len_px(val).map_or(true, |n| vh == n),
+        "min-width" | "min-device-width" => media_len_px(val).map_or(false, |n| vw >= n),
+        "max-width" | "max-device-width" => media_len_px(val).map_or(false, |n| vw <= n),
+        "width" | "device-width" => media_len_px(val).map_or(false, |n| vw == n),
+        "min-height" | "min-device-height" => media_len_px(val).map_or(false, |n| vh >= n),
+        "max-height" | "max-device-height" => media_len_px(val).map_or(false, |n| vh <= n),
+        "height" | "device-height" => media_len_px(val).map_or(false, |n| vh == n),
+        "min-aspect-ratio" | "max-aspect-ratio" | "aspect-ratio" => ratio_feature_matches(name, val, vw, vh),
         "orientation" => match val {
             "portrait" => vh > vw,
             "landscape" => vw >= vh,
-            _ => true,
+            _ => false,
         },
-        // The browser renders a light theme without motion or touch input.
-        "prefers-color-scheme" => val != "dark",
-        "prefers-reduced-motion" => val != "reduce",
-        "prefers-contrast" => val != "more" && val != "less" && val != "custom",
-        "prefers-reduced-transparency" | "prefers-reduced-data" => val != "reduce",
-        "hover" | "any-hover" => val != "none",
-        "pointer" | "any-pointer" => val != "coarse" && val != "none",
-        "forced-colors" => val != "active",
-        "inverted-colors" => val != "inverted",
-        "scripting" => val != "none",
+        "prefers-color-scheme" => matches!(val, "light" | "no-preference"),
+        "prefers-reduced-motion" => val == "no-preference",
+        "prefers-contrast" => val == "no-preference",
+        "prefers-reduced-transparency" | "prefers-reduced-data" => val == "no-preference",
+        "hover" | "any-hover" => val == "hover",
+        "pointer" | "any-pointer" => val == "fine",
+        "forced-colors" => val == "none",
+        "inverted-colors" => val == "none",
+        "scripting" => matches!(val, "enabled" | "initial-only"),
         "display-mode" => val == "browser",
+        "resolution" => media_ratio(val).map_or(false, |r| (r - 1.0).abs() < 0.001),
         "min-resolution" | "min-device-pixel-ratio" | "-webkit-min-device-pixel-ratio" => {
-            media_ratio(val).map_or(true, |r| r <= 1.0)
+            media_ratio(val).map_or(false, |r| 1.0 >= r)
         }
         "max-resolution" | "max-device-pixel-ratio" | "-webkit-max-device-pixel-ratio" => {
-            media_ratio(val).map_or(true, |r| r >= 1.0)
+            media_ratio(val).map_or(false, |r| 1.0 <= r)
         }
-        _ => true,
+        _ => false,
     }
 }
 
@@ -659,27 +733,48 @@ fn contains_ascii_case(haystack: &str, needle: &str) -> bool {
 }
 
 fn strip_css_comments(css: &str) -> String {
-    let mut out = String::with_capacity(css.len());
+    let mut out: Vec<u8> = Vec::with_capacity(css.len());
     let bytes = css.as_bytes();
-    let mut i = 0;
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
     while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(bytes.len());
-        } else {
-            let valid_i = floor_utf8_boundary(css, i);
-            if let Some(ch) = css[valid_i..].chars().next() {
-                out.push(ch);
-                i = valid_i + ch.len_utf8();
-            } else {
-                break;
-            }
+        let b = bytes[i];
+        if escaped {
+            out.push(b);
+            escaped = false;
+            i += 1;
+            continue;
         }
+        if b == b'\\' && quote.is_some() {
+            out.push(b);
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            out.push(b);
+            if b == q { quote = None; }
+            i += 1;
+            continue;
+        }
+        if b == b'\'' || b == b'"' {
+            quote = Some(b);
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        if i + 1 < bytes.len() && b == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') { i += 1; }
+            i = (i + 2).min(bytes.len());
+            out.push(b' ');
+            continue;
+        }
+        out.push(b);
+        i += 1;
     }
-    out
+    String::from_utf8(out).unwrap_or_else(|_| String::from(css))
 }
 
 fn read_ident(c: &[char], i: &mut usize) -> String {
@@ -864,6 +959,19 @@ fn parse_pseudo(name: &str, arg: Option<&str>) -> Pseudo {
                 Pseudo::Is(parts)
             }
         }
+        "has" => {
+            let mut selectors = Vec::new();
+            for item in split_top_level(arg.unwrap_or(""), ',') {
+                let mut candidate = item.trim();
+                let direct = candidate.starts_with('>');
+                if direct { candidate = candidate[1..].trim_start(); }
+                match parse_complex_selector(candidate) {
+                    Some(selector) if !selector.chain.is_empty() && (!direct || selector.chain.len() == 1) => selectors.push((selector, direct)),
+                    _ => return Pseudo::Never,
+                }
+            }
+            if selectors.is_empty() { Pseudo::Never } else { Pseudo::Has(selectors) }
+        }
         "link" | "any-link" => Pseudo::Link,
         "disabled" => Pseudo::Disabled,
         "enabled" => Pseudo::Enabled,
@@ -1011,28 +1119,40 @@ fn parse_selectors(raw: &str) -> Vec<Selector> {
     list
 }
 
-pub fn parse_declarations(raw: &str) -> Vec<Declaration> {
-    let mut decls = Vec::new();
-    for item in raw.split(';') {
-        let trimmed = item.trim();
-        if trimmed.is_empty() {
+fn find_top_level_char(raw: &str, needle: char) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (index, ch) in raw.char_indices() {
+        if escaped { escaped = false; continue; }
+        if ch == '\\' { escaped = true; continue; }
+        if let Some(q) = quote {
+            if ch == q { quote = None; }
             continue;
         }
-        if let Some(colon) = trimmed.find(':') {
-            let prop = trimmed[..colon].trim().to_ascii_lowercase();
-            let mut val = trimmed[colon + 1..].trim();
-            let mut important = false;
-            if let Some(imp_pos) = val.as_bytes().windows(10).position(|w| w.eq_ignore_ascii_case(b"!important")) {
-                important = true;
-                val = safe_slice(val, 0, imp_pos).trim();
-            }
-            if !prop.is_empty() && !val.is_empty() {
-                decls.push(Declaration {
-                    property: prop,
-                    value: String::from(val),
-                    important,
-                });
-            }
+        if ch == '\'' || ch == '"' { quote = Some(ch); }
+        else if ch == '(' || ch == '[' { depth += 1; }
+        else if ch == ')' || ch == ']' { depth = (depth - 1).max(0); }
+        else if ch == needle && depth == 0 { return Some(index); }
+    }
+    None
+}
+
+pub fn parse_declarations(raw: &str) -> Vec<Declaration> {
+    let mut decls = Vec::new();
+    for item in split_top_level(raw, ';') {
+        let trimmed = item.trim();
+        if trimmed.is_empty() { continue; }
+        let Some(colon) = find_top_level_char(trimmed, ':') else { continue; };
+        let prop = trimmed[..colon].trim().to_ascii_lowercase();
+        let mut val = trimmed[colon + 1..].trim();
+        let mut important = false;
+        if val.len() >= 10 && val[val.len() - 10..].eq_ignore_ascii_case("!important") {
+            important = true;
+            val = val[..val.len() - 10].trim_end();
+        }
+        if !prop.is_empty() && !val.is_empty() {
+            decls.push(Declaration { property: prop, value: String::from(val), important });
         }
     }
     decls
@@ -1069,6 +1189,27 @@ fn attr_matches(tree: &DomTree, node_id: usize, a: &AttrSel) -> bool {
 }
 
 /// (1-based position among element siblings, number of element siblings), optionally restricted to the same tag.
+fn sibling_index(tree: &DomTree, node_id: usize, same_type: bool) -> i32 {
+    let Some(parent) = tree.nodes.get(node_id).and_then(|n| n.parent) else {
+        return 1;
+    };
+    let my_tag = tree.tag(node_id).unwrap_or("");
+    let mut index = 0i32;
+    for &child in &tree.nodes[parent].children {
+        let Some(tag) = tree.tag(child) else {
+            continue;
+        };
+        if same_type && !tag.eq_ignore_ascii_case(my_tag) {
+            continue;
+        }
+        index += 1;
+        if child == node_id {
+            return index;
+        }
+    }
+    0
+}
+
 fn sibling_pos(tree: &DomTree, node_id: usize, same_type: bool) -> (i32, i32) {
     let Some(parent) = tree.nodes.get(node_id).and_then(|n| n.parent) else {
         return (1, 1);
@@ -1123,24 +1264,24 @@ fn pseudo_matches(tree: &DomTree, node_id: usize, ps: &Pseudo) -> bool {
     match ps {
         Pseudo::Root => tree.tag(node_id) == Some("html"),
         Pseudo::Empty => tree.nodes.get(node_id).map_or(false, |n| n.children.is_empty()),
-        Pseudo::FirstChild => sibling_pos(tree, node_id, false).0 == 1,
+        Pseudo::FirstChild => sibling_index(tree, node_id, false) == 1,
         Pseudo::LastChild => {
             let (i, t) = sibling_pos(tree, node_id, false);
             i == t
         }
         Pseudo::OnlyChild => sibling_pos(tree, node_id, false).1 == 1,
-        Pseudo::FirstOfType => sibling_pos(tree, node_id, true).0 == 1,
+        Pseudo::FirstOfType => sibling_index(tree, node_id, true) == 1,
         Pseudo::LastOfType => {
             let (i, t) = sibling_pos(tree, node_id, true);
             i == t
         }
         Pseudo::OnlyOfType => sibling_pos(tree, node_id, true).1 == 1,
-        Pseudo::NthChild(a, b) => nth_matches(*a, *b, sibling_pos(tree, node_id, false).0),
+        Pseudo::NthChild(a, b) => nth_matches(*a, *b, sibling_index(tree, node_id, false)),
         Pseudo::NthLastChild(a, b) => {
             let (i, t) = sibling_pos(tree, node_id, false);
             nth_matches(*a, *b, t - i + 1)
         }
-        Pseudo::NthOfType(a, b) => nth_matches(*a, *b, sibling_pos(tree, node_id, true).0),
+        Pseudo::NthOfType(a, b) => nth_matches(*a, *b, sibling_index(tree, node_id, true)),
         Pseudo::NthLastOfType(a, b) => {
             let (i, t) = sibling_pos(tree, node_id, true);
             nth_matches(*a, *b, t - i + 1)
@@ -1157,6 +1298,27 @@ fn pseudo_matches(tree: &DomTree, node_id: usize, ps: &Pseudo) -> bool {
         Pseudo::Hover => self_or_ancestor_is(tree, tree.hover_node, node_id),
         Pseudo::Focus => tree.focus_node == Some(node_id),
         Pseudo::FocusWithin => self_or_ancestor_is(tree, tree.focus_node, node_id),
+        Pseudo::Has(selectors) => {
+            let Some(node) = tree.nodes.get(node_id) else { return false; };
+            let mut stack = Vec::new();
+            for (selector, direct) in selectors {
+                if *direct {
+                    if node.children.iter().any(|child| selector_matches(tree, *child, selector)) { return true; }
+                } else {
+                    stack.extend(node.children.iter().copied());
+                    let mut visited = 0usize;
+                    while let Some(candidate) = stack.pop() {
+                        visited += 1;
+                        if visited > 512 { return false; }
+                        if selector_matches(tree, candidate, selector) { return true; }
+                        if let Some(child_node) = tree.nodes.get(candidate) {
+                            stack.extend(child_node.children.iter().copied());
+                        }
+                    }
+                }
+            }
+            false
+        }
         Pseudo::Never => false,
     }
 }
@@ -1468,4 +1630,83 @@ pub fn parse_float_i32(s: &str, scale: i32) -> Option<i32> {
 
     let scaled = int_val.saturating_mul(scale).saturating_add((frac_val * scale) / frac_div);
     Some(sign * scaled)
+}
+
+
+#[cfg(test)]
+mod css_engine_tests {
+    use super::*;
+    use crate::dom::{DomTree, NodeType};
+
+    #[test]
+    fn declarations_respect_strings_functions_and_important_suffix() {
+        let d = parse_declarations("content: 'a;b:c'; color: rgb(10, 20, 30); --data: url(data:image/svg+xml;a=b); width: 10px !important");
+        assert_eq!(d.len(), 4);
+        assert_eq!(d[0].value, "'a;b:c'");
+        assert_eq!(d[1].value, "rgb(10, 20, 30)");
+        assert_eq!(d[2].value, "url(data:image/svg+xml;a=b)");
+        assert!(d[3].important);
+        assert_eq!(d[3].value, "10px");
+    }
+
+    #[test]
+    fn comments_inside_strings_are_preserved() {
+        let cleaned = strip_css_comments("a{content:'/* keep */';color:red/* remove */}");
+        assert!(cleaned.contains("'/* keep */'"));
+        assert!(!cleaned.contains("remove"));
+    }
+
+    #[test]
+    fn media_queries_fail_closed_and_support_aspect_ratio() {
+        assert!(media_query_list_matches("screen and (min-width: 600px)", 800, 600));
+        assert!(!media_query_list_matches("screen and (unknown-feature: 1)", 800, 600));
+        assert!(media_query_list_matches("(min-aspect-ratio: 4/3)", 800, 600));
+        assert!(!media_query_list_matches("(max-aspect-ratio: 1/1)", 800, 600));
+        assert!(media_query_list_matches("(orientation: landscape)", 800, 600));
+    }
+
+    #[test]
+    fn has_selector_matches_descendants_and_direct_children() {
+        let mut tree = DomTree::new();
+        let root = tree.add_node(NodeType::Element { tag: String::from("main"), attributes: Vec::new() }, 0);
+        let card = tree.add_node(NodeType::Element { tag: String::from("div"), attributes: alloc::vec![(String::from("class"), String::from("card"))] }, root);
+        let child = tree.add_node(NodeType::Element { tag: String::from("span"), attributes: alloc::vec![(String::from("class"), String::from("badge"))] }, card);
+        let nested = tree.add_node(NodeType::Element { tag: String::from("b"), attributes: Vec::new() }, child);
+        let has_badge = parse_complex_selector(".card:has(.badge)").unwrap();
+        let has_direct = parse_complex_selector(".card:has(> .badge)").unwrap();
+        assert!(selector_matches(&tree, card, &has_badge));
+        assert!(selector_matches(&tree, card, &has_direct));
+        assert!(!selector_matches(&tree, nested, &has_badge));
+    }
+
+    #[test]
+    fn stylesheet_keeps_braces_inside_quoted_values() {
+        let mut tree = DomTree::new();
+        let root = tree.add_node(NodeType::Element { tag: String::from("main"), attributes: Vec::new() }, 0);
+        let first = tree.add_node(NodeType::Element { tag: String::from("div"), attributes: alloc::vec![(String::from("class"), String::from("first"))] }, root);
+        let second = tree.add_node(NodeType::Element { tag: String::from("div"), attributes: alloc::vec![(String::from("class"), String::from("second"))] }, root);
+        let mut sheet = Stylesheet::new();
+        sheet.append_css(r#".first { content: "}"; color: red } .second { color: blue }"#);
+        let first_decls = sheet.matching_declarations(&tree, first);
+        assert!(first_decls.iter().any(|d| d.property == "content" && d.value == r#""}""#));
+        assert!(first_decls.iter().any(|d| d.property == "color" && d.value == "red"));
+        let second_decls = sheet.matching_declarations(&tree, second);
+        assert!(second_decls.iter().any(|d| d.property == "color" && d.value == "blue"));
+    }
+
+    #[test]
+    fn malformed_media_range_fails_closed() {
+        assert!(!media_query_list_matches("(width >< 600px)", 800, 600));
+        assert!(!media_query_list_matches("(width >= nope)", 800, 600));
+    }
+
+    #[test]
+    fn cascade_uses_importance_before_specificity() {
+        let mut tree = DomTree::new();
+        let node = tree.add_node(NodeType::Element { tag: String::from("p"), attributes: alloc::vec![(String::from("class"), String::from("x"))] }, 0);
+        let mut sheet = Stylesheet::new();
+        sheet.append_css("#missing { color: green !important } p { color: red !important } .x { color: blue }");
+        let declarations = sheet.matching_declarations(&tree, node);
+        assert_eq!(declarations.iter().rev().find(|d| d.property == "color").unwrap().value, "red");
+    }
 }

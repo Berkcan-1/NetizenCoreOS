@@ -14,5 +14,22 @@ if (errs) console.log('PRELUDE SECTION ERRORS:', errs);
 vm.runInContext(script, ctx);
 const r = vm.runInContext('window.__compat', ctx);
 if (!r) { console.log('probe produced no result'); process.exit(1); }
-console.log(`PASS ${r.total - r.missing} / ${r.total}`);
-for (const c of r.categories) if (c.missing.length) console.log(`[${c.name}] ${c.missing.join(', ')}`);
+console.log(`PASS ${r.total - r.missing - (r.untested || 0)} / ${r.total} · MISSING ${r.missing} · NOT TESTED ${r.untested || 0}`);
+for (const c of r.categories) { if (c.missing.length) console.log(`[${c.name}] MISSING: ${c.missing.join(', ')}`); if (c.untested && c.untested.length) console.log(`[${c.name}] NOT TESTED: ${c.untested.join(', ')}`); }
+
+// Function kurucusunun bulunmadigi nc-js ortaminda syntax testleri false-negative olmamali.
+const noFunction = vm.createContext({
+  console: { log() {}, error() {}, warn() {} },
+  queueMicrotask, setTimeout: (f) => timers.push(f), clearTimeout() {},
+  setInterval: () => 0, clearInterval() {}, Function: undefined
+});
+vm.runInContext(fs.readFileSync(path.join(root, 'nc-js/src/dom_mock.js'), 'utf8'), noFunction);
+vm.runInContext(fs.readFileSync(path.join(root, 'nc-app-browser/src/prelude.js'), 'utf8'), noFunction);
+vm.runInContext(script, noFunction);
+const noFunctionResult = vm.runInContext('window.__compat', noFunction);
+const syntax = noFunctionResult && noFunctionResult.categories.find(c => c.name === 'JS syntax');
+if (!syntax || syntax.untested.length === 0 || syntax.missing.length !== 0) {
+  console.error('FAIL syntax probe must report dynamic-compiler cases as NOT TESTED when Function is unavailable');
+  process.exit(1);
+}
+console.log(`PASS syntax unavailable-state probe · ${syntax.untested.length} NOT TESTED · ${syntax.missing.length} incorrectly MISSING`);

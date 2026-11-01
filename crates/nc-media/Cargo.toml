@@ -1,0 +1,13 @@
+[package]
+name = "nc-media"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nc-hal = { path = "../nc-hal" }
+nopng = "=0.3.0"
+zune-jpeg = { version = "=0.5.15", default-features = false }
+mbop3 = { version = "=0.1.0", features = ["alloc"] }

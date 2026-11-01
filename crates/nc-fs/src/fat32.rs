@@ -22,6 +22,14 @@ pub struct Fat32 {
     data_start_lba: u64,
     root_cluster: u32,
     max_cluster: u32,
+    range_cache: Option<RangeReadCache>,
+}
+
+struct RangeReadCache {
+    path: String,
+    next_offset: u64,
+    current_cluster: u32,
+    in_cluster: usize,
 }
 
 impl Fat32 {
@@ -103,6 +111,7 @@ impl Fat32 {
             data_start_lba,
             root_cluster,
             max_cluster,
+            range_cache: None,
         })
     }
 
@@ -325,6 +334,93 @@ impl FileSystem for Fat32 {
     }
 
     // M-06: FAT32 surucusu salt okunur oldugundan readonly: true bildir
+    fn read_file_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let (start_cluster, file_size, is_dir) = self.resolve(path)?;
+        if is_dir {
+            return Err(FsError::NotAFile);
+        }
+        if output.is_empty() || offset >= file_size {
+            return Ok(0);
+        }
+
+        let remaining = usize::try_from(file_size - offset).unwrap_or(usize::MAX);
+        let wanted = output.len().min(remaining);
+        let cluster_bytes = self.cluster_size as usize;
+        if cluster_bytes == 0 {
+            return Err(FsError::Corrupted);
+        }
+
+        let cached = self.range_cache.take().filter(|cache| {
+            cache.path.as_str() == path && cache.next_offset == offset
+        });
+        let (mut current_cluster, mut in_cluster, mut guard) = if let Some(cache) = cached {
+            (cache.current_cluster, cache.in_cluster, 0u32)
+        } else {
+            let mut cluster_index = offset / cluster_bytes as u64;
+            let mut current = start_cluster;
+            let mut traversed = 0u32;
+            while cluster_index > 0 {
+                if current < 2 || current >= self.max_cluster || traversed >= self.max_cluster {
+                    return Err(FsError::Corrupted);
+                }
+                current = self.next_cluster(current)?;
+                if current >= 0x0FFF_FFF8 || current == 0x0FFF_FFF7 || current < 2 {
+                    return Err(FsError::Corrupted);
+                }
+                cluster_index -= 1;
+                traversed += 1;
+            }
+            (current, (offset % cluster_bytes as u64) as usize, traversed)
+        };
+
+        let mut written = 0usize;
+        let mut cluster_buffer = alloc::vec![0u8; cluster_bytes];
+        while written < wanted {
+            if current_cluster < 2 || current_cluster >= self.max_cluster || guard >= self.max_cluster {
+                return Err(FsError::Corrupted);
+            }
+            guard += 1;
+            let lba = self.cluster_to_lba(current_cluster)?;
+            if self.device.read_blocks(lba, self.sectors_per_cluster, &mut cluster_buffer).is_err() {
+                return Err(FsError::DiskError);
+            }
+            if in_cluster >= cluster_buffer.len() {
+                return Err(FsError::Corrupted);
+            }
+            let count = (cluster_buffer.len() - in_cluster).min(wanted - written);
+            if count == 0 {
+                return Err(FsError::Corrupted);
+            }
+            output[written..written + count]
+                .copy_from_slice(&cluster_buffer[in_cluster..in_cluster + count]);
+            written += count;
+            in_cluster += count;
+            if in_cluster == cluster_buffer.len() && offset.saturating_add(written as u64) < file_size {
+                current_cluster = self.next_cluster(current_cluster)?;
+                if current_cluster >= 0x0FFF_FFF8 || current_cluster == 0x0FFF_FFF7 || current_cluster < 2 {
+                    return Err(FsError::Corrupted);
+                }
+                in_cluster = 0;
+            }
+        }
+
+        let next_offset = offset.saturating_add(written as u64);
+        if next_offset < file_size {
+            self.range_cache = Some(RangeReadCache {
+                path: String::from(path),
+                next_offset,
+                current_cluster,
+                in_cluster,
+            });
+        }
+        Ok(written)
+    }
+
     fn file_stat(&mut self, path: &str) -> Result<FileStat, FsError> {
         let (_, size, is_dir) = self.resolve(path)?;
         Ok(FileStat {

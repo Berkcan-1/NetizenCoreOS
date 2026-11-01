@@ -6,8 +6,11 @@ pub mod paging;
 
 pub use heap::LockedHeap;
 pub use paging::{
-    alloc_frame, free_frame, free_frame_count, init_pmm, run_phase1_vm_self_test, AddressSpace,
-    PagePermissions, VmError, PAGE_SIZE, PTE_USER, PTE_WRITABLE, USER_SPACE_END, USER_SPACE_START,
+    alloc_frame, frame_ref_count, free_frame, free_frame_checked, free_frame_count,
+    init_pmm, invalid_free_count, managed_frame_count, retain_frame,
+    run_phase1_vm_self_test, AddressSpace, PagePermissions, PhysicalRegion, VmError,
+    MAX_PHYSICAL_ADDRESS, PAGE_SIZE, PTE_COW, PTE_USER, PTE_WRITABLE,
+    USER_SPACE_END, USER_SPACE_START,
 };
 
 pub struct Arena {
