@@ -17,10 +17,7 @@ There are no comments in the code; explanations are provided in the README.md fi
 5. Desktop: colorful wallpaper, icons, taskbar, Start menu, and draggable windows. Applications
    (Settings, System, Stopwatch) are separate crates and run through a shared contract (crates/nc-app/README.md).
 
-## Appearance
 
-A clean, white HarmonyOS/EMUI-style interface; Frutiger Aero is used only for small accents (azure/aqua glass spheres, gradient pills, subtle
-highlights on cards). Details are available in crates/nc-ui/README.md.
 
 ## Profiles
 
@@ -63,10 +60,7 @@ Serial output is displayed in the terminal, while debugcon output is written to 
 is written to both. QEMU is automatically accelerated when /dev/kvm is accessible; without KVM, the animation plays with fewer frames,
 but its duration remains the same.
 
-## Working with AI Tools
 
-You do not need to provide the entire project. Provide the relevant module's directory (README.md + src) and the README.md files of its
-dependencies. The dependency graph is available in docs/ARCHITECTURE.md.
 
 ======
 # NetizenCore Architecture
