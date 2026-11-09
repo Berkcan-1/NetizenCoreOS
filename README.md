@@ -4,8 +4,8 @@
 
 # NetizenCore
 
-An operating system written from scratch, not based on Unix/Linux. The bootloader is written in Assembly, while the kernel and all modules are written entirely in Rust.
-There are no comments in the code; explanations are provided in the README.md file in each directory.
+NetizenCore Bare-Metal is an operating system written in pure Rust (along with some assembly). 
+The system was primarily developed—and continues to be developed—as an alternative for legacy devices, kiosk systems, and older types of computers.
 
 ## What It Currently Does
 
