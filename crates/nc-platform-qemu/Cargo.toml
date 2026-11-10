@@ -1,8 +1,0 @@
-[package]
-name = "nc-platform-qemu"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-nc-hal = { path = "../nc-hal" }
-nc-arch = { path = "../nc-arch" }

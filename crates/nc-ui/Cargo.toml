@@ -1,9 +1,0 @@
-[package]
-name = "nc-ui"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-nc-gfx = { path = "../nc-gfx" }
-nc-font = { path = "../nc-font" }
-nc-math = { path = "../nc-math" }
