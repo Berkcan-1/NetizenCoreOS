@@ -1,0 +1,10 @@
+[package]
+name = "nc-app-browser-host-tests"
+version = "0.1.0"
+edition = "2021"
+
+# Derleme icin NetizenCore workspace'i, nc-gfx, nc-ui veya nc-font GEREKMEZ.
+# Yalnizca saf (alloc-only) modulleri ana makinede std ile derleyip test eder.
+[workspace]
+
+[dependencies]

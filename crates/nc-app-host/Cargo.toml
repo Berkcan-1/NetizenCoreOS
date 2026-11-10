@@ -1,0 +1,10 @@
+[package]
+name = "nc-app-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-abi = { path = "../nc-abi" }
+nc-app = { path = "../nc-app" }
+nc-app-sdk = { path = "../nc-app-sdk" }
+nc-gfx = { path = "../nc-gfx" }

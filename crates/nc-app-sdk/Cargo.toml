@@ -1,0 +1,7 @@
+[package]
+name = "nc-app-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-abi = { path = "../nc-abi" }
