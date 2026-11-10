@@ -12,16 +12,25 @@ bench = false
 
 [features]
 default = []
+kernel-paging = []
+ring3-apps = ["dep:nc-abi", "dep:nc-elf", "dep:nc-app", "dep:nc-pkg", "dep:nc-app-host", "nc-ui/remote"]
 qemu = ["dep:nc-platform-qemu"]
 generic = ["dep:nc-platform-generic"]
 
 [dependencies]
 nc-hal = { path = "../crates/nc-hal" }
+nc-caps = { path = "../crates/nc-caps" }
 nc-driver = { path = "../crates/nc-driver" }
 nc-arch = { path = "../crates/nc-arch" }
 nc-math = { path = "../crates/nc-math" }
 nc-mem = { path = "../crates/nc-mem" }
+nc-abi = { path = "../crates/nc-abi", optional = true }
+nc-elf = { path = "../crates/nc-elf", optional = true }
+nc-app = { path = "../crates/nc-app", optional = true }
+nc-pkg = { path = "../crates/nc-pkg", optional = true }
+nc-app-host = { path = "../crates/nc-app-host", optional = true }
 nc-fs = { path = "../crates/nc-fs" }
+nc-fs-facade = { path = "../crates/nc-fs-facade", features = ["kernel"] }
 nc-net = { path = "../crates/nc-net" }
 nc-gfx = { path = "../crates/nc-gfx" }
 nc-ui = { path = "../crates/nc-ui" }

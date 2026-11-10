@@ -147,6 +147,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
+ "digest",
  "fiat-crypto",
  "rustc_version",
  "subtle",
@@ -196,6 +197,27 @@ dependencies = [
  "elliptic-curve",
  "rfc6979",
  "signature",
+]
+
+[[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "sha2",
+ "subtle",
 ]
 
 [[package]]
@@ -352,12 +374,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nc-abi"
+version = "0.1.0"
+
+[[package]]
 name = "nc-app"
 version = "0.1.0"
 dependencies = [
+ "nc-crypto",
  "nc-font",
  "nc-gfx",
  "nc-hal",
+ "nc-i18n",
  "nc-ui",
 ]
 
@@ -382,11 +410,28 @@ dependencies = [
  "nc-app-stopwatch",
  "nc-app-system",
  "nc-font",
- "nc-fs",
+ "nc-fs-facade",
  "nc-gfx",
  "nc-media",
  "nc-pkg",
  "nc-ui",
+]
+
+[[package]]
+name = "nc-app-host"
+version = "0.1.0"
+dependencies = [
+ "nc-abi",
+ "nc-app",
+ "nc-app-sdk",
+ "nc-gfx",
+]
+
+[[package]]
+name = "nc-app-sdk"
+version = "0.1.0"
+dependencies = [
+ "nc-abi",
 ]
 
 [[package]]
@@ -433,6 +478,7 @@ dependencies = [
  "nc-app-settings",
  "nc-app-stopwatch",
  "nc-app-system",
+ "nc-arch",
  "nc-fs",
  "nc-pkg",
 ]
@@ -449,6 +495,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nc-caps"
+version = "0.1.0"
+
+[[package]]
+name = "nc-crypto"
+version = "0.1.0"
+
+[[package]]
 name = "nc-desktop"
 version = "0.1.0"
 dependencies = [
@@ -459,6 +513,7 @@ dependencies = [
  "nc-gfx",
  "nc-hal",
  "nc-math",
+ "nc-media",
  "nc-ui",
 ]
 
@@ -469,6 +524,10 @@ dependencies = [
  "nc-arch",
  "nc-hal",
 ]
+
+[[package]]
+name = "nc-elf"
+version = "0.1.0"
 
 [[package]]
 name = "nc-font"
@@ -486,6 +545,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nc-fs-facade"
+version = "0.1.0"
+dependencies = [
+ "nc-abi",
+ "nc-app-sdk",
+ "nc-fs",
+]
+
+[[package]]
 name = "nc-gfx"
 version = "0.1.0"
 dependencies = [
@@ -494,6 +562,10 @@ dependencies = [
 
 [[package]]
 name = "nc-hal"
+version = "0.1.0"
+
+[[package]]
+name = "nc-i18n"
 version = "0.1.0"
 
 [[package]]
@@ -516,17 +588,24 @@ dependencies = [
 name = "nc-kernel"
 version = "0.1.0"
 dependencies = [
+ "nc-abi",
+ "nc-app",
+ "nc-app-host",
  "nc-apps",
  "nc-arch",
+ "nc-caps",
  "nc-desktop",
  "nc-driver",
+ "nc-elf",
  "nc-fs",
+ "nc-fs-facade",
  "nc-gfx",
  "nc-hal",
  "nc-input",
  "nc-math",
  "nc-mem",
  "nc-net",
+ "nc-pkg",
  "nc-platform-generic",
  "nc-platform-qemu",
  "nc-setup",
@@ -575,7 +654,13 @@ dependencies = [
 name = "nc-pkg"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "nc-abi",
  "nc-app",
+ "nc-caps",
+ "nc-elf",
+ "nc-gfx",
+ "sha2",
 ]
 
 [[package]]
@@ -592,6 +677,19 @@ version = "0.1.0"
 dependencies = [
  "nc-arch",
  "nc-hal",
+]
+
+[[package]]
+name = "nc-r3-stopwatch"
+version = "0.1.0"
+dependencies = [
+ "nc-abi",
+ "nc-app",
+ "nc-app-sdk",
+ "nc-app-stopwatch",
+ "nc-gfx",
+ "nc-i18n",
+ "nc-ui",
 ]
 
 [[package]]
@@ -622,6 +720,7 @@ name = "nc-storage"
 version = "0.1.0"
 dependencies = [
  "nc-arch",
+ "nc-crypto",
  "nc-driver",
  "nc-hal",
 ]
@@ -637,6 +736,7 @@ dependencies = [
 name = "nc-ui"
 version = "0.1.0"
 dependencies = [
+ "nc-abi",
  "nc-font",
  "nc-gfx",
  "nc-math",

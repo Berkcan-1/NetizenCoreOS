@@ -9,6 +9,10 @@ mod ipc;
 mod platform;
 mod prepare;
 mod process;
+#[cfg(feature = "ring3-apps")]
+mod ring3;
+#[cfg(feature = "ring3-apps")]
+mod ring3_app;
 mod syscall;
 
 use alloc::boxed::Box;
@@ -31,13 +35,22 @@ use process::ProcessManager;
 extern "C" {
     static __kernel_bin_start: u8;
     static __kernel_bin_end: u8;
+    static __kpt_text_start: u8;
+    static __kpt_text_end: u8;
+    static __kpt_rodata_start: u8;
+    static __kpt_rodata_end: u8;
+    static __kpt_rw_start: u8;
+    static __kpt_stack_start: u8;
+    static __kpt_image_end: u8;
 }
 
 #[global_allocator]
 static ALLOCATOR: nc_mem::LockedHeap = nc_mem::LockedHeap::empty();
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
-const ARENA_BASE: usize = 0x0080_0000;
+// Çekirdek imajı 0x10_0000'dan en çok 14 MiB (bkz. kernel/linker.ld); arena/PMM bunun ÜSTÜNDE, 16 MiB'ta başlar.
+const ARENA_BASE: usize = 0x0100_0000;
+const INSTALL_KERNEL_MAX_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_MS: u32 = 16;
 const TRANSITION_MS: u32 = 600;
 
@@ -117,6 +130,79 @@ fn detect_ram_bounds(boot: &BootInfo) -> Option<(usize, usize, usize)> {
         return None;
     }
     Some(((managed_usable / (1024 * 1024)).max(16) as usize, best_base as usize, best_end as usize))
+}
+
+#[cfg(feature = "kernel-paging")]
+fn install_kernel_page_tables(active: &platform::Active, boot: &BootInfo) {
+    use core::ptr::addr_of;
+    use nc_mem::kpt::{self, Expect, KernelLayout};
+
+    let sym = |p: *const u8| p as u64;
+    let fb = boot.framebuffer;
+    let fb_len = (fb.pitch as u64).saturating_mul(fb.height as u64);
+    let layout = unsafe {
+        KernelLayout {
+            text: (sym(addr_of!(__kpt_text_start)), sym(addr_of!(__kpt_text_end))),
+            rodata: (sym(addr_of!(__kpt_rodata_start)), sym(addr_of!(__kpt_rodata_end))),
+            rw: (sym(addr_of!(__kpt_rw_start)), sym(addr_of!(__kpt_image_end))),
+            guard_page: sym(addr_of!(__kpt_stack_start)),
+            framebuffer: if fb.address != 0 && fb_len != 0 { (fb.address, fb_len) } else { (0, 0) },
+        }
+    };
+
+    let mut samples = [(0u64, Expect::ReadWrite); 12];
+    let mut count = kpt::live_context_samples(&mut samples);
+    let map_bytes = (boot.memory_map_count as u64)
+        .saturating_mul(core::mem::size_of::<nc_hal::MemoryRegion>() as u64);
+    let extras = [
+        (nc_hal::BOOT_INFO_ADDRESS as u64, Expect::ReadWrite),
+        (boot.memory_map_addr, Expect::ReadWrite),
+        (boot.memory_map_addr.saturating_add(map_bytes.saturating_sub(1)), Expect::ReadWrite),
+        (nc_arch::apic::DEFAULT_LAPIC_BASE, Expect::ReadWrite),
+    ];
+    for (addr, expect) in extras {
+        if addr != 0 && count < samples.len() {
+            samples[count] = (addr, expect);
+            count += 1;
+        }
+    }
+
+    log!(
+        active,
+        "[KPT] imaj: text={:#x}..{:#x} rodata={:#x}..{:#x} rw={:#x}..{:#x} guard={:#x} fb={:#x}+{:#x}",
+        layout.text.0, layout.text.1, layout.rodata.0, layout.rodata.1,
+        layout.rw.0, layout.rw.1, layout.guard_page, layout.framebuffer.0, layout.framebuffer.1
+    );
+
+    match kpt::prepare(&layout, &samples[..count]) {
+        Ok(prepared) => {
+            log!(
+                active,
+                "[KPT] tablolar hazir ve dogrulandi: PML4={:#x} NX={} WC={} 4K-parca={} ornek={}",
+                prepared.pml4_phys, prepared.nx, prepared.wc, prepared.fine_chunks, count
+            );
+            log!(active, "[KPT] CR3 degistiriliyor. Bundan sonra cikti yoksa: qemu -d int,cpu_reset -no-reboot (docs/RING3_YOL_HARITASI.md)");
+            unsafe {
+                nc_arch::outb(0xE9, b'K');
+                let old_cr3 = kpt::activate(&prepared);
+                nc_arch::outb(0xE9, b'P');
+                nc_arch::outb(0xE9, b'T');
+                log!(
+                    active,
+                    "[KPT OK] CR3 {:#x} -> {:#x}: W^X, NX, yigin koruma sayfasi, WP acik. Firmware tablolari artik kullanilmiyor.",
+                    old_cr3,
+                    nc_mem::paging::read_cr3()
+                );
+            }
+        }
+        Err(error) => {
+            log!(
+                active,
+                "[KPT ATLANDI] {:?} -- firmware sayfa tablolariyla devam ediliyor (UEFI'de PMM/heap firmware tablolarini ezebilir).",
+                error
+            );
+        }
+    }
 }
 
 fn detect_is_uefi(boot: &BootInfo) -> bool {
@@ -203,8 +289,15 @@ pub extern "C" fn kernel_main() -> ! {
         }
     };
 
+    #[cfg(feature = "kernel-paging")]
+    install_kernel_page_tables(&active, &boot);
+    #[cfg(not(feature = "kernel-paging"))]
+    log!(&active, "[KPT] kapali (kernel-paging ozelligi yok): firmware sayfa tablolari kullaniliyor.");
+
     let framebuffer = boot.framebuffer;
     let mut clock = Clock::calibrate();
+    #[cfg(feature = "ring3-apps")]
+    ring3::set_tsc_per_ms(clock.ticks_per_ms());
     let width = framebuffer.width as usize;
     let height = framebuffer.height as usize;
 
@@ -303,6 +396,11 @@ pub extern "C" fn kernel_main() -> ! {
         ),
         Err(e) => {
             log!(&active, "[FAZ 1 KRITIK HATA] Bellek koruma testi basarisiz: {}", e);
+            // Tani: aktif sayfa tablosunun 0x100000 icin ham girdileri (UEFI/OVMF 1 GiB sayfa vb. teshisi).
+            let cur = nc_mem::paging::AddressSpace::current();
+            let w = cur.debug_walk(0x0010_0000);
+            log!(&active, "[Faz 1 tani] CR3={:#x} PML4E={:#x} PDPTE={:#x} PDE={:#x} PTE={:#x}",
+                cur.pml4_phys, w[0], w[1], w[2], w[3]);
             halt_forever();
         }
     }
@@ -363,6 +461,28 @@ pub extern "C" fn kernel_main() -> ! {
     log!(&active, "[DysonSphere] Headless yetki ve politika motoru aktif (Default-Deny)");
 
     let is_installed = nc_storage::find_installed_disk().is_some();
+
+    #[cfg(feature = "ring3-apps")]
+    let ring3_ready = match ring3::run_phase6_ring3_app_test(&mut phase2_pm) {
+        Ok(()) => {
+            log!(
+                &active,
+                "[Faz 6 OK] Ring 3 ELF yolu: yukleyici, olay-tabanli calisma, cizim IPC'si (klipli), VFS dosya kopru, watchdog, hata izolasyonu ve bellek sizintisizligi dogrulandi (Boş 4K Frame: {}).",
+                nc_mem::free_frame_count()
+            );
+            true
+        }
+        Err(reason) => {
+            log!(
+                &active,
+                "[FAZ 6 HATA] Ring 3 uygulama yolu dogrulanamadi: {} -- Ring 3 uygulamalari bu oturumda KULLANILMAYACAK.",
+                reason
+            );
+            false
+        }
+    };
+    #[cfg(not(feature = "ring3-apps"))]
+    log!(&active, "[Faz 6] kapali (ring3-apps ozelligi yok).");
 
     log!(
         &active,
@@ -456,7 +576,7 @@ pub extern "C" fn kernel_main() -> ! {
         }
         log!(&active, "[DysonSphere] Verified Boot OK: /boot, /system ve /security muhurleri dogrulandi.");
     }
-    //Azrayı özledim.. ciddiyim..
+
 
     nc_ui::draw_backdrop(&mut screen);
     unsafe {
@@ -600,7 +720,7 @@ pub extern "C" fn kernel_main() -> ! {
                             .saturating_sub(&__kernel_bin_start as *const u8 as usize)
                     };
 
-                    let install_success = if let (Some(stage2_slice), true) = (stage2_slice, kernel_bytes > 0 && kernel_bytes <= 2 * 1024 * 1024) {
+                    let install_success = if let (Some(stage2_slice), true) = (stage2_slice, kernel_bytes > 0 && kernel_bytes <= INSTALL_KERNEL_MAX_BYTES) {
                         // UEFI reserves the linked 1 MiB kernel destination with AllocateAddress;
                         // the legacy Stage2 contract continues to use its fixed physical address.
                         let kernel_slice = unsafe { core::slice::from_raw_parts(0x100000 as *const u8, kernel_bytes) };
@@ -611,6 +731,7 @@ pub extern "C" fn kernel_main() -> ! {
                         }
                         nc_storage::install_to_disk(&mut target_disk, stage2_slice, kernel_slice, uefi_slice).is_ok()
                     } else {
+                        log!(&active, "[BOOT] Kurulum durduruldu: Stage2 bulunamadi veya cekirdek ({} bayt) 16 MiB kurulum sinirini asiyor.", kernel_bytes);
                         false
                     };
 
@@ -672,7 +793,17 @@ pub extern "C" fn kernel_main() -> ! {
         }
     }
 
-    let mut desktop_state = DesktopState::new(active.name(), total_ram_mb as u32, nc_apps::builtin());
+    #[cfg(feature = "ring3-apps")]
+    let desktop_apps = {
+        let pm_ptr = &mut phase2_pm as *mut ProcessManager;
+        // Yükleyici, paket taramasından ÖNCE kaydedilir; Faz 6 geçmediyse hiçbir paket çalışmaz.
+        ring3_app::install_package_loader(ring3_ready, pm_ptr);
+        ring3_app::with_ring3_apps(nc_apps::builtin(), ring3_ready, pm_ptr)
+    };
+    #[cfg(not(feature = "ring3-apps"))]
+    let desktop_apps = nc_apps::builtin();
+    let mut desktop_state = DesktopState::new(active.name(), total_ram_mb as u32, desktop_apps);
+    desktop_state.set_lock_state(nc_storage::read_lock_state(), true);
     nc_desktop::draw_wallpaper(&mut wallpaper, desktop_state.wallpaper_index());
     desktop_state.take_wallpaper_dirty();
     nc_desktop::draw(&mut work_screen, &wallpaper, &desktop_state);
@@ -733,6 +864,19 @@ pub extern "C" fn kernel_main() -> ! {
         let (mouse, key) = device_manager.poll_input(width as i32, height as i32);
         let uptime_ms = now.wrapping_sub(desktop_start_time);
         let action = desktop_state.update(&mouse, key, width as i32, height as i32, uptime_ms);
+
+        if let Some(success) = desktop_state.take_lock_attempt() {
+            nc_storage::record_lock_attempt(success);
+        }
+        if let Some(request) = desktop_state.take_lock_request() {
+            let mut secret = request.secret;
+            if let Ok(state) = nc_storage::apply_lock_request(request.kind, &secret) {
+                desktop_state.set_lock_state(state, false);
+            }
+            for byte in secret.iter_mut() {
+                *byte = 0;
+            }
+        }
 
         if desktop_state.take_wallpaper_dirty() {
             nc_desktop::draw_wallpaper(&mut wallpaper, desktop_state.wallpaper_index());

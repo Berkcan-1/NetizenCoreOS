@@ -1,0 +1,7 @@
+id = "nc.user.sayac"
+name = "Sayac"
+version = "1.0.0"
+icon = "generic"
+width_units = 22
+height_units = 12
+capabilities =

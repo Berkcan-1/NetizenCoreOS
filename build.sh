@@ -78,7 +78,33 @@ configure_profile() {
     ISO="$BUILD/netizencore-$PROFILE.iso"
 }
 
+build_ring3_apps() {
+    # Ring 3 uygulamalari: x86_64-unknown-none, 0x80_0100_0000'a baglanmis ELF'ler. Basarisizlik olumcul degil:
+    # ilgili dosya bos birakilir ve cekirdek o uygulamanin Ring 0 surumunu kullanir. Gunlukler: build/ring3-build-<ad>.log
+    mkdir -p "$ROOT/kernel/ring3_apps" "$BUILD"
+    local spec dir bin out log
+    for spec in "stopwatch:nc-stopwatch-r3" "system:nc-system-r3" "files:nc-files-r3"; do
+        dir="${spec%%:*}"
+        bin="${spec##*:}"
+        out="$ROOT/kernel/ring3_apps/$dir.elf"
+        log="$BUILD/ring3-build-$dir.log"
+        : > "$out"
+        if bash "$ROOT/tools/ring3-cargo.sh" "$ROOT/apps/$dir/Cargo.toml" "$BUILD/cargo-ring3" "$log"; then
+            cp "$BUILD/cargo-ring3/$TARGET/release/$bin" "$out"
+            echo "Ring 3 $dir ELF: $(wc -c < "$out") bayt"
+        else
+            echo "UYARI: Ring 3 $dir derlenemedi; cekirdek Ring 0 surumunu kullanacak." >&2
+            echo "------ cargo gunlugunun son 40 satiri (tamami: $log) ------" >&2
+            tail -n 40 "$log" >&2
+            echo "------------------------------------------------------------" >&2
+        fi
+    done
+}
+
 build_kernel() {
+    if [ -n "${NC_RING3_APPS:-}" ]; then
+        build_ring3_apps
+    fi
     if command -v rustup >/dev/null 2>&1; then
         rustup target add "$TARGET"
     fi
@@ -87,7 +113,7 @@ build_kernel() {
         --manifest-path "$ROOT/kernel/Cargo.toml" \
         --target "$TARGET" \
         --target-dir "$BUILD/cargo-$PROFILE" \
-        --features "$PROFILE"
+        --features "$PROFILE${NC_KERNEL_PAGING:+,kernel-paging}${NC_RING3_APPS:+,ring3-apps}"
     "$(pick_objcopy)" -O binary "$BUILD/cargo-$PROFILE/$TARGET/release/kernel" "$OUT/kernel.bin"
     local size
     size="$(file_size "$OUT/kernel.bin")"
@@ -429,8 +455,12 @@ resolve_usb_args() {
 run_qemu() {
     need qemu-system-x86_64
     local accel=()
-    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    if [ -z "${NC_NO_KVM:-}" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
         accel=(-enable-kvm -cpu host)
+    fi
+    local qemu_extra=()
+    if [ -n "${NC_QEMU_EXTRA:-}" ]; then
+        read -r -a qemu_extra <<< "$NC_QEMU_EXTRA"
     fi
 
     prepare_hybrid_disk "$BUILD/disk.img"
@@ -461,7 +491,8 @@ run_qemu() {
         qemu-system-x86_64 \
             ${accel[@]+"${accel[@]}"} \
             ${ovmf_bios[@]+"${ovmf_bios[@]}"} \
-            -m 512 \
+            -m "${NC_QEMU_MEM:-512}" \
+            ${qemu_extra[@]+"${qemu_extra[@]}"} \
             -drive file="$BUILD/disk.img",format=raw,if=ide,index=0,media=disk \
             ${USB_ARGS[@]+"${USB_ARGS[@]}"} \
             -boot order=c \
@@ -480,7 +511,8 @@ run_qemu() {
         qemu-system-x86_64 \
             ${accel[@]+"${accel[@]}"} \
             ${ovmf_bios[@]+"${ovmf_bios[@]}"} \
-            -m 512 \
+            -m "${NC_QEMU_MEM:-512}" \
+            ${qemu_extra[@]+"${qemu_extra[@]}"} \
             -drive file="$BUILD/disk.img",format=raw,if=ide,index=0,media=disk \
             ${USB_ARGS[@]+"${USB_ARGS[@]}"} \
             -cdrom "$ISO" \

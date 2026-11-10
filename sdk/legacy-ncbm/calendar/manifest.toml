@@ -1,0 +1,8 @@
+id = "nc.user.calendar"
+name = "Takvim"
+version = "1.0.0"
+icon = "stopwatch"
+width_units = 30
+height_units = 24
+uid = 1001
+perms = 0

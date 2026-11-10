@@ -356,8 +356,9 @@ protected_entry:
 .store_entry:
     or edx, eax
     mov [edi], edx
-    ; Ilk iki 2 MiB sayfa (0..4 MiB) cekirdek kodunu icerir, geri kalan 2046 sayfaya NX koy
-    cmp ecx, 2046
+    ; Ilk dort 2 MiB sayfa (0..8 MiB) cekirdek KODUNU icerir (linker.ld .text'in bu pencerede kalmasini garanti eder); geri kalan 2044 sayfaya NX koy.
+    ; Imajin buyuyen .rodata/.data/.bss/yigin kismi 8 MiB'i asabilir (14 MiB'a kadar): bunlar veridir, NX olmasi dogrudur.
+    cmp ecx, 2044
     ja .skip_nx_page
     mov [edi + 4], ebx
 .skip_nx_page:

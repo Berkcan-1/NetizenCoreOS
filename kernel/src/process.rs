@@ -33,19 +33,21 @@ pub unsafe fn active_user_pcb() -> Option<&'static mut ProcessControlBlock> {
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
-pub const CAP_NONE: u32                  = 0;
-pub const CAP_SETTINGS_READ: u32         = 1 << 0;
-pub const CAP_SETTINGS_WRITE_DISP: u32   = 1 << 1;
-pub const CAP_SETTINGS_WRITE_LOCALE: u32 = 1 << 2;
-pub const CAP_SETTINGS_WRITE_NET: u32    = 1 << 3;
-pub const CAP_SETTINGS_WRITE_DRV: u32    = 1 << 4;
-pub const CAP_FS_USER_READ: u32          = 1 << 5;
-pub const CAP_FS_USER_WRITE: u32         = 1 << 6;
-pub const CAP_FS_USER_DELETE: u32        = 1 << 7;
-pub const CAP_PKG_INSTALL: u32           = 1 << 8;
-pub const CAP_NET_CLIENT: u32            = 1 << 9;
-pub const CAP_IPC_ENDPOINT: u32          = 1 << 10;
-pub const CAP_KERNEL_INTERNAL: u32       = 0xFFFF_FFFF;
+// F-05: Yetki bitleri `nc-caps` crate'inden gelir (nc-pkg ile ortak tek kaynak).
+// Eski sürümde bu değerler nc-pkg'ninkilerle ÇAKIŞMIYORDU; artık aynıdır.
+pub const CAP_NONE: u32                  = nc_caps::NONE;
+pub const CAP_SETTINGS_READ: u32         = nc_caps::SETTINGS_READ;
+pub const CAP_SETTINGS_WRITE_DISP: u32   = nc_caps::SETTINGS_WRITE_DISPLAY;
+pub const CAP_SETTINGS_WRITE_LOCALE: u32 = nc_caps::SETTINGS_WRITE_LOCALE;
+pub const CAP_SETTINGS_WRITE_NET: u32    = nc_caps::SETTINGS_WRITE_NETWORK;
+pub const CAP_SETTINGS_WRITE_DRV: u32    = nc_caps::SETTINGS_WRITE_DRIVERS;
+pub const CAP_FS_USER_READ: u32          = nc_caps::FS_USER_READ;
+pub const CAP_FS_USER_WRITE: u32         = nc_caps::FS_USER_WRITE;
+pub const CAP_FS_USER_DELETE: u32        = nc_caps::FS_USER_DELETE;
+pub const CAP_PKG_INSTALL: u32           = nc_caps::PACKAGE_INSTALL;
+pub const CAP_NET_CLIENT: u32            = nc_caps::NETWORK_CLIENT;
+pub const CAP_IPC_ENDPOINT: u32          = nc_caps::IPC_ENDPOINT;
+pub const CAP_KERNEL_INTERNAL: u32       = nc_caps::KERNEL_INTERNAL;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TrustLevel {
@@ -243,6 +245,11 @@ impl ProcessControlBlock {
         unsafe { core::ptr::read_unaligned(bottom_ptr) == STACK_CANARY }
     }
 }
+
+#[cfg(feature = "ring3-apps")]
+pub const APP_WATCHDOG_ERROR: &str = "Uygulama zaman asimi (watchdog)";
+#[cfg(feature = "ring3-apps")]
+pub const APP_WATCHDOG_EXIT_CODE: i32 = -62;
 
 pub struct ProcessManager {
     pub processes: Vec<ProcessControlBlock>,
@@ -634,6 +641,299 @@ impl ProcessManager {
 
     pub fn process_fault_vec(&self, pid: usize) -> Option<u8> {
         self.processes.iter().find(|p| p.pid == pid).and_then(|p| p.fault_vec)
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Ring 3 uygulamalari (ELF, olay-tabanli). `ring3-apps` ozelligi ile derlenir.
+    // ------------------------------------------------------------------------------------
+
+    #[cfg(feature = "ring3-apps")]
+    fn build_elf_image(
+        plan: &nc_elf::LoadPlan,
+        elf: &[u8],
+        space: &mut AddressSpace,
+        owned: &mut Vec<u64>,
+    ) -> Result<u64, &'static str> {
+        let page = PAGE_SIZE as u64;
+        for seg in plan.segments() {
+            let perms = if seg.executable() {
+                PagePermissions::USER_RX
+            } else if seg.writable() {
+                PagePermissions::USER_RW
+            } else {
+                PagePermissions::USER_RO
+            };
+            let first = seg.page_start();
+            let file_lo = seg.vaddr;
+            let file_hi = seg.vaddr + seg.file_size;
+            for index in 0..seg.page_count() {
+                let vaddr = first + index * page;
+                let frame = alloc_frame().ok_or("Segment sayfasi icin PMM frame yetersiz")?;
+                owned.push(frame);
+                unsafe {
+                    core::ptr::write_bytes(frame as *mut u8, 0, PAGE_SIZE);
+                }
+                let lo = vaddr.max(file_lo);
+                let hi = (vaddr + page).min(file_hi);
+                if hi > lo {
+                    let src = (seg.file_offset + (lo - seg.vaddr)) as usize;
+                    let len = (hi - lo) as usize;
+                    let bytes = elf.get(src..src + len).ok_or("ELF segment verisi eksik")?;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            (frame + (lo - vaddr)) as *mut u8,
+                            len,
+                        );
+                    }
+                }
+                space
+                    .map_4k(vaddr, frame, perms)
+                    .map_err(|_| "Segment sayfasi map_4k basarisiz")?;
+            }
+        }
+
+        for index in 0..nc_abi::APP_STACK_PAGES {
+            let frame = alloc_frame().ok_or("Stack icin PMM frame yetersiz")?;
+            owned.push(frame);
+            unsafe {
+                core::ptr::write_bytes(frame as *mut u8, 0, PAGE_SIZE);
+            }
+            space
+                .map_4k(nc_abi::USER_APP_STACK_BOTTOM + index * page, frame, PagePermissions::USER_RW)
+                .map_err(|_| "Stack sayfasi map_4k basarisiz")?;
+        }
+
+        let event_frame = alloc_frame().ok_or("Olay sayfasi icin PMM frame yetersiz")?;
+        owned.push(event_frame);
+        unsafe {
+            core::ptr::write_bytes(event_frame as *mut u8, 0, PAGE_SIZE);
+        }
+        space
+            .map_4k(nc_abi::USER_EVENT_PAGE, event_frame, PagePermissions::USER_RO)
+            .map_err(|_| "Olay sayfasi map_4k basarisiz")?;
+
+        Self::collect_user_table_frames(space.pml4_phys, owned);
+        Ok(event_frame)
+    }
+
+    /// ELF imajindan olay-tabanli bir Ring 3 uygulamasi olusturur. Surec `Stopped` durumunda
+    /// baslar; genel zamanlayici onu calistirmaz, yalnizca `run_app_event` calistirir.
+    #[cfg(feature = "ring3-apps")]
+    pub fn spawn_user_elf(
+        &mut self,
+        name: &str,
+        identity: SecurityIdentity,
+        elf: &[u8],
+    ) -> Result<usize, &'static str> {
+        const APP_KERNEL_STACK_SIZE: usize = 128 * 1024;
+
+        let policy = nc_elf::Policy {
+            min_vaddr: nc_abi::USER_IMAGE_MIN,
+            max_vaddr: nc_abi::USER_IMAGE_MAX,
+            max_pages: nc_abi::ELF_MAX_PAGES,
+        };
+        let plan = nc_elf::parse(elf, &policy).map_err(|e| e.as_str())?;
+
+        self.processes.try_reserve(1).map_err(|_| "Process tablosu icin heap yetersiz")?;
+        let mut process_name = String::new();
+        process_name.try_reserve(name.len()).map_err(|_| "Process adi icin heap yetersiz")?;
+        process_name.push_str(name);
+
+        let mut owned_frames: Vec<u64> = Vec::new();
+        let want = plan.total_pages as usize + nc_abi::APP_STACK_PAGES as usize + 64;
+        owned_frames
+            .try_reserve_exact(want)
+            .map_err(|_| "Process frame listesi icin heap yetersiz")?;
+        let mut user_space =
+            AddressSpace::create_user_space().map_err(|_| "User CR3 olusturulamadi")?;
+        owned_frames.push(user_space.pml4_phys);
+
+        let event_frame = match Self::build_elf_image(&plan, elf, &mut user_space, &mut owned_frames) {
+            Ok(frame) => frame,
+            Err(message) => {
+                Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
+                return Err(message);
+            }
+        };
+
+        let mut kstack: Vec<u8> = Vec::new();
+        if kstack.try_reserve_exact(APP_KERNEL_STACK_SIZE).is_err() {
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
+            return Err("Kernel stack icin heap yetersiz");
+        }
+        kstack.resize(APP_KERNEL_STACK_SIZE, 0);
+        unsafe {
+            core::ptr::write_unaligned(kstack.as_mut_ptr() as *mut u64, STACK_CANARY);
+        }
+        let kstack_top = ((kstack.as_mut_ptr() as usize + APP_KERNEL_STACK_SIZE) & !0xF) as u64;
+
+        let mut handles = Vec::new();
+        if handles.try_reserve_exact(3).is_err() {
+            Self::rollback_user_spawn(user_space.pml4_phys, &mut owned_frames);
+            return Err("Handle tablosu icin heap yetersiz");
+        }
+        handles.push(ProcessHandle { id: STDOUT_HANDLE, kind: HandleKind::ConsoleOut, required_cap: CAP_NONE });
+        handles.push(ProcessHandle { id: STDERR_HANDLE, kind: HandleKind::ConsoleErr, required_cap: CAP_NONE });
+        let surface_handle = 3u64;
+        handles.push(ProcessHandle { id: surface_handle, kind: HandleKind::GuiSurface, required_cap: CAP_NONE });
+
+        let pid = self.next_pid;
+        self.next_pid += 1;
+        let entry = plan.entry;
+        let uctx = UserContext {
+            cr3: user_space.pml4_phys,
+            user_rip: entry,
+            user_rsp: nc_abi::USER_ENTRY_RSP,
+            rflags: 0x202,
+            ..Default::default()
+        };
+
+        self.processes.push(ProcessControlBlock {
+            pid,
+            cpu_affinity: 0,
+            name: process_name,
+            mode: ExecutionMode::UserProcess,
+            identity,
+            state: ProcessState::Stopped,
+            address_space: user_space,
+            user_ctx: Some(uctx),
+            handles,
+            next_handle_id: surface_handle + 1,
+            cspace: CSpace::new(),
+            owned_frames,
+            demand_heap_limit: nc_abi::USER_HEAP_BASE + nc_abi::APP_HEAP_BYTES,
+            stack_lowest_vaddr: nc_abi::USER_APP_STACK_BOTTOM,
+            cow_faults_resolved: 0,
+            demand_pages_allocated: 0,
+            exit_code: None,
+            fault_vec: None,
+            fault_rip: 0,
+            fault_cr2: 0,
+            ticks: 0,
+            rsp: kstack_top,
+            kernel_stack_top: kstack_top,
+            stack: kstack,
+        });
+
+        crate::ring3::register(crate::ring3::AppRuntime::new(pid, event_frame, entry, surface_handle));
+        Ok(pid)
+    }
+
+    /// Uygulamaya BIR olay teslim eder ve `SYS_APP_DONE` ile donene kadar Ring 3'te kosturur.
+    /// Donus: uygulamanin dondurdugu bayraklar (`nc_abi::event::RET_*` + uygulamaya ozel ust bitler).
+    /// `canvas`: yalnizca OP_DRAW sirasinda `SYS_GUI_DRAW`'in cizecegi hedef ve pencere alani.
+    #[cfg(feature = "ring3-apps")]
+    pub fn run_app_event(
+        &mut self,
+        pid: usize,
+        event: &nc_abi::event::EventBlock,
+        canvas: Option<(&mut nc_gfx::Canvas<'_>, nc_gfx::Rect)>,
+    ) -> Result<u32, &'static str> {
+        let idx = self
+            .processes
+            .iter()
+            .position(|p| p.pid == pid && p.mode == ExecutionMode::UserProcess)
+            .ok_or("Surec bulunamadi")?;
+        if !matches!(self.processes[idx].state, ProcessState::Stopped | ProcessState::Ready) {
+            return Err("Surec olay almaya uygun degil");
+        }
+        let (event_frame, entry) =
+            crate::ring3::runtime_info(pid).ok_or("Ring 3 uygulama kaydi yok")?;
+        let budget_cycles = crate::ring3::event_budget_cycles()
+            .ok_or("TSC kalibre edilemedi; Ring 3 uygulamalari watchdog'suz calistirilmaz")?;
+
+        crate::ring3::ensure_vfs();
+        let encoded = event.encode();
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                encoded.as_ptr(),
+                event_frame as *mut u8,
+                nc_abi::event::EVENT_SIZE,
+            );
+        }
+
+        if let Some(context) = crate::ring3::context_bytes(pid) {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    context.as_ptr(),
+                    (event_frame + nc_abi::ctx::CTX_OFFSET as u64) as *mut u8,
+                    nc_abi::ctx::CTX_SIZE,
+                );
+            }
+        }
+        let gui = canvas.map(|(c, area)| {
+            let raw: *mut nc_gfx::Canvas<'_> = c;
+            let erased = unsafe {
+                core::mem::transmute::<*mut nc_gfx::Canvas<'_>, *mut nc_gfx::Canvas<'static>>(raw)
+            };
+            (erased, area)
+        });
+        crate::ring3::begin_event(pid, gui);
+
+        let (cr3, kernel_stack, caps, space) = {
+            let proc = &mut self.processes[idx];
+            proc.state = ProcessState::Running;
+            (
+                proc.address_space.pml4_phys,
+                proc.kernel_stack_top,
+                proc.identity.capabilities,
+                proc.address_space,
+            )
+        };
+
+        let status = unsafe {
+            GLOBAL_PM = self as *mut ProcessManager;
+            ACTIVE_USER_PID = pid;
+            ACTIVE_USER_SPACE = Some(space);
+            ACTIVE_APP_CAPS.store(caps, Ordering::Release);
+            set_kernel_stack(kernel_stack);
+            nc_arch::idt::watchdog_arm(nc_arch::time::read_tsc().saturating_add(budget_cycles));
+            let status = run_ring3_task_session(entry, nc_abi::USER_ENTRY_RSP, cr3, kernel_stack);
+            nc_arch::idt::watchdog_disarm();
+            ACTIVE_USER_PID = 0;
+            ACTIVE_USER_SPACE = None;
+            ACTIVE_APP_CAPS.store(CAP_KERNEL_INTERNAL, Ordering::Release);
+            status
+        };
+        crate::ring3::end_event();
+
+        let proc = &mut self.processes[idx];
+        if status == nc_arch::idt::WATCHDOG_ABORT_STATUS {
+            proc.exit_code = Some(APP_WATCHDOG_EXIT_CODE);
+            proc.state = ProcessState::Terminated(APP_WATCHDOG_EXIT_CODE);
+            return Err(APP_WATCHDOG_ERROR);
+        }
+        if status >= 1000 {
+            return Err("Uygulama CPU istisnasi nedeniyle sonlandirildi");
+        }
+        match proc.state {
+            ProcessState::Terminated(_) => return Err("Uygulama kendi istegiyle sonlandi"),
+            ProcessState::Running => proc.state = ProcessState::Stopped,
+            _ => {}
+        }
+        Ok(crate::ring3::take_ret(pid))
+    }
+
+    /// Uygulamayi sonlandirir, bellegini geri verir ve kaydini siler.
+    #[cfg(feature = "ring3-apps")]
+    pub fn kill_app(&mut self, pid: usize) -> bool {
+        let Some(proc) = self
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid && p.mode == ExecutionMode::UserProcess)
+        else {
+            return false;
+        };
+        if !matches!(proc.state, ProcessState::Terminated(_)) {
+            proc.state = ProcessState::Terminated(0);
+            if proc.exit_code.is_none() {
+                proc.exit_code = Some(0);
+            }
+        }
+        crate::ring3::unregister(pid);
+        self.reap_terminated_user_processes();
+        true
     }
 
     pub fn reap_terminated_user_processes(&mut self) -> usize {

@@ -58,3 +58,23 @@ For `op = 1`, geometry fields must all be zero. For `op = 2` and `op = 3`, check
 - Syscall numbers and structures are documented for the current source state but are not yet frozen under an ABI version/compatibility policy.
 - Current process state and scheduler globals are single-CPU. This ABI must not be treated as SMP-safe.
 - NCU1 FNV-1a checksums are not cryptographic signatures and do not establish publisher identity.
+
+
+## Ring 3 ABI v1 eklemeleri (`ring3-apps`; kaynak gerçek: `crates/nc-abi`)
+
+Olay-tabanlı model: her olayda `e_entry`'e girilir (RSP = `USER_APP_STACK_TOP - 8`, tüm yazmaçlar 0),
+olay `0x80_00F0_0000`'daki salt-okunur `EventBlock`'tan (96 bayt, sabit ofsetler `nc_abi::event::OFF_*`)
+okunur. Bloklayan syscall (`YIELD/SLEEP`) bu modelde kullanılmaz.
+
+| No | Ad | Argümanlar | Dönüş |
+|---|---|---|---|
+| 16 | `SYS_APP_DONE` | rdi = bayraklar (`RET_REDRAW`=1, `RET_CLOSE`=2; üst bitler uygulamaya özel) | dönmez |
+| 17 | `SYS_FILE_OPEN` | rdi = yol işaretçisi, rsi = uzunluk (≤ 256), rdx = 1 okuma / 2 yazma | handle ya da -errno |
+| 18 | `SYS_FILE_READ` | rdi = handle, rsi = tampon, rdx = uzunluk | okunan bayt (0 = EOF) |
+| 19 | `SYS_FILE_WRITE` | rdi = handle, rsi = tampon, rdx = uzunluk (≤ 64 KiB; toplam ≤ 1 MiB) | yazılan bayt |
+| 20 | `SYS_GUI_DRAW` | rdi = yüzey handle (olay bloğundaki `surface`), rsi = akış, rdx = bayt (≤ 16 KiB) | kabul edilen kayıt sayısı; yalnızca `OP_DRAW` sırasında, aksi `EAGAIN` |
+| 21 | `SYS_TEXT_WIDTH` | rdi = UTF-8, rsi = uzunluk (≤ 256), rdx = cap yüksekliği | piksel genişliği |
+| 22 | `SYS_FILE_CLOSE` | rdi = handle | 0 ya da -errno (yazma tamponu burada VFS'e yazılır) |
+
+`SYS_HANDLE_CLOSE` dosya handle'ında `EINVAL` döner (`SYS_FILE_CLOSE` kullanın). Çizim akışı biçimi ve
+sınırları `crates/nc-abi/src/draw.rs` başlığında.

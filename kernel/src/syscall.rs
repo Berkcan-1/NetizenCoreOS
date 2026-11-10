@@ -308,6 +308,16 @@ fn dispatch_syscall(frame: &mut SyscallFrame) -> i64 {
     };
     save_active_user_context(frame.iret_rip, frame.iret_rsp);
 
+    // Watchdog: sistem çağrısı yağdıran bir uygulama zamanlayıcı kesmesini hep çekirdekte yakalayabilir;
+    // bu yüzden süre dolduysa her çağrının girişinde de oturumu iptal et.
+    #[cfg(feature = "ring3-apps")]
+    if nc_arch::idt::watchdog_expired() {
+        nc_arch::idt::watchdog_disarm();
+        unsafe {
+            abort_ring3_to_kernel(nc_arch::idt::WATCHDOG_ABORT_STATUS);
+        }
+    }
+
     match frame.rax {
         SYS_EXIT => {
             let exit_code = frame.rdi as i32;
@@ -412,6 +422,10 @@ fn dispatch_syscall(frame: &mut SyscallFrame) -> i64 {
         SYS_HANDLE_CLOSE => {
             let hid = frame.rdi;
             if hid <= 2 {
+                return EINVAL;
+            }
+            #[cfg(feature = "ring3-apps")]
+            if crate::ring3::is_file_handle(hid) {
                 return EINVAL;
             }
             unsafe {
@@ -712,6 +726,8 @@ fn dispatch_syscall(frame: &mut SyscallFrame) -> i64 {
                 EINVAL
             }
         },
+        #[cfg(feature = "ring3-apps")]
+        16..=26 => crate::ring3::dispatch(frame, &space),
         _ => ENOSYS,
     }
 }

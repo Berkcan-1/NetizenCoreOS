@@ -1,0 +1,20 @@
+[package]
+name = "nc-stopwatch-r3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-abi = { path = "../../crates/nc-abi" }
+nc-app-sdk = { path = "../../crates/nc-app-sdk" }
+nc-r3-stopwatch = { path = "../../crates/nc-r3-stopwatch" }
+
+# Ana workspace'ten ayrı: bu ikili yalnızca build.sh ile (x86_64-unknown-none) derlenir.
+[workspace]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = false
+codegen-units = 1
+debug = false
+strip = "symbols"

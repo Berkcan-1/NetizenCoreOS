@@ -1,0 +1,21 @@
+[package]
+name = "nc-system-r3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-abi = { path = "../../crates/nc-abi" }
+nc-app = { path = "../../crates/nc-app" }
+nc-app-sdk = { path = "../../crates/nc-app-sdk" }
+nc-app-host = { path = "../../crates/nc-app-host" }
+nc-app-system = { path = "../../crates/nc-app-system" }
+
+[workspace]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = false
+codegen-units = 1
+debug = false
+strip = "symbols"

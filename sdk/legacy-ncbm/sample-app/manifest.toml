@@ -1,0 +1,8 @@
+id = "nc.user.paint"
+name = "Piksel Atolyesi"
+version = "1.0.0"
+icon = "sliders"
+width_units = 36
+height_units = 24
+uid = 1001
+perms = 3
