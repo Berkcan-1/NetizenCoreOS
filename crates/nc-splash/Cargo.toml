@@ -1,0 +1,12 @@
+[package]
+name = "nc-splash"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-assets = { path = "../nc-assets" }
+nc-gfx = { path = "../nc-gfx" }
+nc-font = { path = "../nc-font" }
+nc-math = { path = "../nc-math" }
+nc-mem = { path = "../nc-mem" }
+nc-ui = { path = "../nc-ui" }

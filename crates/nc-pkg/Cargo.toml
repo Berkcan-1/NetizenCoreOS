@@ -1,0 +1,19 @@
+[package]
+name = "nc-pkg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-app = { path = "../nc-app" }
+nc-caps = { path = "../nc-caps" }
+nc-abi = { path = "../nc-abi" }
+nc-elf = { path = "../nc-elf" }
+# F-02: Ed25519 imza doğrulaması. İmza matematiği elle yazılmadı; denetlenmiş
+# RustCrypto/dalek kütüphaneleri kullanılıyor (no_std). Çekirdek derlemesinde
+# nc-net `sha2`'yı "force-soft" ile etkinleştirdiği için özellikler birleşir.
+ed25519-dalek = { version = "2.1", default-features = false }
+# F-11: SHA-256 için tek kaynak (elle yazılmış gerçekleme kaldırıldı).
+sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+nc-gfx = { path = "../nc-gfx" }

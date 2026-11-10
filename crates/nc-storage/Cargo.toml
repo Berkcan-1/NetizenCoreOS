@@ -1,0 +1,10 @@
+[package]
+name = "nc-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-arch = { path = "../nc-arch" }
+nc-hal = { path = "../nc-hal" }
+nc-driver = { path = "../nc-driver" }
+nc-crypto = { path = "../nc-crypto" }

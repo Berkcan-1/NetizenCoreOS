@@ -1,0 +1,15 @@
+[package]
+name = "nc-r3-stopwatch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-abi = { path = "../nc-abi" }
+nc-app-sdk = { path = "../nc-app-sdk" }
+
+[dev-dependencies]
+nc-app = { path = "../nc-app" }
+nc-app-stopwatch = { path = "../nc-app-stopwatch" }
+nc-gfx = { path = "../nc-gfx" }
+nc-ui = { path = "../nc-ui", features = ["remote"] }
+nc-i18n = { path = "../nc-i18n" }
