@@ -1,0 +1,16 @@
+[package]
+name = "nc-fs-facade"
+version = "0.1.0"
+edition = "2021"
+
+# `kernel`: gerçek nc-fs (çekirdek ve Ring 0 uygulamaları). `client`: Ring 3 için VFS hizmeti istemcisi
+# (SYS_VFS_CALL). İkisi birlikte açılamaz: bir derleme ya çekirdektir ya Ring 3.
+[features]
+default = ["kernel"]
+kernel = ["dep:nc-fs"]
+client = ["dep:nc-abi", "dep:nc-app-sdk"]
+
+[dependencies]
+nc-fs = { path = "../nc-fs", optional = true }
+nc-abi = { path = "../nc-abi", optional = true }
+nc-app-sdk = { path = "../nc-app-sdk", optional = true }

@@ -1,0 +1,7 @@
+[package]
+name = "nc-font"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-math = { path = "../nc-math" }
