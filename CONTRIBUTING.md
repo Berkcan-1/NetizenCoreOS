@@ -31,12 +31,12 @@ Repository: https://github.com/Berkcan-1/NetizenCoreOS
 Example:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/NetizenCoreOS.git
+git clone https://github.com/Berkcan-1/NetizenCoreOS.git
 cd NetizenCoreOS
 git checkout -b feature/your-feature
 ```
 
-Replace `YOUR_USERNAME` with your GitHub username.
+
 
 Before contributing, review the repository's README and the relevant documentation in the project directories. Build instructions and supported development environments may change as the project evolves.
 
