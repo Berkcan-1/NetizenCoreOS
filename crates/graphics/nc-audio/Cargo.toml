@@ -1,0 +1,9 @@
+[package]
+name = "nc-audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-hal = { path = "../../foundation/nc-hal" }
+nc-driver = { path = "../../hardware/nc-driver" }
+nc-assets = { path = "../nc-assets" }
