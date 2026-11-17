@@ -1,173 +1,97 @@
-
-<img width="256" height="256" alt="netizencore-crab-c" src="https://github.com/user-attachments/assets/79860eb6-02eb-4187-840f-be337bc37714" />
-
 # NetizenCore
 
-An operating system written from scratch, not based on Unix/Linux. The bootloader is written in Assembly, while the kernel and all modules are written entirely in Rust.
-There are no comments in the code; explanations are provided in the README.md file in each directory.
+Sıfırdan yazılan, Unix/Linux tabanlı olmayan işletim sistemi. Bootloader Assembly, çekirdek ve modüllerin tamamı Rust.
+Kodlarda yorum satırı yoktur; açıklamalar her klasördeki README.md dosyalarındadır.
 
-## What It Currently Does
+## Şu an ne yapıyor
 
-1. The BIOS loads stage1 from the ISO. stage1 reads stage2 and the kernel into memory.
-2. stage2 checks for a 64-bit CPU, selects a graphics mode using VBE, sets up 4 GB paging, and switches to long mode.
-3. The kernel initializes the display, calibrates the clock, and plays the boot animation: a logo that starts blurred and gradually becomes sharp, the
-   NetizenCore text, a breathing line below it, the PREPARING SETUP text, and blinking dots.
-4. Once preparation is complete, the animation fades out with a blur effect. If the system is not installed, the setup wizard opens; otherwise, the desktop loads.
-5. Desktop: colorful wallpaper, icons, taskbar, Start menu, and draggable windows. Applications
-   (Settings, System, Stopwatch) are separate crates and run through a shared contract (crates/nc-app/README.md).
+1. BIOS, ISO'dan stage1'i yükler. stage1, stage2 ve çekirdeği belleğe okur (UEFI için `bootloader/uefi`).
+2. stage2 64 bit işlemciyi kontrol eder, E820 bellek haritasını okur, VBE ile grafik modunu seçer, 4 GB sayfalamayı kurar ve long mode'a geçer.
+3. Çekirdek ekranı açar, saati kalibre eder ve açılış animasyonunu oynatır.
+4. Hazırlık bitince sistem kurulu değilse kurulum sihirbazı, kuruluysa masaüstü açılır.
+5. Masaüstü: duvar kâğıdı, simgeler, görev çubuğu, başlat menüsü ve sürüklenebilir pencereler. Uygulamalar (Dosyalar, Ayarlar,
+   Sistem, Kronometre, Tarayıcı) ortak bir sözleşme üzerinden çalışır (`crates/ui/nc-app/README.md`) ve Ring 3'te ayrı ELF olarak koşabilir.
 
+## Klasör düzeni
 
+Her üst klasör tek bir sorumluluğa sahiptir; bir iş üzerinde çalışırken yalnızca ilgili klasörü yapay zekâya vermek yeter.
 
-## Profiles
+| Klasör | İçerik |
+|---|---|
+| `bootloader/` | `bios/` (stage1, stage2, mbr: Assembly) ve `uefi/` (UEFI yükleyici crate'i) |
+| `kernel/` | Çekirdek: `src/boot`, `src/tasking`, `src/ring3`, gömülü ikililer (`embedded/`), `SYSCALL_ABI.md` |
+| `aarch64kernel/` | AArch64 (arm64/armv8a/armv9a) çekirdeği; eski adıyla kernel altındaki aarch64 klasörü |
+| `crates/foundation/` | Sözleşmeler ve bağımsız kütüphaneler (hal, abi, efra, math, crypto, inflate, i18n) |
+| `crates/hardware/` | x86 mimarisi, sürücüler, giriş, depolama, platformlar |
+| `crates/services/` | Çekirdek hizmetleri: bellek, dosya sistemi, ağ |
+| `crates/graphics/` | Canvas, yazı tipi, medya çözücüler, logo kaynağı |
+| `crates/ui/` | Arayüz araç takımı, uygulama sözleşmesi, splash, kurulum, masaüstü |
+| `crates/runtime/` | Ring 3 çalışma zamanı: yetkiler, ELF, paketler, SDK, host, cepheler |
+| `apps/` | Uygulamalar; her uygulama kendi klasöründe (mantık crate'i + Ring 3 giriş ikilisi), `registry/` yerleşik liste |
+| `sdk/` | Üçüncü taraf uygulama araçları (.ntzc paketleme, imza anahtarı, örnek) |
+| `tools/` | `build/` (build.sh modülleri), `check/` (düzen denetimi), `docs/` (doküman üretimi), `gen/`, `model/` |
+| `assets/` | Derleme zamanında gömülen dosyalar (logo, ses) |
+| `docs/` | `architecture/`, `ring3/`, `security/`, `changelog/`, `migration/` |
+| `aarch64crates/` | Yalnızca arm64'e ait her şey: `hardware/` (nc-arch-aarch64, nc-device), `runtime/`, `drivers/` (cihaz katmanı), `apps/` (EL0 uygulamaları), `tools/` (arm64 build betikleri) |
+| `packages/` | Ayrı `.ntzc` sistem paketleri (mobil/masaüstü) |
+| `host_usb/` | Konak tarafı USB deneme klasörü |
 
-| Profile | Target                 | Resolution | Log Output                         |
-|---------|------------------------|------------|------------------------------------|
-| qemu    | QEMU virtual hardware  | 1280x720   | serial port, debugcon, isa-debug-exit |
-| generic | General PC, VirtualBox | 1024x768   | serial port (if available)         |
+Katman kuralı: `foundation ← hardware ← services ← graphics ← ui ← runtime ← apps ← kernel`. Bir crate yalnızca kendi katmanına
+ve altındakilere bağlanır (`python3 tools/check/verify_layout.py` denetler). Ayrıntı: `docs/architecture/LAYOUT.md`.
 
-## Commands
+## Profiller
 
-    bash build.sh            produces the qemu ISO: build/netizencore-qemu.iso
-    bash build.sh generic    produces the generic ISO: build/netizencore-generic.iso
-    bash build.sh all        produces both
-    bash build.sh run        produces the qemu ISO and launches it in QEMU
-    bash build.sh vbox       produces the generic ISO and launches it in VirtualBox
-    bash build.sh clean      removes the build directory
+| Profil  | Hedef                | Çözünürlük  | Log çıkışı                          |
+|---------|----------------------|-------------|-------------------------------------|
+| qemu    | QEMU sanal donanımı  | 1280x720    | seri port, debugcon, isa-debug-exit |
+| generic | genel PC, VirtualBox | 1024x768    | seri port (varsa)                   |
 
-Requirements (Debian/Ubuntu):
+## Komutlar
+
+    bash build.sh            qemu ISO üretir: build/netizencore-qemu.iso
+    bash build.sh generic    generic ISO üretir: build/netizencore-generic.iso
+    bash build.sh all        ikisini birden üretir
+    bash build.sh run        qemu ISO üretir ve QEMU'da açar
+    bash build.sh vbox       generic ISO üretir ve VirtualBox'ta açar
+    bash build.sh clean      build klasörünü siler
+
+Çok mimarili kullanım (`docs/architecture/MULTIARCH.md`, cihaz katmanı: `aarch64crates/drivers/README.md`):
+
+    bash build.sh devices                            tanımlı cihazlar
+    bash build.sh armv8a qemu run --mem 1024         aarch64 çekirdeği QEMU'da (--smp --gdb --headless -- ham-arg)
+    bash build.sh armv8a android x6826c              boot.img + system.img + super.img
+    bash build.sh unpack-boot stok-boot.img          stok boot.img'den device.conf değerlerini çıkarır
+    bash build.sh new-device <ad> [soc]              yeni cihaz klasörü
+
+    python3 tools/check/verify_layout.py        klasör düzeni ve yol bütünlüğü denetimi
+    python3 tools/docs/sync_module_docs.py      README bağımlılık bloklarını ve DEPENDENCIES.md'yi yeniler
+
+`build.sh` yalnızca sabitleri ve komut yönlendirmesini içerir; işlevler `tools/build/*.sh` içindedir (`tools/build/README.md`).
+
+Gereksinimler (Debian/Ubuntu):
 
     sudo apt install nasm xorriso binutils qemu-system-x86 zip
-    rustup (build.sh adds the x86_64-unknown-none target automatically)
+    rustup (build.sh x86_64-unknown-none hedefini kendisi ekler)
 
-The PNG library is downloaded from the internet during the first build.
+İlk derlemede png kütüphanesi internetten indirilir.
 
-## Directories
+## Hata ayıklama (QEMU)
 
-| Directory     | Contents                                                               |
-|---------------|------------------------------------------------------------------------|
-| assets/       | Files embedded into the kernel at build time (currently, only the logo) |
-| bootloader/   | stage1.asm and stage2.asm (Assembly)                                   |
-| crates/       | Reusable Rust modules (hal, arch, gfx, font, ...)                      |
-| docs/         | Architecture, memory map, module list                                  |
-| kernel/       | Entry point, platform selection, boot flow                             |
+Seri çıktı terminalde görünür, debugcon çıktısı `build/debugcon.log` dosyasına yazılır. Çekirdek panik olursa mesaj
+ikisine de yazılır. QEMU, /dev/kvm erişilebiliyorsa otomatik hızlandırılır; KVM yoksa animasyon daha az kare ile
+oynar ama süre aynı kalır.
 
-Each directory and each src directory contains a README.md that explains that directory in detail.
+## Yapay zekâ araçlarıyla çalışma
 
-## Debugging (QEMU)
+Tüm projeyi vermek gerekmez. Her satır, "bu işte çekirdeğe dokunmadan" çalışmak için verilecek klasörleri gösterir:
 
-Serial output is displayed in the terminal, while debugcon output is written to build/debugcon.log. If the kernel panics, the message
-is written to both. QEMU is automatically accelerated when /dev/kvm is accessible; without KVM, the animation plays with fewer frames,
-but its duration remains the same.
+| İş | Ver | Çekirdeğe ne zaman dokunulur |
+|---|---|---|
+| Masaüstü / pencere / tema | `crates/ui/nc-desktop`, `crates/ui/nc-ui`, `crates/ui/nc-app` README'leri | Yalnızca `nc-desktop`/`nc-ui` genel API'si değişirse (`kernel/src/main.rs`) |
+| Yeni veya mevcut uygulama | `apps/<ad>/`, `crates/ui/nc-app` README'si | Hiç; yeni uygulama `apps/registry/nc-apps`'e eklenir |
+| Yazı tipi, çizim, medya | `crates/graphics/<crate>` | Hiç |
+| Sürücü / depolama / giriş | `crates/hardware/<crate>`, `crates/foundation/nc-hal` README'si | `kernel/src/boot/` (aygıt başlatma) |
+| Ağ | `crates/services/nc-net`, `crates/runtime/nc-net-facade` | `kernel/src/ring3/net.rs` |
+| Ring 3, syscall, paketler | `kernel/src/tasking`, `kernel/src/ring3`, `crates/runtime`, `kernel/SYSCALL_ABI.md` | Zaten çekirdektedir |
 
-
-
-======
-# NetizenCore Architecture
-
-## Boot Flow
-
-    BIOS -> El Torito (no-emulation) -> stage1 -> stage2 -> kernel (_start asm, kernel_main Rust)
-
-Execution order of kernel_main:
-
-1. Initialize the platform (serial port, debugcon, etc.) and read BootInfo.
-2. Calibrate the clock using PIT and TSC (nc-arch::time::Clock).
-3. Allocate the display, transition, and setup buffers from the memory pool (Arena) at 0x400000.
-4. Draw the backdrop and present it on the screen; then prepare the Splash (layers and blur levels).
-5. Animation loop: run Intro and Idle until Preparation is ready; once ready, run Outro. Only the rectangles that have changed are
-   written to the framebuffer in each frame.
-6. If the system is not installed on the disk, run the setup wizard; otherwise, go directly to the desktop.
-7. Desktop: DesktopState is created using nc_apps::builtin(). Each frame, the loop reads input and calls state.update; the scene
-   is redrawn only when it is "dirty", and if only the cursor has moved, only the cursor's old and new rectangles are updated.
-
-## Memory Map
-
-    0x0600   VBE controller information (temporary)
-    0x0800   VBE mode information (temporary)
-    0x0900   BootInfo
-    0x1000   page tables (up to 0x6FFF)
-    0x7C00   stage1
-    0x8800   stage2
-    0x9800   kernel loaded image (temporary)
-    0x100000 kernel (.text .rodata .data .bss, 64 KB stack)
-    0x400000 memory pool (Arena), 60 MB, up to 0x4000000
-
-The memory pool is currently used as follows (approximately 29 MB at 1280x720; plus an 8 MB dynamic heap, approximately 37 MB in total; applications use this heap through Box):
-
-    display buffer       3.7 MB   (u32 pixels, 0x00RRGGBB)
-    transition buffer    3.7 MB
-    setup buffer         3.7 MB
-    wallpaper            3.7 MB   (desktop wallpaper cache)
-    splash layers        approx. 14 MB (backdrop copy + 4 blur levels + temporary buffer)
-
-Paging: 0-3 GB cached, 3-4 GB uncached, 2 MB pages. The kernel expects at least 64 MB of RAM
-(until E820 is read). QEMU and VirtualBox are allocated 256 MB.
-
-## Dependency Graph
-
-    nc-hal                 (none)
-    nc-arch                (none)
-    nc-math                (none)
-    nc-mem                 (none)
-    nc-assets              (none; build.rs: png)
-    nc-gfx                 -> nc-hal
-    nc-font                -> nc-math
-    nc-ui                  -> nc-gfx, nc-font, nc-math
-    nc-splash              -> nc-assets, nc-gfx, nc-font, nc-math, nc-mem, nc-ui
-    nc-setup               -> nc-hal, nc-gfx, nc-font, nc-ui
-    nc-input               -> nc-arch, nc-hal
-    nc-storage             -> nc-arch, nc-hal
-    nc-app                 -> nc-hal, nc-gfx, nc-font, nc-ui
-    nc-app-settings        -> nc-app, nc-gfx, nc-font, nc-ui
-    nc-app-system          -> nc-app, nc-gfx, nc-font, nc-ui
-    nc-app-stopwatch       -> nc-app, nc-gfx, nc-font, nc-ui
-    nc-apps                -> nc-app, nc-app-settings, nc-app-system, nc-app-stopwatch
-    nc-desktop             -> nc-hal, nc-gfx, nc-font, nc-ui, nc-app   (does not know applications by name)
-    nc-platform-qemu       -> nc-hal, nc-arch
-    nc-platform-generic    -> nc-hal, nc-arch
-    kernel (nc-kernel)     -> all (one selected according to platform feature flags)
-
-## Profiles
-
-A profile is a Cargo feature of the kernel crate: qemu or generic. If both or neither are selected, the build fails
-(kernel/src/platform.rs). To add a new platform:
-
-1. Create crates/nc-platform-<name> and implement nc-hal::Platform.
-2. Add it to the workspace member list in the root Cargo.toml.
-3. Add the feature and optional dependency to kernel/Cargo.toml.
-4. Add a cfg line to kernel/src/platform.rs.
-5. Add the resolution setting to configure_profile in build.sh.
-
-## Rules
-
-- Modules may only use one another according to the arrows in the dependency graph.
-- Hardware-specific code exists only in nc-arch and nc-platform-*.
-
-=====
-# Modules
-
-| Module              | Responsibility                                                               |
-|---------------------|-------------------------------------------------------------------------------|
-| nc-hal              | Bootloader contract (BootInfo), Platform interface, log! macro               |
-| nc-arch             | x86_64 port I/O, halt, 16550 serial port, PIT/TSC clock                       |
-| nc-math             | Integer trigonometry, square root, smoothing, and ratio functions             |
-| nc-mem              | Simple memory pool (Arena)                                                    |
-| nc-assets           | PNG logo pipeline (build.rs) and logo access                                 |
-| nc-gfx              | Canvas, drawing primitives, blur, blending, framebuffer transfer             |
-| nc-font             | Custom vector-stroke typeface (A-Z, 0-9, punctuation)                         |
-| nc-ui               | Theme colors, backdrop, text, spheres, pills, shadows, card helpers           |
-| nc-splash           | Animated boot screen                                                          |
-| nc-input            | PS/2 keyboard and mouse (InputDevice implementation)                          |
-| nc-storage          | ATA PIO disk detection, read/write, installation (MBR, stage2, kernel writing) |
-| nc-app              | Application contract (App trait, Context, Input, theme, icons)                |
-| nc-app-settings     | Settings application (wallpaper, accent color, resolution information)       |
-| nc-app-system       | System information application                                                |
-| nc-app-stopwatch    | Stopwatch application                                                          |
-| nc-apps             | List of built-in applications (builtin)                                       |
-| nc-desktop          | Desktop shell: windows, taskbar, Start menu                                   |
-| nc-setup            | Setup screen (Welcome)                                                         |
-| nc-platform-qemu    | QEMU-specific Platform implementation                                         |
-| nc-platform-generic | General PC Platform implementation                                            |
-| kernel              | Entry point, boot flow, panic handler                                         |
-
-Each module's directory contains a detailed README.md, and its src directory contains file-by-file explanations.
+Bağımlılık haritası: `docs/architecture/DEPENDENCIES.md`. Çekirdeğin diğer crate'lerle temas noktaları: `kernel/README.md`.

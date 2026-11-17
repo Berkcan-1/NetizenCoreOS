@@ -1,0 +1,1123 @@
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+#[path = "boot/devices.rs"]
+mod devices;
+#[path = "boot/entry.rs"]
+mod entry;
+#[path = "tasking/ipc.rs"]
+mod ipc;
+#[path = "boot/platform.rs"]
+mod platform;
+#[path = "boot/prepare.rs"]
+mod prepare;
+#[path = "tasking/process.rs"]
+mod process;
+#[cfg(feature = "ring3-apps")]
+#[path = "ring3/runtime.rs"]
+mod ring3;
+#[cfg(feature = "ring3-apps")]
+#[path = "ring3/apps.rs"]
+mod ring3_app;
+#[cfg(feature = "ring3-apps")]
+#[path = "ring3/net.rs"]
+mod ring3_net;
+#[cfg(feature = "ring3-apps")]
+#[path = "ring3/shell.rs"]
+mod ring3_shell;
+#[path = "tasking/syscall.rs"]
+mod syscall;
+
+use alloc::boxed::Box;
+use core::fmt::Write;
+use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, Ordering};
+use devices::DeviceManager;
+use nc_arch::halt_forever;
+use nc_arch::time::Clock;
+use nc_desktop::{DesktopAction, DesktopState};
+use nc_gfx::compose::lerp_canvases;
+use nc_gfx::{present, present_region, Canvas, Rect};
+use nc_hal::{log, BootInfo, Platform};
+use nc_math::{ratio256, smoothstep256};
+use nc_mem::Arena;
+use nc_setup::{SetupAction, SetupState};
+use nc_splash::{Phase, Splash, SplashOptions};
+use process::ProcessManager;
+
+extern "C" {
+    static __kernel_bin_start: u8;
+    static __kernel_bin_end: u8;
+    static __kpt_text_start: u8;
+    static __kpt_text_end: u8;
+    static __kpt_rodata_start: u8;
+    static __kpt_rodata_end: u8;
+    static __kpt_rw_start: u8;
+    static __kpt_stack_start: u8;
+    static __kpt_image_end: u8;
+}
+
+#[global_allocator]
+static ALLOCATOR: nc_mem::LockedHeap = nc_mem::LockedHeap::empty();
+static PANICKING: AtomicBool = AtomicBool::new(false);
+
+// Çekirdek imajı 0x10_0000'dan en çok 14 MiB (bkz. kernel/linker.ld); arena/PMM bunun ÜSTÜNDE, 16 MiB'ta başlar.
+const ARENA_BASE: usize = 0x0100_0000;
+const INSTALL_KERNEL_MAX_BYTES: usize = 16 * 1024 * 1024;
+const FRAME_MS: u32 = 16;
+const TRANSITION_MS: u32 = 600;
+
+// Custom, non-usable BootInfo memory-region types published by nc-uefi.
+const BOOT_REGION_UEFI_INSTALL_IMAGE: u32 = 0x4E43_0003;
+const BOOT_REGION_STAGE2_IMAGE: u32 = 0x4E43_0004;
+const UEFI_INSTALL_IMAGE_MAGIC: u32 = 0x5545_4649; // "UEFI"
+
+fn find_boot_region(boot: &BootInfo, region_type: u32) -> Option<(u64, u64)> {
+    boot.memory_regions().iter().find_map(|region| {
+        if region.region_type == region_type && region.length != 0 {
+            Some((region.base, region.length))
+        } else {
+            None
+        }
+    })
+}
+
+// PAIR-028: Checked arithmetic ile guvenli Canvas olusturma
+fn new_canvas(arena: &mut Arena, width: usize, height: usize) -> Option<Canvas<'static>> {
+    if width == 0 || height == 0 || width > 4096 || height > 4096 {
+        nc_arch::serial::write_str("[new_canvas HATA] Gecersiz genislik/yukseklik siniri\n");
+        return None;
+    }
+    let count = match width.checked_mul(height) {
+        Some(c) => c,
+        None => {
+            nc_arch::serial::write_str("[new_canvas HATA] count carpim tasmasi\n");
+            return None;
+        }
+    };
+    let pixels = match arena.alloc_pixels(count) {
+        Some(p) => p,
+        None => {
+            nc_arch::serial::write_str("[new_canvas HATA] alloc_pixels None dondu (Arena kapasitesi asti)\n");
+            return None;
+        }
+    };
+    match Canvas::new(pixels, width, height) {
+        Some(c) => Some(c),
+        None => {
+            nc_arch::serial::write_str("[new_canvas HATA] Canvas::new dahili kontrolu basarisiz\n");
+            None
+        }
+    }
+}
+
+// PAIR-008 & PAIR-034: Sahte RAM tahminini kaldir, gercek kullanilabilir RAM'i dogrula
+fn detect_ram_bounds(boot: &BootInfo) -> Option<(usize, usize, usize)> {
+    let mut managed_usable: u64 = 0;
+    let mut best_base: u64 = ARENA_BASE as u64;
+    let mut best_end: u64 = 0;
+    let mut saw_unmapped_high_ram = false;
+
+    for region in boot.memory_regions() {
+        if region.is_usable() {
+            let raw_end = region.base.saturating_add(region.length);
+            if raw_end > nc_mem::MAX_PHYSICAL_ADDRESS { saw_unmapped_high_ram = true; }
+            let start = region.base.max(ARENA_BASE as u64);
+            let end = raw_end.min(nc_mem::MAX_PHYSICAL_ADDRESS);
+            if end > start {
+                managed_usable = managed_usable.saturating_add(end - start);
+                if end - start > best_end.saturating_sub(best_base) {
+                    best_base = start;
+                    best_end = end;
+                }
+            }
+        }
+    }
+
+    if saw_unmapped_high_ram {
+        nc_arch::serial::write_str("[PMM] 4 GiB ustu RAM bulundu fakat mevcut bootloader direct/identity map'i 4 GiB ile sinirli; bu bolge kullanilmayacak.\n");
+    }
+
+    // Bu boot ABI'si ve Stage2 mapping'i icin en az 16 MiB kesintisiz bolge gerekir.
+    if best_end <= best_base || best_end - best_base < 16 * 1024 * 1024 {
+        return None;
+    }
+    Some(((managed_usable / (1024 * 1024)).max(16) as usize, best_base as usize, best_end as usize))
+}
+
+#[cfg(feature = "kernel-paging")]
+fn install_kernel_page_tables(active: &platform::Active, boot: &BootInfo) {
+    use core::ptr::addr_of;
+    use nc_mem::kpt::{self, Expect, KernelLayout};
+
+    let sym = |p: *const u8| p as u64;
+    let fb = boot.framebuffer;
+    let fb_len = (fb.pitch as u64).saturating_mul(fb.height as u64);
+    let layout = unsafe {
+        KernelLayout {
+            text: (sym(addr_of!(__kpt_text_start)), sym(addr_of!(__kpt_text_end))),
+            rodata: (sym(addr_of!(__kpt_rodata_start)), sym(addr_of!(__kpt_rodata_end))),
+            rw: (sym(addr_of!(__kpt_rw_start)), sym(addr_of!(__kpt_image_end))),
+            guard_page: sym(addr_of!(__kpt_stack_start)),
+            framebuffer: if fb.address != 0 && fb_len != 0 { (fb.address, fb_len) } else { (0, 0) },
+        }
+    };
+
+    let mut samples = [(0u64, Expect::ReadWrite); 12];
+    let mut count = kpt::live_context_samples(&mut samples);
+    let map_bytes = (boot.memory_map_count as u64)
+        .saturating_mul(core::mem::size_of::<nc_hal::MemoryRegion>() as u64);
+    let extras = [
+        (nc_hal::BOOT_INFO_ADDRESS as u64, Expect::ReadWrite),
+        (boot.memory_map_addr, Expect::ReadWrite),
+        (boot.memory_map_addr.saturating_add(map_bytes.saturating_sub(1)), Expect::ReadWrite),
+        (nc_arch::apic::DEFAULT_LAPIC_BASE, Expect::ReadWrite),
+    ];
+    for (addr, expect) in extras {
+        if addr != 0 && count < samples.len() {
+            samples[count] = (addr, expect);
+            count += 1;
+        }
+    }
+
+    log!(
+        active,
+        "[KPT] imaj: text={:#x}..{:#x} rodata={:#x}..{:#x} rw={:#x}..{:#x} guard={:#x} fb={:#x}+{:#x}",
+        layout.text.0, layout.text.1, layout.rodata.0, layout.rodata.1,
+        layout.rw.0, layout.rw.1, layout.guard_page, layout.framebuffer.0, layout.framebuffer.1
+    );
+
+    match kpt::prepare(&layout, &samples[..count]) {
+        Ok(prepared) => {
+            log!(
+                active,
+                "[KPT] tablolar hazir ve dogrulandi: PML4={:#x} NX={} WC={} 4K-parca={} ornek={}",
+                prepared.pml4_phys, prepared.nx, prepared.wc, prepared.fine_chunks, count
+            );
+            log!(active, "[KPT] CR3 degistiriliyor. Bundan sonra cikti yoksa: qemu -d int,cpu_reset -no-reboot (docs/ring3/RING3_YOL_HARITASI.md)");
+            unsafe {
+                nc_arch::outb(0xE9, b'K');
+                let old_cr3 = kpt::activate(&prepared);
+                nc_arch::outb(0xE9, b'P');
+                nc_arch::outb(0xE9, b'T');
+                log!(
+                    active,
+                    "[KPT OK] CR3 {:#x} -> {:#x}: W^X, NX, yigin koruma sayfasi, WP acik. Firmware tablolari artik kullanilmiyor.",
+                    old_cr3,
+                    nc_mem::paging::read_cr3()
+                );
+            }
+        }
+        Err(error) => {
+            log!(
+                active,
+                "[KPT ATLANDI] {:?} -- firmware sayfa tablolariyla devam ediliyor (UEFI'de PMM/heap firmware tablolarini ezebilir).",
+                error
+            );
+        }
+    }
+}
+
+fn detect_is_uefi(boot: &BootInfo) -> bool {
+    // 1. nc-uefi tarafindan set edilen BootInfo bayragi
+    if boot.framebuffer.reserved == 1 {
+        return true;
+    }
+
+    // 2. Donanimsal Dogrulama: stage2.asm CR3 sayfa tablosunu daima 0x1000 yapar.
+    // UEFI firmware ise sayfa tablolarini dinamik yuksek bellege acar.
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+    }
+    cr3 != 0x1000
+}
+
+// PAIR-035: Timeout korumali COM2 gonderimi
+unsafe fn send_com2_bytes_bounded(bytes: &[u8]) {
+    if nc_arch::inb(0x2F8 + 5) == 0xFF {
+        return;
+    }
+    for &b in bytes {
+        let mut spins = 0u32;
+        while (nc_arch::inb(0x2F8 + 5) & 0x20) == 0 {
+            spins += 1;
+            if spins > 50_000 {
+                return;
+            }
+            core::hint::spin_loop();
+        }
+        nc_arch::outb(0x2F8, b);
+    }
+}
+
+// Gecis animasyonu sirasinda bloklamadan calisan PIT melodisi
+unsafe fn update_async_chime(elapsed_ms: u32) {
+    const NOTES: [(u32, u32, u32); 4] = [
+        (0, 90, 523),
+        (90, 180, 659),
+        (180, 290, 784),
+        (290, 510, 1046),
+    ];
+    let mut active_freq = 0u32;
+    for &(start, end, freq) in &NOTES {
+        if elapsed_ms >= start && elapsed_ms < end {
+            active_freq = freq;
+            break;
+        }
+    }
+    if active_freq > 0 {
+        let div = 1_193_182 / active_freq;
+        nc_arch::outb(0x43, 0xB6);
+        nc_arch::outb(0x42, (div & 0xFF) as u8);
+        nc_arch::outb(0x42, ((div >> 8) & 0xFF) as u8);
+        let tmp = nc_arch::inb(0x61);
+        if (tmp & 3) != 3 {
+            nc_arch::outb(0x61, tmp | 3);
+        }
+    } else {
+        let tmp = nc_arch::inb(0x61);
+        if (tmp & 3) != 0 {
+            nc_arch::outb(0x61, tmp & 0xFC);
+        }
+    }
+}
+
+fn play_and_wait(clock: &mut Clock, sound: nc_audio::Sound, max_ms: u32) {
+    if !nc_audio::play(sound) {
+        return;
+    }
+    let start = clock.now_ms();
+    let mut idle_since: Option<u32> = None;
+    loop {
+        let now = clock.now_ms();
+        nc_audio::pump();
+        let elapsed = now.wrapping_sub(start);
+        if elapsed >= max_ms {
+            break;
+        }
+        if !nc_audio::busy() {
+            let since = *idle_since.get_or_insert(now);
+            if now.wrapping_sub(since) >= 160 {
+                break;
+            }
+        }
+        clock.sleep_until(now.wrapping_add(4));
+    }
+}
+
+fn log_audio_stats<P: nc_hal::Platform>(active: &P, label: &str) {
+    let stats = nc_audio::stats();
+    log!(
+        active,
+        "[Ses] {}: {} yuva calindi, {} kopma, tampon derinligi {} yuva, hacim %{}",
+        label,
+        stats.slots_pushed,
+        stats.underruns,
+        stats.lead_slots,
+        nc_audio::volume()
+    );
+}
+
+#[cfg(feature = "audio-selftest")]
+fn audio_selftest<P: nc_hal::Platform>(active: &P, clock: &mut Clock) {
+    use nc_audio::Sound;
+    if !nc_audio::available() {
+        log!(active, "[Ses-test] ses motoru yok, test atlandi");
+        return;
+    }
+    while nc_audio::busy() {
+        let now = clock.now_ms();
+        nc_audio::pump();
+        clock.sleep_until(now.wrapping_add(4));
+    }
+    let order = [
+        Sound::Click, Sound::Open, Sound::Close, Sound::VolumeTick, Sound::Notify, Sound::Success,
+        Sound::Warning, Sound::Error, Sound::Lock, Sound::Unlock, Sound::Connect, Sound::Disconnect,
+        Sound::Shutdown,
+    ];
+    for sound in order {
+        log!(active, "[Ses-test] {:?}", sound);
+        play_and_wait(clock, sound, 2500);
+    }
+    #[cfg(feature = "ring3-apps")]
+    app_audio_selftest(active, clock);
+    log_audio_stats(active, "ses-testi bitti");
+}
+
+#[cfg(all(feature = "audio-selftest", feature = "ring3-apps"))]
+fn app_audio_selftest<P: nc_hal::Platform>(active: &P, clock: &mut Clock) {
+    use nc_abi::shell as wire;
+    use ring3_shell::{handle, Caller};
+    let caller = Caller { pid: 4242, app_id: "nc.selftest", caps: nc_caps::AUDIO_PLAY | nc_caps::NOTIFY_POST };
+    let nocaps = Caller { pid: 4243, app_id: "nc.nocaps", caps: 0 };
+    let mut failures = 0u32;
+    let mut check = |name: &str, ok: bool| {
+        if !ok {
+            failures += 1;
+        }
+        log!(active, "[Ses-test] uygulama sesi: {} -> {}", name, if ok { "GECTI" } else { "KALDI" });
+    };
+
+    check("yetkisiz cagri reddedilir", handle(&nocaps, wire::OP_SOUND_PLAY, wire::SOUND_CLICK, 0, 0, &[]).0 == wire::ERR_DENIED);
+    check("gecersiz ses numarasi", handle(&caller, wire::OP_SOUND_PLAY, 99, 0, 0, &[]).0 == wire::ERR_BAD_REQUEST);
+    check("gecersiz orneklem hizi", handle(&caller, wire::OP_STREAM_OPEN, 100, 1, 0, &[]).0 == wire::ERR_BAD_REQUEST);
+
+    let (status, payload) = handle(&caller, wire::OP_STREAM_OPEN, 22_050, 1, 0, &[]);
+    check("akis acilir", status == 0 && payload.len() == 4);
+    let id = if payload.len() == 4 { u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) } else { 0 };
+    check("baska uygulama akisa yazamaz", handle(&nocaps, wire::OP_STREAM_STATUS, id, 0, 0, &[]).0 == wire::ERR_DENIED);
+
+    let total_frames = 11_025usize;
+    let mut offset = 0usize;
+    let started = clock.now_ms();
+    while offset < total_frames && clock.now_ms().wrapping_sub(started) < 4_000 {
+        nc_audio::pump();
+        let take = (total_frames - offset).min(2_048);
+        let mut bytes = alloc::vec::Vec::with_capacity(take * 2);
+        for n in offset..offset + take {
+            let high = (n * 880 * 2 / 22_050) % 2 == 0;
+            let sample: i16 = if high { 7_000 } else { -7_000 };
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        let (status, reply) = handle(&caller, wire::OP_STREAM_WRITE, id, 0, 0, &bytes);
+        if status != 0 || reply.len() != 4 {
+            break;
+        }
+        offset += u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize;
+        let now = clock.now_ms();
+        clock.sleep_until(now.wrapping_add(8));
+    }
+    check("0,5 sn PCM akisi tamamen kabul edildi", offset == total_frames);
+    let (status, _) = handle(&caller, wire::OP_STREAM_CLOSE, id, 0, 0, &[]);
+    check("akis kapatilir", status == 0);
+    let wait_from = clock.now_ms();
+    while clock.now_ms().wrapping_sub(wait_from) < 1_500 && (nc_audio::busy() || clock.now_ms().wrapping_sub(wait_from) < 300) {
+        nc_audio::pump();
+        let now = clock.now_ms();
+        clock.sleep_until(now.wrapping_add(8));
+    }
+    check("akis bosaldiktan sonra motor bosta", !nc_audio::busy());
+
+    let a = handle(&caller, wire::OP_STREAM_OPEN, 8_000, 1, 0, &[]).0;
+    let b = handle(&caller, wire::OP_STREAM_OPEN, 8_000, 2, 0, &[]).0;
+    let c = handle(&caller, wire::OP_STREAM_OPEN, 8_000, 1, 0, &[]).0;
+    check("uygulama basina en cok 2 akis", a == 0 && b == 0 && c == wire::ERR_LIMIT);
+    ring3_shell::release(4242);
+    check("kapanan uygulamanin akislari serbest", handle(&caller, wire::OP_STREAM_OPEN, 8_000, 1, 0, &[]).0 == 0);
+    ring3_shell::release(4242);
+
+    let mut payload = [0u8; 64];
+    let length = wire::encode_notify_payload(&mut payload, "Deneme", "govde").unwrap_or(0);
+    nc_app::notify::drain();
+    nc_app::notify::forget_permission("nc.selftest");
+    check("bildirim kuyruga girer", handle(&caller, wire::OP_NOTIFY_POST, wire::LEVEL_SUCCESS, 0, 0, &payload[..length]).0 == 0 && nc_app::notify::pending() == 1);
+    nc_app::notify::drain();
+    check("izin durumu 'sor'", handle(&caller, wire::OP_NOTIFY_STATE, 0, 0, 0, &[]).1 == [wire::PERM_ASK]);
+    nc_app::notify::set_permission("nc.selftest", nc_app::notify::Permission::Denied);
+    check("reddedilmis uygulama bildirim gonderemez", handle(&caller, wire::OP_NOTIFY_POST, 0, 0, 0, &payload[..length]).0 == wire::ERR_DENIED);
+    check("reddedilen bildirim kuyruga girmedi", nc_app::notify::pending() == 0);
+    nc_app::notify::forget_permission("nc.selftest");
+    check("bozuk bildirim yuku", handle(&caller, wire::OP_NOTIFY_POST, 0, 0, 0, &[1, 2, 3]).0 == wire::ERR_BAD_REQUEST);
+    check("yetkisiz bildirim", handle(&nocaps, wire::OP_NOTIFY_POST, 0, 0, 0, &payload[..length]).0 == wire::ERR_DENIED);
+    log!(active, "[Ses-test] uygulama sesi ozeti: {} basarisiz", failures);
+}
+
+#[no_mangle]
+pub extern "C" fn kernel_main() -> ! {
+    unsafe {
+        core::arch::asm!("cli");
+        nc_arch::disable_pic();
+    }
+
+    let mut active = platform::create();
+    active.init();
+    log!(&active, "NetizenCore cekirdegi basladi, platform: {}", active.name());
+
+    let boot = match unsafe { BootInfo::read_from_boot_address() } {
+        Some(boot) => boot,
+        None => {
+            log!(&active, "boot bilgisi gecersiz");
+            halt_forever()
+        }
+    };
+
+    #[cfg(feature = "kernel-paging")]
+    install_kernel_page_tables(&active, &boot);
+    #[cfg(not(feature = "kernel-paging"))]
+    log!(&active, "[KPT] kapali (kernel-paging ozelligi yok): firmware sayfa tablolari kullaniliyor.");
+
+    let framebuffer = boot.framebuffer;
+    let mut clock = Clock::calibrate();
+    #[cfg(feature = "ring3-apps")]
+    ring3::set_tsc_per_ms(clock.ticks_per_ms());
+    let width = framebuffer.width as usize;
+    let height = framebuffer.height as usize;
+
+    let (total_ram_mb, usable_base, usable_limit) = match detect_ram_bounds(&boot) {
+        Some(bounds) => bounds,
+        None => {
+            log!(&active, "Kritik hata: Gecerli E820/UEFI bellek haritasi bulunamadi");
+            halt_forever()
+        }
+    };
+
+    let total_avail = usable_limit.saturating_sub(usable_base);
+    let canvas_bytes = match width.checked_mul(height).and_then(|px| px.checked_mul(4)) {
+        Some(b) if b > 0 => b,
+        _ => halt_forever(),
+    };
+
+    // Arena, PMM ve heap birbirinden ayri araliklarda tutulur. PMM birden fazla usable
+    // firmware region'ini alir; ana region'da arena ve heap icin alan korunur.
+    let arena_target = canvas_bytes.saturating_mul(12).max(64 * 1024 * 1024);
+    let arena_size = arena_target.min(total_avail / 4) & !0xFFF;
+    let arena_base = usable_base;
+    let arena_end = match arena_base.checked_add(arena_size) { Some(v) => v, None => halt_forever() };
+    let pmm_base = match arena_end.checked_add(0xFFF) { Some(v) => v & !0xFFF, None => halt_forever() };
+    let pmm_room = usable_limit.saturating_sub(pmm_base).saturating_sub(16 * 1024 * 1024);
+    if arena_size == 0 || pmm_room < 16 * 1024 * 1024 {
+        log!(&active, "Kritik hata: Arena/PMM/heap icin yeterli kesintisiz RAM yok");
+        halt_forever();
+    }
+    let pmm_size = (pmm_room / 3).min(512 * 1024 * 1024).max(16 * 1024 * 1024) & !0xFFF;
+    let pmm_end = match pmm_base.checked_add(pmm_size) { Some(v) => v, None => halt_forever() };
+    let heap_base = pmm_end as usize;
+    let heap_size = usable_limit.saturating_sub(heap_base);
+    if heap_size < 16 * 1024 * 1024 {
+        log!(&active, "Kritik hata: Heap icin en az 16 MiB kesintisiz RAM yok");
+        halt_forever();
+    }
+
+    // Keep a generous bounded staging array before PMM is online. Overflow is fatal,
+    // never a silent loss of firmware-described usable memory regions.
+    let mut pmm_regions = [nc_mem::PhysicalRegion::default(); 2048];
+    let mut pmm_region_count = 0usize;
+    for region in boot.memory_regions() {
+        if !region.is_usable() { continue; }
+        let raw_end = region.base.saturating_add(region.length);
+        let region_start = region.base.max(ARENA_BASE as u64);
+        let start = region.base.max(16 * 1024 * 1024);
+        let end = raw_end.min(nc_mem::MAX_PHYSICAL_ADDRESS);
+        if end <= start { continue; }
+
+        // Best/contiguous region: only its dedicated PMM slice is given to the allocator.
+        // `MemoryRegion` stores physical addresses as u64, while the selected
+        // contiguous arena bounds are kept as usize for Arena/heap APIs. The
+        // kernel target is x86_64 and detect_ram_bounds clamps these values to
+        // MAX_PHYSICAL_ADDRESS (currently <= 4 GiB), so this conversion is safe.
+        if region_start == usable_base as u64 && end == usable_limit as u64 {
+            if pmm_end > pmm_base && pmm_region_count < pmm_regions.len() {
+                pmm_regions[pmm_region_count] = nc_mem::PhysicalRegion { start: pmm_base as u64, end: pmm_end as u64 };
+                pmm_region_count += 1;
+            }
+        } else if pmm_region_count < pmm_regions.len() {
+            // Other firmware-verified usable regions are PMM-owned, never guessed/fallback RAM.
+            pmm_regions[pmm_region_count] = nc_mem::PhysicalRegion { start, end };
+            pmm_region_count += 1;
+        } else {
+            log!(&active, "Kritik hata: PMM memory-map region limiti (2048) asildi; sessiz RAM kesilmesi engellendi");
+            halt_forever();
+        }
+    }
+
+    if pmm_region_count == 0 {
+        log!(&active, "Kritik hata: Firmware haritasinda PMM icin usable frame yok");
+        halt_forever();
+    }
+
+    let mut arena = unsafe { Arena::new(arena_base, arena_size) };
+    unsafe {
+        ALLOCATOR.init(heap_base, heap_size);
+        if nc_mem::init_pmm(&pmm_regions[..pmm_region_count]).is_err() {
+            log!(&active, "Kritik hata: PMM baslatilamadi; firmware memory map gecersiz veya frame yok");
+            halt_forever();
+        }
+    }
+    log!(&active, "Bellek: {} MiB firmware usable / PMM managed frame: {} / PMM free frame: {}",
+        total_ram_mb, nc_mem::managed_frame_count(), nc_mem::free_frame_count());
+    log!(&active, "PMM invalid/double free denemesi: {}", nc_mem::invalid_free_count());
+
+    nc_arch::idt::init();
+
+    // Faz 1: Sayfa tablosu, W^X, U/S=0 ve TSS.RSP0 doğrulama testleri
+    match nc_mem::run_phase1_vm_self_test() {
+        Ok(()) => log!(
+            &active,
+            "[Faz 1 OK] PMM/VMM (Boş 4K Frame: {}), W^X, U/S=0 ve Ring-3 GDT/TSS hazir.",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 1 KRITIK HATA] Bellek koruma testi basarisiz: {}", e);
+            // Tani: aktif sayfa tablosunun 0x100000 icin ham girdileri (UEFI/OVMF 1 GiB sayfa vb. teshisi).
+            let cur = nc_mem::paging::AddressSpace::current();
+            let w = cur.debug_walk(0x0010_0000);
+            log!(&active, "[Faz 1 tani] CR3={:#x} PML4E={:#x} PDPTE={:#x} PDE={:#x} PTE={:#x}",
+                cur.pml4_phys, w[0], w[1], w[2], w[3]);
+            halt_forever();
+        }
+    }
+
+    // Faz 2: Ring 3 CPL=3 çalıştırma, int 0x80 Syscall ABI ve ud2/EFAULT izolasyon testi
+    let mut phase2_pm = ProcessManager::new();
+    match syscall::run_phase2_ring3_smoke_tests(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 2 OK] Ring-3 CPL=3 yurutme, int 0x80 Syscall ABI, EFAULT/ud2 izolasyonu ve bellek geri alimi dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 2 KRITIK HATA] Ring-3 duman testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    // Faz 3: Handle tablosu, süreç bazlı capability doğrulaması ve GUI command buffer testi
+    match syscall::run_phase3_isolation_tests(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 3 OK] Handle tablosu, per-process yetki denetimi (EACCES) ve GUI batch cizim ABI dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 3 KRITIK HATA] Faz 3 yetki testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    match syscall::run_phase4_hardening_and_benchmarks(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 4 OK] TSC Benchmark, CR0.WP/SMEP/IOPL=0 sertlestirmesi, 2-surec bellek gizliligi ve #GP (cli) engeli dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 4 KRITIK HATA] Faz 4 sertlestirme testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    match syscall::run_phase5_modernization_suite(&mut phase2_pm) {
+        Ok(()) => log!(
+            &active,
+            "[Faz 5 OK] Fast SYSCALL/SYSRET, Local APIC/SMP, Zero-Copy IPC, C-Space CapRef ve Demand Paging/CoW dogrulandi (Boş 4K Frame: {}).",
+            nc_mem::free_frame_count()
+        ),
+        Err(e) => {
+            log!(&active, "[FAZ 5 KRITIK HATA] Modernizasyon testi basarisiz: {}", e);
+            halt_forever();
+        }
+    }
+
+    let drv_reg = nc_driver::init();
+    log!(&active, "{}", drv_reg.status_log);
+    let audio_ready = match nc_audio::init() {
+        Ok(()) => {
+            log!(&active, "[Ses] AC'97 akis motoru hazir: 48 kHz stereo, 32 yuvali halka, kesmesiz.");
+            true
+        }
+        Err(reason) => {
+            log!(&active, "[Ses] ses donanimi kullanilamiyor ({:?}); PC hoparlor yedegi kullanilacak.", reason);
+            false
+        }
+    };
+    log!(&active, "[DysonSphere] Headless yetki ve politika motoru aktif (Default-Deny)");
+
+    let is_installed = nc_storage::find_installed_disk().is_some();
+
+    #[cfg(feature = "ring3-apps")]
+    let ring3_ready = match ring3::run_phase6_ring3_app_test(&mut phase2_pm) {
+        Ok(()) => {
+            log!(
+                &active,
+                "[Faz 6 OK] Ring 3 ELF yolu: yukleyici, olay-tabanli calisma, cizim IPC'si (klipli), VFS dosya kopru, watchdog, hata izolasyonu ve bellek sizintisizligi dogrulandi (Boş 4K Frame: {}).",
+                nc_mem::free_frame_count()
+            );
+            true
+        }
+        Err(reason) => {
+            log!(
+                &active,
+                "[FAZ 6 HATA] Ring 3 uygulama yolu dogrulanamadi: {} -- Ring 3 uygulamalari bu oturumda KULLANILMAYACAK.",
+                reason
+            );
+            false
+        }
+    };
+    #[cfg(not(feature = "ring3-apps"))]
+    log!(&active, "[Faz 6] kapali (ring3-apps ozelligi yok).");
+
+    log!(
+        &active,
+        "[GOP TAMPON] Çözünürlük: {}x{}, Kare Boyutu: {} KB, Boş Arena: {} KB",
+        width,
+        height,
+        canvas_bytes / 1024,
+        arena.remaining() / 1024
+    );
+
+    let mut screen = match new_canvas(&mut arena, width, height) {
+        Some(canvas) => canvas,
+        None => {
+            log!(&active, "Kritik Hata: 'screen' tamponu icin arena yetersiz!");
+            halt_forever();
+        }
+    };
+    let mut work_screen = match new_canvas(&mut arena, width, height) {
+        Some(canvas) => canvas,
+        None => {
+            log!(&active, "Kritik Hata: 'work_screen' tamponu icin arena yetersiz!");
+            halt_forever();
+        }
+    };
+    let mut wallpaper = match new_canvas(&mut arena, width, height) {
+        Some(canvas) => canvas,
+        None => {
+            log!(&active, "Kritik Hata: 'wallpaper' tamponu icin arena yetersiz!");
+            halt_forever();
+        }
+    };
+
+    // --- YENİ EKLENEN DYSONSPHERE FAZ 5: TRUSTED BOOT KİLİDİ ---
+    if is_installed {
+        if let Err(reason) = nc_storage::verify_boot_integrity() {
+            log!(&active, "[FATAL BOOTLOADER LOCK] THE SYSTEM HAS BEEN DESTROYED: {}", reason);
+            // Ekranı koyu kan kırmızısına boya
+            screen.fill_rect(0, 0, width as i32, height as i32, nc_gfx::rgb(140, 12, 18));
+            // Ortaya uyarı kutusu çiz
+            let box_w = (width as i32 - 120).min(680);
+            let box_h = 220;
+            let bx = (width as i32 - box_w) / 2;
+            let by = (height as i32 - box_h) / 2;
+            nc_ui::draw_panel(
+                &mut screen,
+                nc_gfx::Rect::new(bx, by, box_w, box_h),
+                12,
+                nc_gfx::rgb(24, 10, 14),
+                245,
+                nc_gfx::rgb(255, 70, 70),
+                255,
+            );
+            let title_st = nc_ui::text_style(22, 16);
+            let sub_st = nc_ui::text_style(13, 15);
+            nc_ui::draw_text_color(
+                &mut screen,
+                "THE SYSTEM HAS BEEN DESTROYED",
+                bx + 40,
+                by + 45,
+                &title_st,
+                nc_gfx::rgb(255, 80, 80),
+            );
+            nc_ui::draw_text_color(
+                &mut screen,
+                "DysonSphere Bootloader Lock: Non-data partition integrity check failed.",
+                bx + 40,
+                by + 100,
+                &sub_st,
+                nc_ui::WHITE,
+            );
+            nc_ui::draw_text_color(
+                &mut screen,
+                reason,
+                bx + 40,
+                by + 135,
+                &sub_st,
+                nc_gfx::rgb(255, 190, 120),
+            );
+            nc_ui::draw_text_color(
+                &mut screen,
+                "System halted to prevent unauthorized execution. Reinstall OS from ISO.",
+                bx + 40,
+                by + 170,
+                &sub_st,
+                nc_gfx::rgb(180, 180, 190),
+            );
+            unsafe {
+                present(&screen, &framebuffer);
+            }
+            if audio_ready {
+                play_and_wait(&mut clock, nc_audio::Sound::Error, 1500);
+            }
+            halt_forever();
+        }
+        log!(&active, "[DysonSphere] Verified Boot OK: /boot, /system ve /security muhurleri dogrulandi.");
+    }
+
+
+    nc_ui::draw_backdrop(&mut screen);
+    unsafe {
+        present(&screen, &framebuffer);
+    }
+
+    let splash_opts = if is_installed {
+        SplashOptions { subtitle: None }
+    } else {
+        SplashOptions { subtitle: Some("PREPARING SETUP") }
+    };
+
+    let mut splash = match Splash::new(&screen, &mut arena, splash_opts) {
+        Some(splash) => splash,
+        None => halt_forever(),
+    };
+
+    let mut preparation = prepare::Preparation::new(clock.now_ms());
+    if audio_ready {
+        nc_audio::play(nc_audio::Sound::Startup);
+    } else {
+        unsafe {
+            send_com2_bytes_bounded(b"CMD:STARTUP_SOUND\n");
+        }
+    }
+    loop {
+        let now = clock.now_ms();
+        nc_audio::pump();
+        if preparation.poll(now) {
+            splash.request_finish();
+        }
+        let update = splash.frame(&mut screen, now);
+        for index in 0..update.count {
+            unsafe {
+                present_region(&screen, &framebuffer, update.rects[index]);
+            }
+        }
+        if splash.phase() == Phase::Done {
+            break;
+        }
+        clock.sleep_until(now.wrapping_add(FRAME_MS));
+    }
+
+    #[cfg(feature = "audio-selftest")]
+    audio_selftest(&active, &mut clock);
+    log_audio_stats(&active, "acilis sonrasi");
+
+    let mut device_manager = DeviceManager::new();
+    for dev in preparation.take_disks() {
+        device_manager.register_block_device(dev);
+    }
+
+    nc_input::init();
+    let ps2 = nc_input::Ps2Input::new(width as i32 / 2, height as i32 / 2);
+    device_manager.register_input_device(Box::new(ps2));
+
+    if !is_installed {
+        let mut setup_state = SetupState::new(device_manager.block_infos());
+        wallpaper.copy_rect_from(&screen, 0, 0, 0, 0, width as i32, height as i32);
+        let (mouse, _) = device_manager.poll_input(width as i32, height as i32);
+        nc_setup::draw(&mut work_screen, active.name(), &mut setup_state, &mouse);
+
+        let transition_start = clock.now_ms();
+        loop {
+            let now = clock.now_ms();
+            nc_audio::pump();
+            let progress = ratio256(now.wrapping_sub(transition_start), TRANSITION_MS);
+            lerp_canvases(&mut screen, &wallpaper, &work_screen, smoothstep256(progress));
+            unsafe {
+                present(&screen, &framebuffer);
+            }
+            if progress >= 256 {
+                break;
+            }
+            clock.sleep_until(now.wrapping_add(FRAME_MS));
+        }
+
+        let mut written_partitions = false;
+        let mut install_attempts = 0u8;
+        let mut last_setup_cursor = (mouse.x, mouse.y);
+        screen.copy_rect_from(&work_screen, 0, 0, 0, 0, width as i32, height as i32);
+        nc_ui::draw_cursor(&mut screen, mouse.x, mouse.y);
+        unsafe {
+            present(&screen, &framebuffer);
+        }
+
+        loop {
+            let now = clock.now_ms();
+            nc_audio::pump();
+            let (mouse, key) = device_manager.poll_input(width as i32, height as i32);
+            let action = setup_state.update(&mouse, key, width as i32, height as i32);
+
+            // PAIR-029: Kurulum yazma sonucunu dogrula, basarisizsa en fazla 3 kez dene
+            if setup_state.step < 2 && !written_partitions {
+                install_attempts = 0;
+            }
+
+            // C-01, H-01 & 5.3: Gercek donanim kanalini dogrula, UEFI imajini zorunlu kil ve sonucu UI'ya bildir
+            if setup_state.step == 2 && !written_partitions && install_attempts < 3 {
+                install_attempts += 1;
+                let is_uefi_system = detect_is_uefi(&boot);
+
+                let target_channel = match setup_state.selected_disk_channel() {
+                    Some(ch) => ch,
+                    None => {
+                        setup_state.fail_install(
+                            "Secilen disk kurulum icin uygun degil veya kapasitesi 3.4 GB altinda.",
+                        );
+                        continue;
+                    }
+                };
+
+                let uefi_slice = if is_uefi_system {
+                    find_boot_region(&boot, BOOT_REGION_UEFI_INSTALL_IMAGE).and_then(|(base, length)| {
+                        if length < 8 || base == 0 { return None; }
+                        unsafe {
+                            let ptr = base as *const u8;
+                            let magic = core::ptr::read_unaligned(ptr as *const u32);
+                            let size = core::ptr::read_unaligned(ptr.add(4) as *const u32) as usize;
+                            if magic == UEFI_INSTALL_IMAGE_MAGIC
+                                && size > 0
+                                && size <= length.saturating_sub(8) as usize
+                            {
+                                Some(core::slice::from_raw_parts(ptr.add(8), size))
+                            } else {
+                                None
+                            }
+                        }
+                    })
+                } else {
+                    None
+                };
+
+                // Bolum 5.3: UEFI sistemde BOOTX64.EFI yoksa kurulumu yarim birakma, hata ver
+                if is_uefi_system && uefi_slice.is_none() {
+                    log!(&active, "[HATA] UEFI ortami algilandi fakat gecerli BOOTX64.EFI bulunamadi");
+                    setup_state.fail_install(
+                        "UEFI sistemde BOOTX64.EFI imaji bulunamadi; kurulum guvenlik icin durduruldu.",
+                    );
+                    continue;
+                }
+
+                if let Some(mut target_disk) = nc_storage::find_install_target_disk(Some(target_channel)) {
+                    let stage2_location = if is_uefi_system {
+                        find_boot_region(&boot, BOOT_REGION_STAGE2_IMAGE)
+                    } else {
+                        Some((0x8800, 4096))
+                    };
+                    let stage2_slice = stage2_location.and_then(|(base, length)| {
+                        if base == 0 || length < 4096 { return None; }
+                        Some(unsafe { core::slice::from_raw_parts(base as *const u8, 4096) })
+                    });
+                    let kernel_bytes = unsafe {
+                        (&__kernel_bin_end as *const u8 as usize)
+                            .saturating_sub(&__kernel_bin_start as *const u8 as usize)
+                    };
+
+                    let install_success = if let (Some(stage2_slice), true) = (stage2_slice, kernel_bytes > 0 && kernel_bytes <= INSTALL_KERNEL_MAX_BYTES) {
+                        // UEFI reserves the linked 1 MiB kernel destination with AllocateAddress;
+                        // the legacy Stage2 contract continues to use its fixed physical address.
+                        let kernel_slice = unsafe { core::slice::from_raw_parts(0x100000 as *const u8, kernel_bytes) };
+                        if is_uefi_system {
+                            log!(&active, "[BOOT] Kanal {} uzerine UEFI + ESP kurulumu basliyor...", target_channel);
+                        } else {
+                            log!(&active, "[BOOT] Kanal {} uzerine Legacy BIOS kurulumu basliyor...", target_channel);
+                        }
+                        nc_storage::install_to_disk(&mut target_disk, stage2_slice, kernel_slice, uefi_slice).is_ok()
+                    } else {
+                        log!(&active, "[BOOT] Kurulum durduruldu: Stage2 bulunamadi veya cekirdek ({} bayt) 16 MiB kurulum sinirini asiyor.", kernel_bytes);
+                        false
+                    };
+
+                    if install_success {
+                        nc_storage::write_initial_locale(
+                            &mut target_disk,
+                            setup_state.selected_language_code(),
+                            setup_state.selected_keyboard_code(),
+                        );
+                        written_partitions = true;
+                        setup_state.complete_install();
+                        log!(
+                            &active,
+                            "Kurulum Kanal {} uzerinde basariyla tamamlandi ve dogrulandi ({})",
+                            target_channel,
+                            if is_uefi_system { "UEFI" } else { "Legacy" }
+                        );
+                    } else {
+                        log!(&active, "Disk kurulum hatasi (Kanal {}, deneme {}/3)", target_channel, install_attempts);
+                        if install_attempts >= 3 {
+                            setup_state.fail_install(
+                                "Boot payload'i bulunamadi veya disk yazma/GPT/ESP geri-okuma dogrulamasi basarisiz oldu.",
+                            );
+                        }
+                    }
+                } else {
+                    log!(&active, "Hedef disk (Kanal {}) erisilemez durumda", target_channel);
+                    if install_attempts >= 3 {
+                        setup_state.fail_install(
+                            "Secilen fiziksel disk kanali yanit vermiyor veya kapasite sinirini karsilamiyor.",
+                        );
+                    }
+                }
+            }
+
+            if nc_setup::draw(&mut work_screen, active.name(), &mut setup_state, &mouse) {
+                screen.copy_rect_from(&work_screen, 0, 0, 0, 0, width as i32, height as i32);
+                nc_ui::draw_cursor(&mut screen, mouse.x, mouse.y);
+                unsafe {
+                    present(&screen, &framebuffer);
+                }
+                last_setup_cursor = (mouse.x, mouse.y);
+            } else if (mouse.x, mouse.y) != last_setup_cursor {
+                let cw = nc_ui::CURSOR_WIDTH as i32;
+                let ch = nc_ui::CURSOR_HEIGHT as i32;
+                screen.copy_rect_from(&work_screen, last_setup_cursor.0, last_setup_cursor.1, last_setup_cursor.0, last_setup_cursor.1, cw, ch);
+                nc_ui::draw_cursor(&mut screen, mouse.x, mouse.y);
+                unsafe {
+                    present_region(&screen, &framebuffer, Rect::new(last_setup_cursor.0, last_setup_cursor.1, cw, ch));
+                    present_region(&screen, &framebuffer, Rect::new(mouse.x, mouse.y, cw, ch));
+                }
+                last_setup_cursor = (mouse.x, mouse.y);
+            }
+
+            if action == SetupAction::Reboot {
+                active.reboot();
+            }
+            clock.sleep_until(now.wrapping_add(FRAME_MS));
+        }
+    }
+
+    #[cfg(feature = "ring3-apps")]
+    let desktop_apps = {
+        let pm_ptr = &mut phase2_pm as *mut ProcessManager;
+        // Yükleyici, paket taramasından ÖNCE kaydedilir; Faz 6 geçmediyse hiçbir paket çalışmaz.
+        ring3_app::install_package_loader(ring3_ready, pm_ptr);
+        ring3_app::with_ring3_apps(nc_apps::builtin(), ring3_ready, pm_ptr)
+    };
+    #[cfg(not(feature = "ring3-apps"))]
+    let desktop_apps = nc_apps::builtin();
+    let mut desktop_state = DesktopState::new(active.name(), total_ram_mb as u32, desktop_apps);
+    desktop_state.set_lock_state(nc_storage::read_lock_state(), true);
+    nc_desktop::draw_wallpaper(&mut wallpaper, desktop_state.wallpaper_index());
+    desktop_state.take_wallpaper_dirty();
+    nc_desktop::draw(&mut work_screen, &wallpaper, &desktop_state);
+    desktop_state.take_dirty();
+
+    // Gecis animasyonu icin mevcut ekrani wallpaper uzerinde gecici tut
+    wallpaper.copy_rect_from(&screen, 0, 0, 0, 0, width as i32, height as i32);
+
+    // Masaustu gecis animasyonu ve PIT melodisi eszamanli calisir (510 ms donma yok)
+    let desktop_trans_start = clock.now_ms();
+    loop {
+        let now = clock.now_ms();
+        let elapsed = now.wrapping_sub(desktop_trans_start);
+        nc_audio::pump();
+        if !audio_ready {
+            unsafe {
+                update_async_chime(elapsed);
+            }
+        }
+        let progress = ratio256(elapsed, TRANSITION_MS);
+        lerp_canvases(&mut screen, &wallpaper, &work_screen, smoothstep256(progress));
+        unsafe {
+            present(&screen, &framebuffer);
+        }
+        if progress >= 256 {
+            if !audio_ready {
+                unsafe {
+                    update_async_chime(1000);
+                }
+            }
+            break;
+        }
+        clock.sleep_until(now.wrapping_add(FRAME_MS));
+    }
+
+    // Duvar kagidini asil haliyle geri ciz
+    nc_desktop::draw_wallpaper(&mut wallpaper, desktop_state.wallpaper_index());
+
+    let cursor_width = nc_ui::CURSOR_WIDTH as i32;
+    let cursor_height = nc_ui::CURSOR_HEIGHT as i32;
+    let desktop_start_time = clock.now_ms();
+    let (first_mouse, _) = device_manager.poll_input(width as i32, height as i32);
+
+    screen.copy_rect_from(&work_screen, 0, 0, 0, 0, width as i32, height as i32);
+    nc_ui::draw_cursor(&mut screen, first_mouse.x, first_mouse.y);
+    unsafe {
+        present(&screen, &framebuffer);
+    }
+
+    let mut process_manager = ProcessManager::new();
+    process_manager.init_system_services();
+
+    let mut last_cursor = (first_mouse.x, first_mouse.y);
+    loop {
+        let now = clock.now_ms();
+        nc_audio::pump();
+        process_manager.poll_all();
+        
+        let (mouse, key) = device_manager.poll_input(width as i32, height as i32);
+        let uptime_ms = now.wrapping_sub(desktop_start_time);
+        let action = desktop_state.update(&mouse, key, width as i32, height as i32, uptime_ms);
+
+        if let Some(success) = desktop_state.take_lock_attempt() {
+            nc_storage::record_lock_attempt(success);
+            nc_audio::play(if success { nc_audio::Sound::Unlock } else { nc_audio::Sound::Error });
+        }
+        if let Some(request) = desktop_state.take_lock_request() {
+            let mut secret = request.secret;
+            if let Ok(state) = nc_storage::apply_lock_request(request.kind, &secret) {
+                desktop_state.set_lock_state(state, false);
+            }
+            for byte in secret.iter_mut() {
+                *byte = 0;
+            }
+        }
+
+        if desktop_state.take_wallpaper_dirty() {
+            nc_desktop::draw_wallpaper(&mut wallpaper, desktop_state.wallpaper_index());
+        }
+
+        if desktop_state.take_dirty() {
+            nc_desktop::draw(&mut work_screen, &wallpaper, &desktop_state);
+            screen.copy_rect_from(&work_screen, 0, 0, 0, 0, width as i32, height as i32);
+            nc_ui::draw_cursor(&mut screen, mouse.x, mouse.y);
+            unsafe {
+                present(&screen, &framebuffer);
+            }
+            last_cursor = (mouse.x, mouse.y);
+        } else if (mouse.x, mouse.y) != last_cursor {
+            screen.copy_rect_from(&work_screen, last_cursor.0, last_cursor.1, last_cursor.0, last_cursor.1, cursor_width, cursor_height);
+            nc_ui::draw_cursor(&mut screen, mouse.x, mouse.y);
+            unsafe {
+                present_region(&screen, &framebuffer, Rect::new(last_cursor.0, last_cursor.1, cursor_width, cursor_height));
+                present_region(&screen, &framebuffer, Rect::new(mouse.x, mouse.y, cursor_width, cursor_height));
+            }
+            last_cursor = (mouse.x, mouse.y);
+        }
+
+        match action {
+            DesktopAction::Shutdown => {
+                play_and_wait(&mut clock, nc_audio::Sound::Shutdown, 2200);
+                active.shutdown(0)
+            }
+            DesktopAction::Reboot => {
+                play_and_wait(&mut clock, nc_audio::Sound::Shutdown, 2200);
+                active.reboot()
+            }
+            DesktopAction::None => {}
+        }
+
+        clock.sleep_until(now.wrapping_add(FRAME_MS));
+    }
+}
+
+struct EmergencySerial;
+
+impl Write for EmergencySerial {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        nc_arch::serial::write_str(s);
+        Ok(())
+    }
+}
+
+// PAIR-036: Tahsis yapmayan ve yeniden girise dayanikli acil durum panic handler
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+    if !PANICKING.swap(true, Ordering::SeqCst) {
+        let mut out = EmergencySerial;
+        let _ = writeln!(out, "\n[KERNEL PANIC] {}", info);
+    }
+    halt_forever()
+}

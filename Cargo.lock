@@ -324,6 +324,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg-encoder"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0370574b86f7eca156b9f298392b5e69a23f8c86f3f865add60bbc2e79467a6"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -397,7 +403,7 @@ dependencies = [
  "nc-font",
  "nc-gfx",
  "nc-js",
- "nc-net",
+ "nc-net-facade",
  "nc-ui",
 ]
 
@@ -439,12 +445,11 @@ name = "nc-app-settings"
 version = "0.1.0"
 dependencies = [
  "nc-app",
- "nc-arch",
- "nc-driver",
+ "nc-efra",
  "nc-font",
- "nc-fs",
+ "nc-fs-facade",
  "nc-gfx",
- "nc-net",
+ "nc-sys-facade",
  "nc-ui",
 ]
 
@@ -479,19 +484,45 @@ dependencies = [
  "nc-app-stopwatch",
  "nc-app-system",
  "nc-arch",
+ "nc-desktop",
  "nc-fs",
+ "nc-gfx",
+ "nc-hal",
  "nc-pkg",
 ]
 
 [[package]]
 name = "nc-arch"
 version = "0.1.0"
+dependencies = [
+ "nc-arch-aarch64",
+ "nc-arch-x86_64",
+]
+
+[[package]]
+name = "nc-arch-aarch64"
+version = "0.1.0"
+
+[[package]]
+name = "nc-arch-x86_64"
+version = "0.1.0"
 
 [[package]]
 name = "nc-assets"
 version = "0.1.0"
 dependencies = [
+ "jpeg-encoder",
  "png",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "nc-audio"
+version = "0.1.0"
+dependencies = [
+ "nc-assets",
+ "nc-driver",
+ "nc-hal",
 ]
 
 [[package]]
@@ -508,6 +539,7 @@ version = "0.1.0"
 dependencies = [
  "nc-app",
  "nc-assets",
+ "nc-audio",
  "nc-font",
  "nc-fs",
  "nc-gfx",
@@ -518,12 +550,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "nc-dev-qemu-virt"
+version = "0.1.0"
+dependencies = [
+ "nc-device",
+]
+
+[[package]]
+name = "nc-dev-rpi4"
+version = "0.1.0"
+dependencies = [
+ "nc-device",
+]
+
+[[package]]
+name = "nc-dev-x6826c"
+version = "0.1.0"
+dependencies = [
+ "nc-device",
+]
+
+[[package]]
+name = "nc-device"
+version = "0.1.0"
+dependencies = [
+ "nc-hal",
+]
+
+[[package]]
+name = "nc-device-select"
+version = "0.1.0"
+dependencies = [
+ "nc-dev-qemu-virt",
+ "nc-device",
+]
+
+[[package]]
 name = "nc-driver"
 version = "0.1.0"
 dependencies = [
  "nc-arch",
+ "nc-efra",
  "nc-hal",
 ]
+
+[[package]]
+name = "nc-efra"
+version = "0.1.0"
 
 [[package]]
 name = "nc-elf"
@@ -554,6 +627,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nc-fs-policy"
+version = "0.1.0"
+dependencies = [
+ "nc-caps",
+]
+
+[[package]]
 name = "nc-gfx"
 version = "0.1.0"
 dependencies = [
@@ -566,6 +646,10 @@ version = "0.1.0"
 
 [[package]]
 name = "nc-i18n"
+version = "0.1.0"
+
+[[package]]
+name = "nc-inflate"
 version = "0.1.0"
 
 [[package]]
@@ -593,6 +677,7 @@ dependencies = [
  "nc-app-host",
  "nc-apps",
  "nc-arch",
+ "nc-audio",
  "nc-caps",
  "nc-desktop",
  "nc-driver",
@@ -601,6 +686,7 @@ dependencies = [
  "nc-fs-facade",
  "nc-gfx",
  "nc-hal",
+ "nc-inflate",
  "nc-input",
  "nc-math",
  "nc-mem",
@@ -611,6 +697,29 @@ dependencies = [
  "nc-setup",
  "nc-splash",
  "nc-storage",
+ "nc-sys-facade",
+ "nc-ui",
+]
+
+[[package]]
+name = "nc-kernel-aarch64"
+version = "0.1.0"
+dependencies = [
+ "nc-abi",
+ "nc-arch",
+ "nc-caps",
+ "nc-device",
+ "nc-device-select",
+ "nc-elf",
+ "nc-font",
+ "nc-fs",
+ "nc-fs-policy",
+ "nc-gfx",
+ "nc-hal",
+ "nc-math",
+ "nc-mem",
+ "nc-pkg",
+ "nc-splash",
  "nc-ui",
 ]
 
@@ -648,6 +757,15 @@ dependencies = [
  "sha2",
  "webpki-roots 0.26.11",
  "x25519-dalek",
+]
+
+[[package]]
+name = "nc-net-facade"
+version = "0.1.0"
+dependencies = [
+ "nc-abi",
+ "nc-app-sdk",
+ "nc-net",
 ]
 
 [[package]]
@@ -696,6 +814,7 @@ dependencies = [
 name = "nc-setup"
 version = "0.1.0"
 dependencies = [
+ "nc-audio",
  "nc-driver",
  "nc-font",
  "nc-gfx",
@@ -723,6 +842,19 @@ dependencies = [
  "nc-crypto",
  "nc-driver",
  "nc-hal",
+]
+
+[[package]]
+name = "nc-sys-facade"
+version = "0.1.0"
+dependencies = [
+ "nc-abi",
+ "nc-app",
+ "nc-app-sdk",
+ "nc-arch",
+ "nc-driver",
+ "nc-efra",
+ "nc-net",
 ]
 
 [[package]]
