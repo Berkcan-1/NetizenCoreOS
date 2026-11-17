@@ -1,0 +1,16 @@
+[package]
+name = "nc-app-browser"
+version = "1.0.0"
+edition = "2021"
+
+[features]
+default = ["kernel-net"]
+kernel-net = ["nc-net/kernel"]
+
+[dependencies]
+nc-app = { path = "../../../crates/ui/nc-app" }
+nc-ui = { path = "../../../crates/ui/nc-ui" }
+nc-gfx = { path = "../../../crates/graphics/nc-gfx" }
+nc-font = { path = "../../../crates/graphics/nc-font" }
+nc-net = { package = "nc-net-facade", path = "../../../crates/runtime/nc-net-facade", default-features = false }
+nc-js = { path = "../nc-js" }

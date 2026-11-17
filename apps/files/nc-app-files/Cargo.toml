@@ -1,0 +1,24 @@
+[package]
+name = "nc-app-files"
+version = "0.1.0"
+edition = "2021"
+
+# `builtin-instances`: paketten "nc.settings/nc.system/nc.stopwatch" kurulurken Ring 0 örneklerini bağlar. Ring 3
+# Dosyalar bunları DERLEMEZ (Ayarlar'ın sürücü bağımlılıkları Ring 3 imajına girmesin).
+[features]
+default = ["builtin-instances", "kernel-fs"]
+builtin-instances = ["dep:nc-app-settings", "dep:nc-app-system", "dep:nc-app-stopwatch"]
+kernel-fs = ["nc-fs/kernel"]
+
+[dependencies]
+nc-app = { path = "../../../crates/ui/nc-app" }
+nc-gfx = { path = "../../../crates/graphics/nc-gfx" }
+nc-font = { path = "../../../crates/graphics/nc-font" }
+nc-ui = { path = "../../../crates/ui/nc-ui" }
+nc-pkg = { path = "../../../crates/runtime/nc-pkg" }
+# `nc_fs` adı cepheyi gösterir: çekirdek derlemesinde gerçek nc-fs, Ring 3 derlemesinde VFS hizmeti istemcisi.
+nc-fs = { package = "nc-fs-facade", path = "../../../crates/runtime/nc-fs-facade", default-features = false }
+nc-app-settings = { path = "../../settings/nc-app-settings", optional = true }
+nc-app-system = { path = "../../system/nc-app-system", optional = true }
+nc-app-stopwatch = { path = "../../stopwatch/nc-app-stopwatch", optional = true }
+nc-media = { path = "../../../crates/graphics/nc-media" }

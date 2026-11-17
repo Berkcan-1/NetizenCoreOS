@@ -1,0 +1,17 @@
+[package]
+name = "nc-app-settings"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["kernel-sys"]
+kernel-sys = ["nc-sys/kernel", "nc-fs/kernel"]
+
+[dependencies]
+nc-gfx = { path = "../../../crates/graphics/nc-gfx" }
+nc-font = { path = "../../../crates/graphics/nc-font" }
+nc-ui = { path = "../../../crates/ui/nc-ui" }
+nc-app = { path = "../../../crates/ui/nc-app" }
+nc-efra = { path = "../../../crates/foundation/nc-efra" }
+nc-sys = { package = "nc-sys-facade", path = "../../../crates/runtime/nc-sys-facade", default-features = false }
+nc-fs = { package = "nc-fs-facade", path = "../../../crates/runtime/nc-fs-facade", default-features = false }

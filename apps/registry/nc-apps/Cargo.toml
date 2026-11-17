@@ -1,0 +1,32 @@
+[package]
+name = "nc-apps"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["ring0-fallback"]
+ring0-fallback = [
+    "dep:nc-app-browser",
+    "dep:nc-app-settings",
+    "dep:nc-app-system",
+    "dep:nc-app-stopwatch",
+    "nc-app-files/builtin-instances",
+]
+
+[dependencies]
+nc-app = { path = "../../../crates/ui/nc-app" }
+nc-gfx = { path = "../../../crates/graphics/nc-gfx" }
+nc-arch = { path = "../../../crates/hardware/nc-arch" }
+nc-fs = { path = "../../../crates/services/nc-fs" }
+nc-pkg = { path = "../../../crates/runtime/nc-pkg" }
+nc-app-files = { path = "../../files/nc-app-files", default-features = false, features = ["kernel-fs"] }
+nc-app-browser = { path = "../../browser/nc-app-browser", optional = true }
+nc-app-settings = { path = "../../settings/nc-app-settings", optional = true }
+nc-app-system = { path = "../../system/nc-app-system", optional = true }
+nc-app-stopwatch = { path = "../../stopwatch/nc-app-stopwatch", optional = true }
+
+[dev-dependencies]
+nc-desktop = { path = "../../../crates/ui/nc-desktop" }
+nc-hal = { path = "../../../crates/foundation/nc-hal" }
+nc-gfx = { path = "../../../crates/graphics/nc-gfx" }
+nc-arch = { path = "../../../crates/hardware/nc-arch", features = ["host-sim"] }
