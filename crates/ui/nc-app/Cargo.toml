@@ -1,0 +1,12 @@
+[package]
+name = "nc-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-hal = { path = "../../foundation/nc-hal" }
+nc-i18n = { path = "../../foundation/nc-i18n" }
+nc-crypto = { path = "../../foundation/nc-crypto" }
+nc-gfx = { path = "../../graphics/nc-gfx" }
+nc-font = { path = "../../graphics/nc-font" }
+nc-ui = { path = "../nc-ui" }
