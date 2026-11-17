@@ -1,3 +1,7 @@
+
+<img width="2400" height="1350" alt="NetizenCore × Melvin (3)" src="https://github.com/user-attachments/assets/907bbed1-d36f-413f-8ef8-90f8a34d4e9b" />
+
+
 # NetizenCore
 
 Sıfırdan yazılan, Unix/Linux tabanlı olmayan işletim sistemi. Bootloader Assembly, çekirdek ve modüllerin tamamı Rust.
