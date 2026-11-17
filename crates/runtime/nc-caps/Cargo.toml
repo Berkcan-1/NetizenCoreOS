@@ -1,0 +1,7 @@
+[package]
+name = "nc-caps"
+version = "0.1.0"
+edition = "2021"
+
+# F-05: Yetki bitlerinin TEK kaynağı. Bağımlılığı yoktur; kernel ve nc-pkg aynı sabitleri kullanır.
+[dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "nc-arch"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+host-sim = ["nc-arch-x86_64/host-sim"]
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+nc-arch-x86_64 = { path = "../nc-arch-x86_64" }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+nc-arch-aarch64 = { path = "../../../aarch64crates/hardware/nc-arch-aarch64" }

@@ -1,0 +1,9 @@
+[package]
+name = "nc-driver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-arch = { path = "../nc-arch" }
+nc-hal = { path = "../../foundation/nc-hal" }
+nc-efra = { path = "../../foundation/nc-efra" }
