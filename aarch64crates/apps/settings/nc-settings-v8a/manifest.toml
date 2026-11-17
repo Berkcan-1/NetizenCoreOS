@@ -1,0 +1,7 @@
+id = "nc.settings"
+name = "Ayarlar"
+version = "1.0.0"
+icon = "settings"
+width_units = 36
+height_units = 24
+capabilities = settings.read, settings.write.display, settings.write.locale, fs.all.read, process.launch

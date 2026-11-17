@@ -1,0 +1,22 @@
+#![no_std]
+
+use nc_device::{Arch, DeviceProfile, DriverEntry, PsciConduit, UartKind, UiProfile, NO_DISPLAY};
+
+const DRIVERS: [DriverEntry; 0] = [];
+
+pub const PROFILE: DeviceProfile = DeviceProfile {
+    id: "__ID__",
+    display_name: "__NAME__",
+    soc: "__SOC__",
+    arch: Arch::Armv8a,
+    ui: UiProfile::Mobile,
+    ram: &[],
+    uart: UartKind::None,
+    uart_base: 0,
+    psci: PsciConduit::None,
+    gic_dist: 0,
+    gic_redist: 0,
+    display: NO_DISPLAY,
+    drivers: &DRIVERS,
+    register: None,
+};
