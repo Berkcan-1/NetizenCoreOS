@@ -651,20 +651,6 @@ Then open a pull request with:
 
 ---
 
-## Security Reports
-
-Please do not publish sensitive exploit details, private signing keys, or device-owner data in public issues. For a security-sensitive report, contact the project maintainer through a private channel before disclosing details publicly. Include the affected revision, architecture, reproducible steps, and relevant logs where safe to do so.
-
-This repository snapshot does not include a dedicated `SECURITY.md` policy. A formal security contact and disclosure process should be added before treating this section as a complete vulnerability-reporting policy.
-
----
-
-## License
-
-**No root-level `LICENSE` file was present in the supplied repository snapshot.** Therefore, this README intentionally does not assign an open-source license. Add a `LICENSE` file and confirm the licensing of bundled assets and third-party components before distributing the project or accepting contributions under a particular license.
-
----
-
 <div align="center">
   <sub>NetizenCore — an independent operating system research and development project.</sub>
 </div>
