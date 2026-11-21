@@ -1,0 +1,8 @@
+id = "nc.phone"
+name = "Telefon"
+version = "1.0.0"
+icon = "phone"
+width_units = 36
+height_units = 24
+capabilities = settings.read
+permissions = phone.call, call_log.read, contacts.read

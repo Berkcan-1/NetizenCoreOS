@@ -1,0 +1,8 @@
+id = "nc.messages"
+name = "Mesajlar"
+version = "1.0.0"
+icon = "messages"
+width_units = 36
+height_units = 24
+capabilities = settings.read
+permissions = sms.read, sms.send, contacts.read

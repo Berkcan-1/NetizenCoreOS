@@ -1,0 +1,42 @@
+[package]
+name = "nc-kernel-aarch64"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "kernel-aarch64"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+default = ["el0-selftest"]
+netizen-home = []
+el0-selftest = []
+ui-desktop = ["dep:nc-splash", "dep:nc-desktop", "dep:nc-app"]
+ui-mobile = ["netizen-home", "dep:nc-mobile-assets"]
+
+[dependencies]
+nc-abi = { path = "../crates/foundation/nc-abi" }
+nc-spark-sec = { path = "../crates/foundation/nc-spark-sec" }
+nc-crypto = { path = "../crates/foundation/nc-crypto" }
+nc-hal = { path = "../crates/foundation/nc-hal" }
+nc-math = { path = "../crates/foundation/nc-math" }
+nc-arch = { path = "../crates/hardware/nc-arch" }
+nc-device = { path = "../aarch64crates/hardware/nc-device" }
+nc-device-select = { path = "../aarch64crates/hardware/nc-device-select" }
+nc-mem = { path = "../crates/services/nc-mem" }
+nc-gfx = { path = "../crates/graphics/nc-gfx" }
+nc-media = { path = "../crates/graphics/nc-media" }
+nc-font = { path = "../crates/graphics/nc-font" }
+nc-ui = { path = "../crates/ui/nc-ui", features = ["remote"] }
+nc-caps = { path = "../crates/runtime/nc-caps" }
+nc-elf = { path = "../crates/runtime/nc-elf" }
+nc-fs-policy = { path = "../aarch64crates/runtime/nc-fs-policy" }
+nc-pkg = { path = "../crates/runtime/nc-pkg" }
+nc-fs = { path = "../crates/services/nc-fs", default-features = false }
+nc-mobile-assets = { path = "../aarch64crates/graphics/nc-mobile-assets", optional = true }
+nc-splash = { path = "../crates/ui/nc-splash", optional = true }
+nc-app = { path = "../crates/ui/nc-app", optional = true }
+nc-desktop = { path = "../crates/ui/nc-desktop", optional = true }

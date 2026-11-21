@@ -1,0 +1,12 @@
+<?xml version="1.0" ?>
+<gprconfig>
+  <configuration>
+    <config>
+      package Compiler is
+         for Required_Switches ("Ada") use
+           Compiler'Required_Switches ("Ada") &amp;
+           ("--RTS=${RUNTIME_DIR(ada)}");
+      end Compiler;
+    </config>
+  </configuration>
+</gprconfig>

@@ -1,0 +1,153 @@
+V "GNAT Lib v16"
+A -O2
+A -gnatA
+A -gnat2012
+A -gnatwa
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -fPIC
+A -mtune=generic
+A -march=x86-64
+P ZX
+
+RN
+RV NO_IMPLICIT_CONDITIONALS
+RV NO_DEFAULT_INITIALIZATION
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_IMPLICIT_LOOPS
+
+U nc_security_filesystem%b  nc_security_filesystem.adb  f9a95953 NE OO PK
+W interfaces%s		interfac.ads		interfac.ali
+
+U nc_security_filesystem%s  nc_security_filesystem.ads  e338a2bf NE OO PU PK
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_capabilities%s  nc_security_capabilities.adb  nc_security_capabilities.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D nc_security_capabilities.ads  20261121073905 e9272f41 nc_security_capabilities%s
+D nc_security_filesystem.ads  20261121073906 438dceea nc_security_filesystem%s
+D nc_security_filesystem.adb  20261121073350 2b356e78 nc_security_filesystem%b
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20260430083320 e2b7c99d system%s
+G a e
+G c Z s b [is_safe_path nc_security_filesystem 33 13 none]
+G c Z s b [check_access nc_security_filesystem 43 13 none]
+G c Z s s [bounded_pathIP nc_security_filesystem 26 9 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 3|16w6 16r36 4|5w6 5r22
+81M9*Unsigned_8
+95M9*Unsigned_64
+X 2 nc_security_capabilities.ads
+13K9*NC_Security_Capabilities 114e29 3|18w6 18r36
+16M12*Cap_Mask{1|95M9} 3|45r21 4|185r26 185r42 195r16 196r16 197r16 207r32
+. 219r21
+25m4*Cap_Fs_User_Read{16M12} 4|287r49 302r46 311r49
+26m4*Cap_Fs_User_Write{16M12} 4|289r49 313r49
+27m4*Cap_Fs_User_Delete{16M12} 4|291r49 315r49
+36m4*Cap_Fs_All_Read{16M12} 4|211r32 246r39 269r45 287r67 302r64 311r67
+37m4*Cap_Fs_All_Write{16M12} 4|213r32 289r68 291r69 313r68 315r69
+X 3 nc_security_filesystem.ads
+20K9*NC_Security_Filesystem 56l5 56e27 4|7b14 325l5 325t27
+23I12*Path_Length{natural} 27r14
+24A12*Path_Buf{5|24A9}<integer> 28r14
+26R9*Bounded_Path 29e14 33r34 46r21 4|18r14 40r14 62r15 176r34 220r21
+27i7*Len{23I12} 36r16 38r44 52r17 4|23r34 45r34 70r16 72r44 77r54 89r15 93r26
+. 102r15 108r29 125r46
+28a7*Data{24A12} 37r25 39r28 40r37 52r39 4|32r18 54r18 71r25 73r28 74r37
+. 89r36 96r20 96r48 97r18 97r44 109r15 130r26 145r26 151r26 152r26
+33V13*Is_Safe_Path{boolean} 33>27 35r12 49s16 4|176b13 183l8 183t20
+33r27 Path{26R9} 36r11 37r20 38r39 39r23 40r32 4|176b27 181r19
+38i29 I{integer} 39r34 40r43
+43V13*Check_Access{5|100E9} 44>7 45>7 46>7 47>7 50r11 54r14 4|217b13 323l8
+. 323t20
+44r7 Caller_Id{5|42R9} 4|218b7 275r58
+45m7 Caller_Caps{2|16M12} 4|219b7 246r26 262r32 269r32 278r38 287r36 289r36
+. 291r36 302r33 311r36 313r36 315r36
+46r7 Path{26R9} 49r30 52r12 52r34 4|220b7 227r19 242r26 251r26 261r29 266r29
+. 275r42 284r29 299r26 308r29
+47e7 Op{5|92E9} 53r21 4|221b7 234r13 243r13 253r16 262r45 268r19 278r51 285r18
+. 301r16 309r18
+X 4 nc_security_filesystem.adb
+9R9 Segment_Span 12e14 15r51 19r14 41r14
+10i7*First{positive} 22r12 24r21 26r52 32r28 44r12 46r21 48r52 54r28 76r32
+. 78r41 85m28 124r24 126r33 162m27
+11i7*Last{natural} 23r21 24r34 26r41 45r21 46r34 48r41 77r41 78r59 85m40
+. 125r33 126r51 162m47
+14I12 Segment_Index{natural} 15r33
+15A9 Segment_Array(9R9)<integer> 63r19 177r15 223r15
+17V13 Segment_Equals{boolean} 17b13 18>7 19>7 20>7 37l8 37t22 242s10 251s10
+. 261s13 266s13 284s13 299s10 308s13
+18r7 Path{3|26R9} 23r29 32r13
+19r7 Seg{9R9} 22r8 23r17 24r17 24r30 26r37 26r48 32r24
+20a7 Lit{string} 28r21 32r57 32r62
+26i7 Seg_Len{natural} 28r10 31r21
+31i11 I{integer} 32r36 32r74
+39V13 Segment_Equals_App_Id{boolean} 39b13 40>7 41>7 42>7 59l8 59t29 275s19
+40r7 Path{3|26R9} 45r29 54r13
+41r7 Seg{9R9} 44r8 45r17 46r17 46r30 48r37 48r48 54r24
+42r7 Id{5|42R9} 50r10 50r40 54r42
+48i7 Seg_Len{natural} 50r29 53r21
+53i11 I{integer} 54r36 54r51
+61U14 Split_Path 61b14 62>7 63<7 64<7 65<7 174l8 174t18 181s7 227s7
+62r7 Path{3|26R9} 70r11 71r20 72r39 73r23 74r32 77r49 89r10 89r31 93r21 96r15
+. 96r43 97r13 97r39 102r10 108r24 109r10 125r41 130r21 145r21 151r21 152r21
+63a7 Segs{15A9} 76r23 77r32 78r32 78r50 85m7 124r15 125r24 126r24 126r42
+. 162m10
+64i7 Count{natural} 67r8 75r39 86m7 121r33 123r31 157r13 161m10 161r19 162r16
+65b7 Valid{boolean} 69r12 87m7 103m10 173m7
+72i29 I{integer} 73r34 74r43
+75i29 S{integer} 76r29 77r38 78r38 78r56
+80i7 Effective_Len{natural} 108m7 109r21 110m10 110r27 113r10 119r20 120r58
+. 129r23 132r69 164r20 166r22
+81i7 Pos{positive} 118m7 119r13 120r33 120r51 128r23 129r16 130r32 132r36
+. 132r62 133m13 133r20 136r21 164r13 166r16 169m13 169r20
+82i7 Seg_Start{positive} 128m10 132r43 139r23 144r23 145r32 150r23 151r32
+. 152r32 162r36
+83i7 Seg_End{natural} 136m10 139r13 144r13 150r13 162r55
+93i11 I{integer} 95r31 97r24 97r50
+95i21 K{integer} 96r26 96r54
+123i21 S{integer} 124r21 125r30 126r30 126r48
+177a7 Segs{15A9} 181m25
+178i7 Count{natural} 181m31
+179b7 Valid{boolean} 181m38 182r14
+185V13 Need{5|100E9} 185b13 185>19 185>36 192l8 192t12 211s20 213s20 246s20
+. 269s26
+185m19 Caps{2|16M12} 187r11
+185m36 Bit{2|16M12} 187r20
+194V13 Need_Any{5|100E9} 194b13 195>7 196>7 197>7 205l8 205t16 287s26 289s26
+. 291s26 302s23 311s26 313s26 315s26
+195m7 Caps{2|16M12} 200r11
+196m7 First{2|16M12} 200r21
+197m7 Second{2|16M12} 200r30
+207V13 All_Access{5|100E9} 207b13 207>25 207>42 215l8 215t18 262s20 278s26
+207m25 Caps{2|16M12} 211r26 213r26
+207e42 Op{5|92E9} 209r12
+223a7 Segs{15A9} 227m25 242r32 251r32 261r35 266r35 275r48 284r35 299r32
+. 308r35
+224i7 Count{natural} 227m31 233r10 252r13 267r16 300r13
+225b7 Valid{boolean} 227m38 228r14
+X 5 nc_security_types.ads
+8K9*NC_Security_Types 3|17w6 17r36 5|156e22
+17N4*Max_Path_Len 3|23r46 24r44 4|22r21 44r21 76r41 124r33
+19N4*Max_Path_Depth 4|14r48 67r17 121r42 157r22
+23M12*Byte{1|81M9}
+24A9*Byte_Array(23M12)<integer> 3|24r27
+39I12*App_Id_Length{natural}
+42R9*Bounded_App_Id 3|44r21 4|42r14 218r21 5|45e14
+43i7*Len{39I12} 4|50r13 50r43
+44a7*Data{40A12} 4|54r45
+92E9*Fs_Op 3|47r21 4|207r47 221r21 5|93e6
+92n19*Fs_Op_Read{92E9} 3|53r27 4|210r15 234r18 243r19 253r21 268r24 286r21
+. 301r21 310r21
+92n31*Fs_Op_Write{92E9} 4|212r15 288r21 312r21
+92n44*Fs_Op_Delete{92E9} 4|212r29 290r21 314r21
+100E9*Fs_Decision 3|47r35 4|185r59 197r33 207r61 221r35 5|105e6
+101n7*Fs_Allow{100E9} 4|188r17 201r17 235r20 254r23 276r26
+102n7*Fs_Deny_Bad_Path{100E9} 3|50r33 4|229r17
+103n7*Fs_Deny_Read_Only{100E9} 3|54r36 4|237r20 244r20 304r23
+104n7*Fs_Deny_Permission{100E9} 4|190r17 203r17 256r23 271r26 295r17 319r17
+. 322r14
+

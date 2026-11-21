@@ -1,0 +1,11 @@
+build/
+target/
+
+# F-02: imzalama ozel anahtarlari ASLA depoya girmez
+sdk/keys/
+*.seed
+
+# cihaz stok dosyalari (stok boot.img, dtb, dtbo)
+aarch64crates/drivers/*/stock/
+
+aarch64kernel/embedded/*.elf

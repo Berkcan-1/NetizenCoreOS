@@ -1,0 +1,8 @@
+[package]
+name = "nc-fs-policy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-caps = { path = "../../../crates/runtime/nc-caps" }
+nc-spark-sec = { path = "../../../crates/foundation/nc-spark-sec" }

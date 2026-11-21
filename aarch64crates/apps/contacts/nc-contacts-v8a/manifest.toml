@@ -1,0 +1,8 @@
+id = "nc.contacts"
+name = "Kisiler"
+version = "1.0.0"
+icon = "contacts"
+width_units = 36
+height_units = 24
+capabilities = settings.read
+permissions = contacts.read, contacts.write

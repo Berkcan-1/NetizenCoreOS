@@ -1,0 +1,329 @@
+V "GNAT Lib v16"
+A -x
+A ada
+A -gnatA
+A -O2
+A -gnat2012
+A -gnatwa
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -fPIC
+A -gnatc
+A -gnatis
+P GP
+
+RN
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+
+U nc_security_dysonsphere%b  nc_security_dysonsphere.adb  8d6637ef OO PK
+W nc_security_policy%s	nc_security_policy.adb	nc_security_policy.ali
+
+U nc_security_dysonsphere%s  nc_security_dysonsphere.ads  030a32eb OO PR PK
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_capabilities%s  nc_security_capabilities.adb  nc_security_capabilities.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+
+D interfac.ads		20261121073825 9111f9c1 interfaces%s
+D nc_security_capabilities.ads  20261121073905 e9272f41 nc_security_capabilities%s
+D nc_security_dysonsphere.ads  20261121073147 a3bf5ebe nc_security_dysonsphere%s
+D nc_security_dysonsphere.adb  20261121142142 6af35c12 nc_security_dysonsphere%b
+D nc_security_policy.ads  20261121073835 442a3543 nc_security_policy%s
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20261121073825 e2b7c99d system%s
+G a Z
+X 1 interfac.ads
+47K9*Interfaces 247e15 3|16w6 16r36
+81M9*Unsigned_8
+92M9*Unsigned_32 3|27r29 28r29 39r23 53r25 58r25 97r25 4|175r25
+95M9*Unsigned_64 3|59r25 4|301r34 327r63
+X 2 nc_security_capabilities.ads
+13K9*NC_Security_Capabilities 114e29 3|18w6 18r36
+16M12*Cap_Mask{1|95M9} 3|30r29 31r29 32r29 41r23 65r23 99r25 100r25 141r39
+. 4|31r18 54r22 177r25 178r25 185r22 186r22 370r39
+18m4*Cap_None{16M12} 3|30r50 31r50 32r50 41r40 65r41 136r59 143r67 4|155r48
+. 218r21 347r44 356r63 361r47 364r39 375r17 379r17 384r17
+19m4*Cap_Settings_Read{16M12} 4|103r10 112r10 152r10 159r47 160r47 161r47
+. 162r47 163r47 164r47
+20m4*Cap_Settings_Write_Display{16M12} 4|113r13
+21m4*Cap_Settings_Write_Locale{16M12} 4|114r13
+22m4*Cap_Settings_Write_Keybd{16M12} 4|115r13
+23m4*Cap_Settings_Write_Network{16M12} 4|116r13
+24m4*Cap_Settings_Write_Drivers{16M12} 4|117r13
+25m4*Cap_Fs_User_Read{16M12} 4|126r10 137r10 146r32
+26m4*Cap_Fs_User_Write{16M12} 4|127r13
+27m4*Cap_Fs_User_Delete{16M12} 4|128r13
+30m4*Cap_Package_Install{16M12} 4|131r13 139r13
+31m4*Cap_Network_Client{16M12} 4|146r10
+32m4*Cap_System_Audit_Read{16M12} 4|152r31
+33m4*Cap_Ipc_Endpoint{16M12} 4|105r13
+35m4*Cap_Notify_Post{16M12} 4|106r13
+36m4*Cap_Fs_All_Read{16M12} 4|129r13 138r13
+37m4*Cap_Fs_All_Write{16M12} 4|130r13
+38m4*Cap_Process_Launch{16M12} 4|104r13 120r13
+39m4*Cap_Package_Remove{16M12} 4|119r13 140r13
+40m4*Cap_Security_Manage{16M12} 4|118r13
+43m4*All_Known_Caps{16M12} 4|74r53 75r53 76r53 214r21 244r78 245r77 272r52
+. 273r51
+64m4*Third_Party_Verified_Ceiling{16M12} 4|216r21
+78V13*Is_Single_Known_Cap{boolean} 3|118s16 4|297s21
+99V13*Compute_Effective_Grant{16M12} 4|221s20
+110V13*Has_Capability{boolean} 4|320s13
+X 3 nc_security_dysonsphere.ads
+20K9*NC_Security_DysonSphere 145l5 145e28 4|7b14 389l5 389t28
+23R9*App_Identity_Record 36e14 48r49
+24b7*In_Use{boolean} 76r45 80r34 133r33 4|17r35 19r28 61r32 68m13 253r32
+. 266m10 353r37 357r31
+25r7*App_Id{6|42R9} 77r68 81r57 134r56 4|18r58 20r50 69m13 267m10 354r60
+. 358r53
+26r7*Publisher{6|52R9} 4|70m13 240m36 268m10
+27m7*Version_Code{1|92M9} 4|71m13 241m36 269m10 318r31 382r35
+28m7*Min_Allowed_Version{1|92M9} 4|72m13 233r54 242m36 270m10 318r64 382r68
+29a7*Payload_Hash{6|26A12} 4|73m13 243m36 271m10
+30m7*Requested_Caps{2|16M12} 4|74m13 244m36 272m10
+31m7*Approved_Caps{2|16M12} 4|75m13 245m36 273m10
+32m7*Granted_Caps{2|16M12} 136r44 4|76m13 246m36 274m10 320r47 347m28 356r48
+. 361m31 386r32
+33e7*Tier{6|114E9} 4|77m13 247m36 275m10
+34b7*Revoked{boolean} 135r35 4|78m13 226r39 276m10 316r31 346m28 355r39 360m31
+. 381r28
+35b7*Is_Builtin{boolean} 4|79m13 277m10 345r64
+38R9*Audit_Event 43e14 49r51
+39m7*Seq{1|92M9} 4|44m10 44m10 44m10 44m10 44m10 44m10 44m10 44m10 44m10
+40a7*App_Id_Tag{6|60A12} 4|45m10 45m10 45m10 45m10 45m10 45m10 45m10 45m10
+. 45m10
+41m7*Requested_Cap{2|16M12} 4|46m10 46m10 46m10 46m10 46m10 46m10 46m10 46m10
+. 46m10
+42e7*Decision{6|64E9} 4|47m10 47m10 47m10 47m10 47m10 47m10 47m10 47m10 47m10
+45I12*App_Slot_Index{natural} 48r30 75r36 79r25 132r25 4|14r16 60r16 66r23
+. 224r26 252r16 259r27 314r22 345r18 350r19 378r22
+46I12*Audit_Ring_Index{natural} 49r30 57r25
+48A9*App_Table(23R9)<integer> 54r25
+49A9*Audit_Ring(38R9)<integer> 56r25
+51R9*Engine_State 60e14 70r16 84r38 94r32 111r25 127r24 140r16 4|10r16 29r25
+. 52r29 86r38 172r32 285r25 333r24 369r16
+52b7*Initialized{boolean} 86r14 106r22 115r22 143r22 4|89m10 166m13 190r20
+. 291r20 340r20 374r20
+53m7*Policy_Version{1|92M9} 87r23 4|90m10 167m13
+54a7*Apps{48A9} 76r17 77r40 80r25 81r48 133r24 134r47 135r26 136r35 4|17r26
+. 18r49 19r19 20r41 61r23 67m16 91m10 226r19 233r34 240m16 241m16 242m16
+. 243m16 244m16 245m16 246m16 247m16 253r23 265m13 316r19 318r19 318r52 320r35
+. 345r52 346m16 347m16 353r28 354r51 355r30 356r39 357r22 358r44 360m22 361m22
+. 381r16 382r23 382r56 386r20
+55i7*App_Count{natural} 4|80r19 81m19 81r38 92m10 278r16 279m16 279r35
+56a7*Audit{49A9} 4|43m13 93m10 43m13 43m13 43m13 43m13 43m13 43m13 43m13
+. 43m13
+57i7*Audit_Write_Idx{46I12} 4|43r26 48m13 48r39 94m10 43r26 48m13 48r39 43r26
+. 48m13 48r39 43r26 48m13 48r39 43r26 48m13 48r39 43r26 48m13 48r39 43r26
+. 48m13 48r39 43r26 48m13 48r39 43r26 48m13 48r39
+58m7*Audit_Seq{1|92M9} 4|42m13 42r32 44r33 95m10 42m13 42r32 44r33 42m13
+. 42r32 44r33 42m13 42r32 44r33 42m13 42r32 44r33 42m13 42r32 44r33 42m13
+. 42r32 44r33 42m13 42r32 44r33 42m13 42r32 44r33
+59m7*Denied_Count{1|95M9} 88r23 4|96m10 168m13 301r19 302m19 302r41 327r48
+. 328m16 328r38
+63R9*Auth_Request 66e14 112r18 4|286r18
+64r7*Caller_Id{6|42R9} 121r41 4|296r39 300r39 308r32 313r45 326r36
+65m7*Requested_Cap{2|16M12} 118r45 4|297r50 300r58 320r69 326r55
+69V13*Find_App_Slot{natural} 70>7 71>7 73r8 75r12 76r23 77r46 4|9b13 26l8
+. 26t21 223s23 313s15 344s15 377s15
+70r7 State{51R9} 76r11 77r34 80r19 81r42 4|10b7 17r20 18r43 19r13 20r35
+71r7 App_Id{6|42R9} 77r76 81r65 4|11b7 18r66 20r58
+79i20 I{45I12} 80r31 81r54
+84U14*Initialize 84<26 4|86b14 169l8 169t18
+84r26 State{51R9} 86r8 87r17 88r17 4|86b26 88m7 101m10 110m10 124m10 135m10
+. 144m10 150m10 155m25 159m25 160m25 161m25 162m25 163m25 164m25 166m7 167m7
+. 168m7
+93U14*Register_Package 94=7 95>7 96>7 97>7 98>7 99>7 100>7 101>7 102>7 103>7
+. 104<7 4|171b14 282l8 282t24
+94r7 State{51R9} 106r16 4|172b7 190r14 196m24 204m24 223r38 226r13 227m27
+. 233r28 234m27 240m10 241m10 242m10 243m10 244m10 245m10 246m10 247m10 253r17
+. 260m24 265m7 278r10 279m10 279r29
+95r7 App_Id{6|42R9} 107r42 4|173b7 195r31 196r31 203r33 204r31 223r45 227r34
+. 234r34 260r31 267r33
+96r7 Publisher{6|52R9} 4|174b7 240r59 268r33
+97m7 Version_Code{1|92M9} 4|175b7 195r47 233r13 241r59 242r59 269r33 270r33
+98a7 Payload_Hash{6|26A12} 4|176b7 243r59 271r33
+99m7 Requested_Caps{2|16M12} 4|177b7 196r39 204r39 221r45 244r59 272r33
+100m7 Approved_Caps{2|16M12} 4|178b7 221r61 245r59 273r33
+101e7 Source{6|122E9} 4|179b7 202r35
+102b7 Is_Verified_V2{boolean} 4|180b7 202r43 215r13
+103b7 Platform_Signed{boolean} 4|181b7 202r59
+104e7 Decision{6|64E9} 106r39 107r55 4|182b7 191m10 197m10 205m10 228m13
+. 235m13 248m10 261m10 281m7
+110U14*Check_Authorization 111=7 112>7 113<7 4|284b14 330l8 330t27
+111r7 State{51R9} 115r16 4|285b7 291r14 300m24 301r13 302m13 302r35 313r30
+. 316r13 318r13 318r46 320r29 326m21 327r42 328m10 328r32
+112r7 Request{63R9} 118r37 121r33 4|286b7 296r31 297r42 300r31 300r50 308r24
+. 313r37 320r61 326r28 326r47
+113e7 Decision{6|64E9} 116r11 119r11 122r11 4|287b7 292m10 299m10 300r73
+. 309m10 315m10 317m10 319m10 321m10 323m10 326r70 327r10
+126U14*Revoke_App 127=7 128>7 129<7 4|332b14 366l8 366t18
+127r7 State{51R9} 133r18 134r41 135r20 136r29 4|333b7 340r14 344r30 345r46
+. 346m10 347m10 353r22 354r45 355r24 356r33 357r16 358r38 360m16 361m16 364m24
+128r7 App_Id{6|42R9} 134r64 4|334b7 340r61 344r37 354r68 358r61 364r31
+129b7 Revoked{boolean} 131r12 4|335b7 339m7 348m10
+132i20 I{45I12} 133r30 134r53 135r32 136r41
+139V13*Query_Granted_Caps{2|16M12} 140>7 141>7 143r39 4|368b13 387l8 387t26
+140r7 State{51R9} 143r16 4|369b7 374r14 377r30 381r10 382r17 382r50 386r14
+141r7 App_Id{6|42R9} 4|370b7 377r37
+X 4 nc_security_dysonsphere.adb
+14i11 I{3|45I12} 16r31 19r25 20r47 22r20
+16i21 K{integer} 17r32 18r55
+28U14 Record_Audit 49l8 49t20 196s10 204s10 227s13 234s13 260s10 300s10 326s7
+. 364s10
+29r7 State{3|51R9} 42m7 42r26 43m7 43r20 44r27 48m7 48r33
+30r7 App_Id{6|42R9} 36r13 36r34 39r21
+31m7 Cap_Bits{2|16M12} 46r27
+32e7 Decision{6|64E9} 47r27
+34a7 Tag{6|60A12} 39m10 45r27
+35i7 Copy_Len{natural} 38r21
+38i11 I{integer} 39r15 39r34
+51U14 Register_Builtin 51b14 52=7 53>7 54>7 84l8 84t24 100s7 109s7 123s7
+. 134s7 143s7 149s7 155s7 159s7 160s7 161s7 162s7 163s7 164s7
+52r7 State{3|51R9} 61r17 67m10 80r13 81m13 81r32
+53a7 App_Id_Str{string} 55r18 57r52
+54m7 Granted_Caps{2|16M12} 74r36 75r36 76r36
+57r7 Id{6|42R9} 69r36
+58i7 Free_Slot{natural} 62m13 66r10 67r22
+60i11 I{3|45I12} 61r29 62r26
+184e7 Tier{6|114E9} 202m7 203r50 213r10 247r59 275r33
+185m7 Ceiling{2|16M12} 214m10 216m10 218m10 221r76
+186m7 Effective{2|16M12} 221m7 227r42 234r42 246r59 260r39 274r33
+187i7 Existing_Idx{natural} 223m7 224r10 226r25 233r40 240r22 241r22 242r22
+. 243r22 244r22 245r22 246r22 247r22
+188i7 Free_Slot{natural} 254m13 259r10 265r19
+252i11 I{3|45I12} 253r29 254r26
+289i7 Slot{natural} 313m7 314r10 316r25 318r25 318r58 320r41
+337i7 Slot{natural} 344m7 345r10 345r58 346r22 347r22
+350i14 I{3|45I12} 352r34 357r28 358r50 360r28 361r28
+352i24 K{integer} 353r34 354r57 355r36 356r45
+372i7 Slot{natural} 377m7 378r10 381r22 382r29 382r62 386r26
+X 5 nc_security_policy.ads
+11K9*NC_Security_Policy 4|5w6 5r30 5|70e23
+16V13*Is_Reserved_System_Id{boolean} 4|203s10
+22V13*Resolve_Trust_Tier{6|114E9} 4|202s15
+X 6 nc_security_types.ads
+8K9*NC_Security_Types 3|17w6 17r36 6|156e22
+15N4*Max_App_Id_Len 4|55r39
+20N4*Max_Registered_Apps 3|45r51 73r32 4|80r31 278r28
+21N4*Audit_Ring_Capacity 3|46r51 4|48r64
+23M12*Byte{1|81M9}
+24A9*Byte_Array(23M12)<integer>
+26A12*Hash_256{24A9}<integer> 3|29r29 98r25 4|176r25
+33a4*Zero_Hash_256{26A12} 3|29r50 4|73r36
+39I12*App_Id_Length{natural}
+42R9*Bounded_App_Id 3|25r29 64r23 71r16 95r25 128r17 141r16 4|11r16 30r18
+. 57r21 173r25 334r17 370r16 6|45e14
+43i7*Len{39I12} 4|36r20 36r41 36r20 36r41 36r20 36r41 36r20 36r41 36r20 36r41
+. 36r20 36r41 36r20 36r41 36r20 36r41 36r20 36r41
+44a7*Data{40A12} 4|39r28 39r28 39r28 39r28 39r28 39r28 39r28 39r28 39r28
+47r4*Empty_App_Id{42R9} 3|25r50 64r41
+52R9*Bounded_Publisher 3|26r29 96r25 4|174r25 6|55e14
+57r4*Empty_Publisher{52R9} 3|26r50
+60A12*Audit_Tag_Buf{24A9}<integer> 3|40r23 4|34r18
+61a4*Zero_Audit_Tag{60A12} 3|40r40 4|34r35
+64E9*Auth_Decision 3|42r23 104r29 113r22 4|32r18 182r29 287r22 6|76e6
+65n7*Auth_Allow{64E9} 3|107r67 119r23 122r23 4|248r22 281r19 309r22 321r22
+. 327r22
+66n7*Auth_Deny_Unknown_App{64E9} 4|315r22
+67n7*Auth_Deny_Revoked_App{64E9} 4|227r53 228r25 317r22 364r49
+68n7*Auth_Deny_Rollback_Version{64E9} 4|234r53 235r25 319r22
+69n7*Auth_Deny_Capability_Not_Granted{64E9} 4|323r22
+70n7*Auth_Deny_Policy_Locked{64E9} 3|42r40 106r50 116r22 4|191r22 292r22
+71n7*Auth_Deny_Invalid_Input{64E9} 4|196r55 197r22 299r22
+72n7*Auth_Deny_Impersonation{64E9} 4|204r55 205r22
+73n7*Auth_Deny_Table_Full{64E9} 4|260r50 261r22
+114E9*Trust_Tier 3|33r29 4|184r22 6|115e6
+114n24*Tier_User{114E9} 3|33r50
+114n35*Tier_System{114E9} 4|77r36 203r58 213r17
+122E9*Install_Source 3|101r25 4|179r25 6|123e6
+130V13*Equal_App_Id{boolean} 3|77s20 81s28 134s27 4|18s29 20s21 308s10 354s31
+. 358s24
+137V13*Is_Valid_App_Id{boolean} 3|107s25 121s16 4|195s14 296s14 340s44
+147V13*Make_App_Id{42R9} 4|57s39 308s43
+152V13*Make_Publisher{52R9} 4|70s36
+
+QQ SPARKVERSION FSF 16.1.0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__find_app_slot 1 nc_security_types__equal_app_id
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__find_app_slot 0
+GG EK_GLOBALS nc_security_dysonsphere__find_app_slot local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__initialize 1 nc_security_dysonsphere__register_builtin
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__initialize 0
+GG EK_GLOBALS nc_security_dysonsphere__initialize local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__register_package 6 nc_security_dysonsphere__find_app_slot nc_security_types__is_valid_app_id nc_security_capabilities__compute_effective_grant nc_security_policy__is_reserved_system_id nc_security_policy__resolve_trust_tier nc_security_dysonsphere__record_audit
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__register_package 0
+GG EK_GLOBALS nc_security_dysonsphere__register_package local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__check_authorization 7 nc_security_dysonsphere__find_app_slot nc_security_types__equal_app_id nc_security_types__is_valid_app_id nc_security_types__make_app_id nc_security_capabilities__is_single_known_cap nc_security_capabilities__has_capability nc_security_dysonsphere__record_audit
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__check_authorization 0
+GG EK_GLOBALS nc_security_dysonsphere__check_authorization local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__revoke_app 4 nc_security_dysonsphere__find_app_slot nc_security_types__equal_app_id nc_security_types__is_valid_app_id nc_security_dysonsphere__record_audit
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__revoke_app 0
+GG EK_GLOBALS nc_security_dysonsphere__revoke_app local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__query_granted_caps 1 nc_security_dysonsphere__find_app_slot
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__query_granted_caps 0
+GG EK_GLOBALS nc_security_dysonsphere__query_granted_caps local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__record_audit 0
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__record_audit 0
+GG EK_GLOBALS nc_security_dysonsphere__record_audit local TRUE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere__register_builtin 2 nc_security_types__make_app_id nc_security_types__make_publisher
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere__register_builtin 1 nc_security_types__make_app_id
+GG EK_GLOBALS nc_security_dysonsphere__register_builtin local TRUE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_dysonsphere proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_dysonsphere 0
+GG EK_PROOF_DEPENDENCIES nc_security_dysonsphere 0
+GG EK_GLOBALS nc_security_dysonsphere local FALSE E_PACKAGE TRUE ORIGIN_FLOW 0 proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 initializes 0 refined_initializes 0 calls_proof 0 calls 0 calls_conditional 0 local_packages 0 local_var 0 TRUE FALSE FALSE FALSE FALSE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_policy__authorize_ipc FALSE FALSE FALSE FALSE TRUE nc_security_policy VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__equal_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__make_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_policy__authorize_process_launch FALSE FALSE FALSE FALSE TRUE nc_security_policy VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_dysonsphere__initialize FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_capabilities__is_valid_mask FALSE FALSE FALSE FALSE TRUE nc_security_capabilities VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_dysonsphere TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE interfaces__shift_left__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE nc_security_dysonsphere__register_builtin FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere BODY_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_capabilities__is_single_known_cap FALSE FALSE FALSE FALSE TRUE nc_security_capabilities VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_capabilities__dropped_for_user FALSE FALSE FALSE FALSE TRUE nc_security_capabilities VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_capabilities TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE nc_security_policy__package_granted_caps FALSE FALSE FALSE FALSE TRUE nc_security_policy VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_dysonsphere__revoke_app FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__make_publisher FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_dysonsphere__register_package FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_policy TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE interfaces__shift_left__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_dysonsphere__query_granted_caps FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_dysonsphere__check_authorization FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_capabilities__has_capability FALSE FALSE FALSE FALSE TRUE nc_security_capabilities VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_policy__is_reserved_system_id FALSE FALSE FALSE FALSE TRUE nc_security_policy VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_capabilities__compute_effective_grant FALSE FALSE FALSE FALSE TRUE nc_security_capabilities VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_dysonsphere__find_app_slot FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_capabilities__clamp_user FALSE FALSE FALSE FALSE TRUE nc_security_capabilities VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE nc_security_dysonsphere__record_audit FALSE FALSE FALSE FALSE TRUE nc_security_dysonsphere BODY_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__is_valid_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_policy__resolve_trust_tier FALSE FALSE FALSE FALSE TRUE nc_security_policy VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_END_MARKER

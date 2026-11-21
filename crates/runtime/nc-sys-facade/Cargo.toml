@@ -1,0 +1,18 @@
+[package]
+name = "nc-sys-facade"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["kernel"]
+kernel = ["dep:nc-net", "dep:nc-driver", "dep:nc-arch", "dep:nc-app"]
+client = ["dep:nc-app-sdk"]
+
+[dependencies]
+nc-abi = { path = "../../foundation/nc-abi" }
+nc-efra = { path = "../../foundation/nc-efra" }
+nc-net = { path = "../../services/nc-net", optional = true }
+nc-driver = { path = "../../hardware/nc-driver", optional = true }
+nc-arch = { path = "../../hardware/nc-arch", optional = true }
+nc-app = { path = "../../ui/nc-app", optional = true }
+nc-app-sdk = { path = "../nc-app-sdk", optional = true }

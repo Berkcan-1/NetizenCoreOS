@@ -1,0 +1,11 @@
+[package]
+name = "nc-audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-hal = { path = "../../foundation/nc-hal" }
+nc-assets = { path = "../nc-assets" }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+nc-driver = { path = "../../hardware/nc-driver" }

@@ -1,0 +1,7 @@
+id = "nc.package-installer"
+name = "Package Installer"
+version = "1.0.0"
+icon = "generic"
+width_units = 36
+height_units = 24
+capabilities = package.install, fs.all.read, settings.read, process.launch

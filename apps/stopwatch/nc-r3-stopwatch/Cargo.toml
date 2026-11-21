@@ -1,0 +1,16 @@
+[package]
+name = "nc-r3-stopwatch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-abi = { path = "../../../crates/foundation/nc-abi" }
+nc-app-sdk = { path = "../../../crates/runtime/nc-app-sdk" }
+
+[dev-dependencies]
+nc-app-sdk = { path = "../../../crates/runtime/nc-app-sdk", features = ["host"] }
+nc-app = { path = "../../../crates/ui/nc-app" }
+nc-app-stopwatch = { path = "../nc-app-stopwatch" }
+nc-gfx = { path = "../../../crates/graphics/nc-gfx" }
+nc-ui = { path = "../../../crates/ui/nc-ui", features = ["remote"] }
+nc-i18n = { path = "../../../crates/foundation/nc-i18n" }

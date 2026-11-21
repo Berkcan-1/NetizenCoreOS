@@ -1,0 +1,18 @@
+[package]
+name = "nc-desktop"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+nc-hal = { path = "../../foundation/nc-hal" }
+nc-gfx = { path = "../../graphics/nc-gfx" }
+nc-font = { path = "../../graphics/nc-font" }
+nc-math = { path = "../../foundation/nc-math" }
+nc-ui = { path = "../nc-ui" }
+nc-app = { path = "../nc-app" }
+nc-media = { path = "../../graphics/nc-media" }
+nc-fs = { path = "../../services/nc-fs", default-features = false }
+nc-assets = { path = "../../graphics/nc-assets" }
+nc-audio = { path = "../../graphics/nc-audio" }
+

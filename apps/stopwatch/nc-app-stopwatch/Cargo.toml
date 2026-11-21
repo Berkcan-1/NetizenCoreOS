@@ -1,0 +1,10 @@
+[package]
+name = "nc-app-stopwatch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-gfx = { path = "../../../crates/graphics/nc-gfx" }
+nc-font = { path = "../../../crates/graphics/nc-font" }
+nc-ui = { path = "../../../crates/ui/nc-ui" }
+nc-app = { path = "../../../crates/ui/nc-app" }

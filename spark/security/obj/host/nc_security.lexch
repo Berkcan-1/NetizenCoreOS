@@ -1,0 +1,21 @@
+[LIBRARY PATH]
+/home/berkcan/Masaüstü/NetizenCore/spark/security/lib/host/libnc_security.a
+[OBJECT FILES]
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_c_api.o
+20261121073919
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_capabilities.o
+20261121073919
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_crypto.o
+20261121073822
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_dysonsphere.o
+20261121073919
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_encryption.o
+20261121073822
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_filesystem.o
+20261121073919
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_lock.o
+20261121073919
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_policy.o
+20261121073919
+/home/berkcan/Masaüstü/NetizenCore/spark/security/obj/host/nc_security_types.o
+20261121073919

@@ -1,0 +1,78 @@
+name: NetizenCore CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  layout-and-rust-tests:
+    name: Layout & Shared Crate Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-none,x86_64-unknown-none,x86_64-unknown-uefi
+      - name: Verify repository layout
+        run: python3 tools/check/verify_layout.py
+      - name: Run shared crate unit tests
+        run: cargo test -p nc-abi -p nc-caps -p nc-pkg -p nc-mem -p nc-fs -p nc-fs-policy -p nc-crypto -p nc-elf --lib
+
+  spark-security:
+    name: SPARK Ada KAT, Flow & Proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GNAT & GNATprove (Alire)
+        run: |
+          if command -v alr >/dev/null 2>&1; then
+            alr --version
+          else
+            echo "Note: Configure Alire / GNATprove cache for full SPARK CI"
+          fi
+      - name: Run SPARK KAT tests
+        if: env.NC_SPARK_CI == '1'
+        run: bash build.sh spark-test
+      - name: Run SPARK GNATprove flow analysis
+        if: env.NC_SPARK_CI == '1'
+        run: bash build.sh spark-check
+      - name: Run SPARK GNATprove proofs
+        if: env.NC_SPARK_CI == '1'
+        run: bash build.sh spark-prove
+
+  aarch64-build-and-qemu:
+    name: ARM64 Build & QEMU Boot Test
+    runs-on: ubuntu-latest
+    if: env.NC_SPARK_CI == '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU & filesystem tools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm dosfstools mtools exfatprogs
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-none
+      - name: Build ARM64 qemu-virt image
+        run: bash build.sh armv8a qemu build
+      - name: Run automated QEMU boot test
+        run: python3 tools/check/qemu_boot_test.py --timeout 30 --mem 512 --smp 1
+      - name: Upload QEMU boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aarch64-qemu-boot-log
+          path: build/armv8a-qemu-virt/ci-boot.log
+
+  x86_64-regression:
+    name: x86_64 Regression Build
+    runs-on: ubuntu-latest
+    if: env.NC_SPARK_CI == '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install x86_64 ISO tools
+        run: sudo apt-get update && sudo apt-get install -y xorriso dosfstools mtools nasm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+      - name: Build x86_64 qemu ISO
+        run: bash build.sh x86_64 qemu build

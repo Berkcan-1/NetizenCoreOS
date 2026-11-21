@@ -1,0 +1,8 @@
+[package]
+name = "nc-brand"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-app-sdk = { path = "../../../crates/runtime/nc-app-sdk" }
+nc-mobile-ui = { path = "../nc-mobile-ui" }

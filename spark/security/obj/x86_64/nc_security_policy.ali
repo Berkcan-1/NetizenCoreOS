@@ -1,0 +1,108 @@
+V "GNAT Lib v16"
+A -O2
+A -gnat2012
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -mno-red-zone
+A -mno-mmx
+A -mno-sse
+A -mno-sse2
+A -fPIC
+A -mcmodel=small
+A --RTS=/home/berkcan/Masaüstü/NetizenCore/spark/rts/zfp-64
+A -mtune=generic
+A -march=x86-64
+P
+
+RN
+RV NO_IMPLEMENTATION_PRAGMAS
+
+U nc_security_policy%b	nc_security_policy.adb	b82ebc2c NE OO PK
+
+U nc_security_policy%s	nc_security_policy.ads	e49f5916 NE OO PU PK
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_capabilities%s  nc_security_capabilities.adb  nc_security_capabilities.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+
+D interfac.ads		20261121074005 9111f9c1 interfaces%s
+D nc_security_capabilities.ads  20261121073905 e9272f41 nc_security_capabilities%s
+D nc_security_policy.ads  20261121073835 442a3543 nc_security_policy%s
+D nc_security_policy.adb  20261121142140 fc04896f nc_security_policy%b
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20261121074005 e1e88ba0 system%s
+G a e
+G c Z s b [is_reserved_system_id nc_security_policy 16 13 none]
+G c Z s b [resolve_trust_tier nc_security_policy 22 13 none]
+G c Z s b [package_granted_caps nc_security_policy 33 13 none]
+G c Z s b [authorize_process_launch nc_security_policy 43 13 none]
+G c Z s b [authorize_ipc nc_security_policy 55 13 none]
+G r c none [is_reserved_system_id nc_security_policy 16 13 none] [make_app_id nc_security_types 147 13 none]
+G r c none [is_reserved_system_id nc_security_policy 16 13 none] [equal_app_id nc_security_types 130 13 none]
+G r c none [package_granted_caps nc_security_policy 33 13 none] [compute_effective_grant nc_security_capabilities 99 13 none]
+G r c none [authorize_process_launch nc_security_policy 43 13 none] [is_valid_app_id nc_security_types 137 13 none]
+G r c none [authorize_process_launch nc_security_policy 43 13 none] [has_capability nc_security_capabilities 110 13 none]
+G r c none [authorize_ipc nc_security_policy 55 13 none] [is_valid_app_id nc_security_types 137 13 none]
+G r c none [authorize_ipc nc_security_policy 55 13 none] [has_capability nc_security_capabilities 110 13 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 3|7w6 7r36
+95M9*Unsigned_64
+X 2 nc_security_capabilities.ads
+13K9*NC_Security_Capabilities 114e29 3|9w6 9r36
+16M12*Cap_Mask{1|95M9} 3|35r19 36r19 36r36 45r21 57r21 4|44r19 45r19 45r36
+. 58r21 73r21
+33m4*Cap_Ipc_Endpoint{16M12} 3|64r45 4|81r43
+38m4*Cap_Process_Launch{16M12} 3|51r45 4|65r43
+40m4*Cap_Security_Manage{16M12} 3|67r65 4|84r63
+43m4*All_Known_Caps{16M12} 4|50r65
+49m4*User_Allowed_Mask{16M12} 4|52r65
+60m4*System_Only_Mask{16M12} 3|39r44
+74V13*Is_Valid_Mask{boolean} 3|40s17
+99V13*Compute_Effective_Grant{16M12} 4|50s20 52s20
+110V13*Has_Capability{boolean} 3|51s16 64s16 67s36 4|65s14 81s14 84s34
+X 3 nc_security_policy.ads
+11K9*NC_Security_Policy 70l5 70e23 4|5b14 90l5 90t23
+16V13*Is_Reserved_System_Id{boolean} 16>36 4|7b13 24l8 24t29
+16r36 Id{5|42R9} 4|7b36 9r28 10r31 11r31 12r31 13r31 14r31 15r31 16r31 17r31
+. 18r31 19r31 20r31 21r31 22r31 23r31
+22V13*Resolve_Trust_Tier{5|114E9} 23>7 24>7 25>7 30r14 4|26b13 40l8 40t26
+23e7 Source{5|122E9} 27r12 4|27b7 32r10
+24b7 Is_Verified{boolean} 28r23 4|28b7 33r18
+25b7 Platform_Signed{boolean} 29r23 4|29b7 34r18
+33V13*Package_Granted_Caps{2|16M12} 34>7 35>7 36>7 39r12 40r32 4|42b13 54l8
+. 54t28
+34e7 Tier{5|114E9} 38r12 4|43b7 48r12
+35m7 Declared{2|16M12} 4|44b7 50r45 52r45
+36m7 Approved{2|16M12} 4|45b7 50r55 52r55
+43V13*Authorize_Process_Launch{5|64E9} 44>7 45>7 46>7 49r11 52r11 4|56b13
+. 69l8 69t32
+44r7 Caller_Id{5|42R9} 48r33 4|57b7 62r31
+45m7 Caller_Caps{2|16M12} 51r32 4|58b7 65r30
+46r7 Target_Id{5|42R9} 48r73 4|59b7 62r71
+55V13*Authorize_IPC{5|64E9} 56>7 57>7 58>7 59>7 62r11 65r11 68r11 4|71b13
+. 88l8 88t21
+56r7 Sender_Id{5|42R9} 61r33 4|72b7 78r31
+57m7 Sender_Caps{2|16M12} 64r32 67r52 4|73b7 81r30 84r50
+58r7 Target_Id{5|42R9} 61r73 4|74b7 78r71
+59b7 Privileged{boolean} 67r12 4|75b7 84r10
+X 5 nc_security_types.ads
+8K9*NC_Security_Types 3|8w6 8r36 5|156e22
+42R9*Bounded_App_Id 3|16r41 44r21 46r21 56r21 58r21 4|7r41 57r21 59r21 72r21
+. 74r21 5|45e14
+64E9*Auth_Decision 3|46r44 59r37 4|59r44 75r37 5|76e6
+65n7*Auth_Allow{64E9} 3|49r46 52r46 62r35 65r35 68r35 4|68r14 87r14
+69n7*Auth_Deny_Capability_Not_Granted{64E9} 4|66r17 82r17
+71n7*Auth_Deny_Invalid_Input{64E9} 4|63r17 79r17
+74n7*Auth_Deny_System_Only{64E9} 4|85r17
+114E9*Trust_Tier 3|25r41 34r19 4|29r41 43r19 5|115e6
+114n24*Tier_User{114E9} 3|30r42 38r19 4|38r17 51r15
+114n35*Tier_System{114E9} 4|36r17 49r15
+122E9*Install_Source 3|23r25 4|27r25 5|123e6
+122n46*Source_System_Image{122E9} 3|27r22 4|32r19
+130V13*Equal_App_Id{boolean} 4|9s14 10s17 11s17 12s17 13s17 14s17 15s17 16s17
+. 17s17 18s17 19s17 20s17 21s17 22s17 23s17
+137V13*Is_Valid_App_Id{boolean} 3|48s16 48s56 61s16 61s56 4|62s14 62s54 78s14
+. 78s54
+147V13*Make_App_Id{42R9} 4|9s32 10s35 11s35 12s35 13s35 14s35 15s35 16s35
+. 17s35 18s35 19s35 20s35 21s35 22s35 23s35
+

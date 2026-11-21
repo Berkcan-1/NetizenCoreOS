@@ -1,0 +1,269 @@
+V "GNAT Lib v16"
+M P W=b
+A -O2
+A -gnat2012
+P SS ZX
+
+RN
+RV NO_IO
+RV NO_SECONDARY_STACK
+RV NO_STANDARD_STORAGE_POOLS
+RV NO_DEFAULT_INITIALIZATION
+RV NO_DYNAMIC_SIZED_OBJECTS
+
+U test_nc_security%b	test_nc_security.adb	1ebee90c NE OO SU
+W ada%s			ada.ads			ada.ali
+Z ada.strings.text_buffers%s  a-sttebu.adb	a-sttebu.ali
+W ada.text_io%s		a-textio.adb		a-textio.ali
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_capabilities%s  nc_security_capabilities.adb  nc_security_capabilities.ali
+W nc_security_crypto%s	nc_security_crypto.adb	nc_security_crypto.ali
+W nc_security_dysonsphere%s  nc_security_dysonsphere.adb  nc_security_dysonsphere.ali
+W nc_security_encryption%s  nc_security_encryption.adb  nc_security_encryption.ali
+W nc_security_filesystem%s  nc_security_filesystem.adb  nc_security_filesystem.ali
+W nc_security_lock%s	nc_security_lock.adb	nc_security_lock.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+Z system.img_int%s	s-imgint.ads		s-imgint.ali
+Z system.secondary_stack%s  s-secsta.adb	s-secsta.ali
+
+D ada.ads		20260430083320 76789da1 ada%s
+D a-except.ads		20260430083320 8699d7ff ada.exceptions%s
+D a-ioexce.ads		20260430083320 40018c65 ada.io_exceptions%s
+D a-stream.ads		20260430083320 cb01a8f8 ada.streams%s
+D a-string.ads		20260430083320 90ac6797 ada.strings%s
+D a-sttebu.ads		20260430083320 f1ad67a2 ada.strings.text_buffers%s
+D a-stuten.ads		20260430083320 c6ced0ae ada.strings.utf_encoding%s
+D a-tags.ads		20260430083320 2dbf449c ada.tags%s
+D a-textio.ads		20260430083320 34ef47de ada.text_io%s
+D a-unccon.ads		20260430083320 0e9b276f ada.unchecked_conversion%s
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D i-cstrea.ads		20260430083320 ffd01b9d interfaces.c_streams%s
+D nc_security_capabilities.ads  20261121073905 e9272f41 nc_security_capabilities%s
+D nc_security_crypto.ads  20261121073351 d34bc6c8 nc_security_crypto%s
+D nc_security_dysonsphere.ads  20261121073147 a3bf5ebe nc_security_dysonsphere%s
+D nc_security_encryption.ads  20261121073536 9667f0e4 nc_security_encryption%s
+D nc_security_filesystem.ads  20261121091312 7aefba94 nc_security_filesystem%s
+D nc_security_lock.ads	20261121073532 b9f2f19b nc_security_lock%s
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20260430083320 e2b7c99d system%s
+D s-crtl.ads		20260430083320 823b6536 system.crtl%s
+D s-exctab.ads		20260430083320 91bef6ef system.exception_table%s
+D s-ficobl.ads		20260430083320 dc5161d4 system.file_control_block%s
+D s-imagei.ads		20260430083320 11a376a2 system.image_i%s
+D s-imgint.ads		20260430083320 86836590 system.img_int%s
+D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
+D s-putima.ads		20260430083320 1b989439 system.put_images%s
+D s-secsta.ads		20260430083320 578279f5 system.secondary_stack%s
+D s-soflin.ads		20260430083320 5d88fdea system.soft_links%s
+D s-stache.ads		20260430083320 0b81c1fe system.stack_checking%s
+D s-stalib.ads		20260430083320 1c9580f6 system.standard_library%s
+D s-stoele.ads		20260430083320 ccded4e8 system.storage_elements%s
+D s-traent.ads		20260430083320 c81cbf8c system.traceback_entries%s
+D s-unstyp.ads		20260430083320 fa2a7f59 system.unsigned_types%s
+D s-wchcon.ads		20260430083320 d9032363 system.wch_con%s
+D test_nc_security.adb	20261121142203 af6ae11a test_nc_security%b
+G a e
+G c Z b b [test_nc_security standard 12 11 none]
+G r c none [test_nc_security standard 12 11 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [test_nc_security standard 12 11 none] [hmac_sha256 nc_security_crypto 67 14 none]
+G r c none [test_nc_security standard 12 11 none] [pbkdf2_hmac_sha256 nc_security_crypto 73 14 none]
+G r c none [test_nc_security standard 12 11 none] [chacha20_poly1305_encrypt nc_security_crypto 83 14 none]
+G r c none [test_nc_security standard 12 11 none] [chacha20_poly1305_decrypt nc_security_crypto 96 14 none]
+G r s engine_state [test_nc_security standard 12 11 none] [engine_stateIP nc_security_dysonsphere 51 9 none]
+G r c none [test_nc_security standard 12 11 none] [initialize nc_security_dysonsphere 84 14 none]
+G r c none [test_nc_security standard 12 11 none] [make_app_id nc_security_types 147 13 none]
+G r c none [test_nc_security standard 12 11 none] [check_authorization nc_security_dysonsphere 110 14 none]
+G r c none [test_nc_security standard 12 11 none] [make_publisher nc_security_types 152 13 none]
+G r c none [test_nc_security standard 12 11 none] [register_package nc_security_dysonsphere 93 14 none]
+G r c none [test_nc_security standard 12 11 none] [revoke_app nc_security_dysonsphere 126 14 none]
+G r c none [test_nc_security standard 12 11 none] [check_access nc_security_filesystem 46 13 none]
+G r s lock_record [test_nc_security standard 12 11 none] [lock_recordIP nc_security_lock 31 9 none]
+G r s lock_machine_state [test_nc_security standard 12 11 none] [lock_machine_stateIP nc_security_lock 70 9 none]
+G r c none [test_nc_security standard 12 11 none] [derive_record nc_security_lock 94 14 none]
+G r c none [test_nc_security standard 12 11 none] [record_to_sector nc_security_lock 114 14 none]
+G r c none [test_nc_security standard 12 11 none] [marker_to_sector nc_security_lock 124 14 none]
+G r c none [test_nc_security standard 12 11 none] [load_machine nc_security_lock 143 14 none]
+G r c none [test_nc_security standard 12 11 none] [authenticate nc_security_lock 163 14 none]
+G r s encryption_state [test_nc_security standard 12 11 none] [encryption_stateIP nc_security_encryption 56 9 none]
+G r c none [test_nc_security standard 12 11 none] [provision_volume nc_security_encryption 83 14 none]
+G r c none [test_nc_security standard 12 11 none] [lock_volume nc_security_encryption 126 14 none]
+G r c none [test_nc_security standard 12 11 none] [unlock_volume nc_security_encryption 112 14 none]
+G r c none [test_nc_security standard 12 11 none] [encrypt_block nc_security_encryption 132 14 none]
+G r c none [test_nc_security standard 12 11 none] [decrypt_block nc_security_encryption 145 14 none]
+X 1 ada.ads
+18K9*Ada 22e8 36|2r6 2r36
+X 9 a-textio.ads
+58K13*Text_IO 785e16 36|2w10 2r40
+565U14*Put_Line 36|18s10 20s10 283s7 285s7
+X 11 interfac.ads
+47K9*Interfaces 247e15 36|3w6 3r36
+81M9*Unsigned_8
+92M9*Unsigned_32 36|224r16
+95M9*Unsigned_64
+104V13*Shift_Left{81M9} 36|49s21
+X 13 nc_security_capabilities.ads
+13K9*NC_Security_Capabilities 114e29 36|5w6 5r36
+16M12*Cap_Mask{11|95M9}
+19m4*Cap_Settings_Read{16M12} 36|165r25 165r44 171r25 171r44
+25m4*Cap_Fs_User_Read{16M12} 36|147r59 151r63 178r25 178r66 181r68 189r25
+. 189r43 196r68
+36m4*Cap_Fs_All_Read{16M12} 36|207r51 209r51 211r51 213r54
+37m4*Cap_Fs_All_Write{16M12} 36|207r70 209r70 211r70 213r73
+40m4*Cap_Security_Manage{16M12} 36|153r62 159r25 159r46 178r45 178r86 183r68
+49m4*User_Allowed_Mask{16M12} 36|201r49 203r49 205r49
+X 14 nc_security_crypto.ads
+23K9*NC_Security_Crypto 110e23 36|8w6 8r36
+62U14*Sha256_One_Shot 36|70s7 74s7 78s7 229s7
+67U14*Hmac_Sha256 36|87s7
+73U14*Pbkdf2_Hmac_Sha256 36|97s7 101s7
+83U14*ChaCha20_Poly1305_Encrypt 36|125s7
+96U14*ChaCha20_Poly1305_Decrypt 36|129s7 134s7
+X 15 nc_security_dysonsphere.ads
+20K9*NC_Security_DysonSphere 145e28 36|6w6 6r36
+51R9*Engine_State 60e14 36|141r13
+84U14*Initialize 36|145s7
+93U14*Register_Package 36|157s7 163s7 169s7 176s7 187s7
+110U14*Check_Authorization 36|147s7 151s7 153s7 181s7 183s7 196s7
+126U14*Revoke_App 36|194s7
+X 16 nc_security_encryption.ads
+25K9*NC_Security_Encryption 161e27 36|10w6 10r36
+35n7*Enc_Locked{33E9} 36|264r27 267r43
+36n7*Enc_Unlocked{33E9} 36|261r39 270r39
+56R9*Encryption_State 60e14 36|249r15
+57e7*Status{33E9} 36|261r30 264r18 267r34 270r30
+59a7*Active_Dek{19|27A12} 36|264r51
+83U14*Provision_Volume 36|260s7
+112U14*Unlock_Volume 36|266s7 269s7
+126U14*Lock_Volume 36|263s7
+132U14*Encrypt_Block 36|272s7
+145U14*Decrypt_Block 36|274s7 278s7
+X 17 nc_security_filesystem.ads
+20K9*NC_Security_Filesystem 59e27 36|7w6 7r36
+23I12*Path_Length{natural}
+26R9*Bounded_Path 29e14 36|55r43 56r11
+27i7*Len{23I12} 36|56m28
+28a7*Data{24A12} 36|56m45 59m12
+46V13*Check_Access{19|100E9} 36|201s11 203s11 205s11 207s11 209s11 211s11
+. 213s11
+X 18 nc_security_lock.ads
+18K9*NC_Security_Lock 177e21 36|9w6 9r36
+22m4*Kind_Pin{19|23M12} 36|227r22
+31R9*Lock_Record 36e14 36|218r16
+39b7*Enabled{boolean} 36|230m26
+40m7*Fails{11|92M9} 36|230m43
+41a7*Credential_Digest{19|26A12} 36|230m55
+46n7*Lock_Enabled{44E9} 36|233r28
+47n7*Lock_Destroyed{44E9} 36|244r28
+55E9*Lock_Auth_Result 61e6 36|223r16
+56n7*Auth_Res_Unlocked{55E9} 36|239r20
+57n7*Auth_Res_Invalid_Secret{55E9} 36|236r20
+70R9*Lock_Machine_State 75e14 36|222r16
+71e7*Status{44E9} 36|233r19 244r19
+72b7*Locked{boolean} 36|233r55 236r58 239r56 244r57
+94U14*Derive_Record 36|227s7
+114U14*Record_To_Sector 36|228s7
+124U14*Marker_To_Sector 36|230s7
+143U14*Load_Machine 36|232s7 243s7
+163U14*Authenticate 36|235s7 238s7
+X 19 nc_security_types.ads
+8K9*NC_Security_Types 156e22 36|4w6 4r36
+23M12*Byte{11|81M9} 36|34r44
+24A9*Byte_Array(23M12)<integer> 36|25r46 26r13 45r46 46r13 68r24 94r14 95r14
+. 111r22 112r22 114r30 120r13 121r13 255r24 256r15 257r15
+26A12*Hash_256{24A9}<integer> 36|67r11 85r13 221r16
+27A12*Key_256{24A9}<integer> 36|108r22 253r24
+28A12*Nonce_96{24A9}<integer> 36|110r24 252r24
+29A12*Tag_128{24A9}<integer> 36|119r31 122r13 258r15
+30A12*Salt_128{24A9}<integer> 36|225r25 251r24
+31A12*Sector_512{24A9}<integer> 36|219r16 220r16 250r15
+33a4*Zero_Hash_256{26A12} 36|159r10 165r10 171r10 178r10 189r10
+34a4*Zero_Key_256{27A12} 36|264r64
+64E9*Auth_Decision 76e6 36|142r13
+65n7*Auth_Allow{64E9} 36|154r20 180r20 182r20
+66n7*Auth_Deny_Unknown_App{64E9} 36|148r20
+67n7*Auth_Deny_Revoked_App{64E9} 36|197r20
+68n7*Auth_Deny_Rollback_Version{64E9} 36|191r20
+69n7*Auth_Deny_Capability_Not_Granted{64E9} 36|152r20 184r20
+72n7*Auth_Deny_Impersonation{64E9} 36|161r20 167r20 173r20
+92n19*Fs_Op_Read{92E9} 36|201r99 205r113 211r145 213r148
+92n31*Fs_Op_Write{92E9} 36|203r113 207r120 209r145
+101n7*Fs_Allow{100E9} 36|203r128
+102n7*Fs_Deny_Bad_Path{100E9} 36|201r113
+103n7*Fs_Deny_Read_Only{100E9} 36|207r135
+104n7*Fs_Deny_Permission{100E9} 36|205r127 209r160 211r159 213r162
+122n28*Source_User_Data{122E9} 36|160r10 166r10 172r10 179r10 190r10
+147V13*Make_App_Id{42R9} 36|147s33 151s33 153s33 158s14 164s14 170s14 177s14
+. 181s33 183s33 188s14 194s23 196s33 201s25 203s25 205s25 207s25 209s25 211s25
+. 213s25
+152V13*Make_Publisher{52R9} 36|158s43 164s43 170s41 177s49 188s49
+X 36 test_nc_security.adb
+12U11*Test_NC_Security 12b11 287l5 287t21
+13i4 Failed{natural} 21m10 21r20 282r7 285r50
+15U14 Check 15b14 15>21 15>37 23l8 23t13 71s7 75s7 79s7 88s7 98s7 102s7 126s7
+. 127s7 130s7 135s7 148s7 152s7 154s7 161s7 167s7 173s7 180s7 182s7 184s7
+. 191s7 195s7 197s7 201s4 203s4 205s4 207s4 209s4 211s4 213s4 233s7 236s7
+. 239s7 244s7 261s7 264s7 267s7 270s7 273s7 275s7 279s7
+15b21 Cond{boolean} 17r10
+15a37 Name{string} 18r32 20r32
+25V13 Str_To_Bytes{19|24A9} 25b13 25>27 32l8 32t20 74s24 78s24 87s20 87s43
+. 97s27 97s54 101s27 101s54 112s36 227s32 235s27 238s27 255s38 260s25 266s27
+. 269s27
+25a27 S{string} 26r30 28r21 29r36 29r39
+26a7 Res{19|24A9} 29m10 31r14
+28i11 I{integer} 29r15 29r49
+34V13 Hex_Val{19|23M12} 34b13 34>22 43l8 43t15 49s33 50s24
+34e22 C{character} 36r10 37r32 38r13 39r32 41r32
+45V13 Hex_To_Bytes{19|24A9} 45b13 45>27 53l8 53t20 71s18 75s18 79s18 88s20
+. 98s21 102s21 108s33 110s36 111s36 114s44 119s42
+45a27 H{string} 46r30 49r42 49r45 50r33 50r36
+46a7 Res{19|24A9} 48r21 49m10 52r14
+48i11 I{integer} 49r15 49r55 50r46
+55V13 Make_Path{17|26R9} 55b13 55>24 62l8 62t17 201s68 203s68 205s68 207s88
+. 209s88 211s88 213s91
+55a24 S{string} 56r35 58r21 59r39 59r42
+56r7 P{17|26R9} 59m10 61r14
+58i11 I{integer} 59r18 59r52
+67a7 D{19|26A12} 70m31 71r14 74m46 75r14 78m99 79r14
+68a7 Empty{19|24A9} 70r24
+85a7 Mac{19|26A12} 87m90 88r14
+94a7 Out1{19|24A9} 97m80 98r14
+95a7 Out2{19|24A9} 101m80 102r14
+108a7 Key{19|27A12} 125r34 129r34 134r34
+110a7 Nonce{19|28A12} 125r39 129r39 134r39
+111a7 AAD{19|24A9} 125r46 129r46 134r46
+112a7 PT{19|24A9} 120r30 121r30 125r51 130r32
+114a7 Expected_CT{19|24A9} 126r19
+119a7 Expected_Tag{19|29A12} 127r20
+120a7 CT{19|24A9} 125m55 126r14 129r51 134r51
+121a7 Dec{19|24A9} 129m60 130r26 134m60 135r30 135r51 135r56
+122a7 Tag{19|29A12} 125m59 127r14 129r55 133m7 133r18 134r55
+123b7 Ok{boolean} 129m65 130r14 134m65 135r18
+141r7 DS{15|51R9} 145m19 147m28 147r28 151m28 151r28 153m28 153r28 158m10
+. 158r10 164m10 164r10 170m10 170r10 177m10 177r10 181m28 181r28 183m28 183r28
+. 188m10 188r10 194m19 194r19 196m28 196r28
+142e7 Dec{19|64E9} 147m78 148r14 151m82 152r14 153m84 154r14 160m41 161r14
+. 166m41 167r14 172m41 173r14 179m41 180r14 181m87 182r14 183m90 184r14 190m41
+. 191r14 196m87 197r14
+143b7 Rev{boolean} 194m58 195r14
+218r7 Rec{18|31R9} 227m66 228r25
+219a7 Cred{19|31A12} 228m30 229r24 232r21 242m7 242r21 243r21
+220a7 Mark{19|31A12} 230m85 232r27 243r27
+221a7 Digest{19|26A12} 229m30 230r76
+222r7 Mach{18|70R9} 232m39 233r14 233r50 235m21 235r21 236r53 238m21 238r21
+. 239r51 243m40 244r14 244r52
+223e7 Res{18|55E9} 235m57 236r14 238m57 239r14
+224m7 Del{11|92M9} 235m62 238m62
+225a7 Salt{19|30A12} 227r55
+249r7 FDE{16|56R9} 260m87 261r26 263m20 263r20 264r14 264r47 266m22 266r22
+. 267r30 269m22 269r22 270r26 272r22 274r22 278r22
+250a7 Meta{19|31A12} 260m92
+251a7 Salt{19|30A12} 260r61
+252a7 Nonce{19|28A12} 260r67 272r31 274r31 278r31
+253a7 Dek{19|27A12} 260r74
+254b7 Ok{boolean} 260m98 261r14 266m62 267r18 269m63 270r14 272m51 273r14
+. 274m54 275r14 278m54 279r18
+255a7 PT{19|24A9} 256r32 257r32 272r38 275r34
+256a7 CT{19|24A9} 272m42 274r38 278r38
+257a7 Out_P{19|24A9} 274m47 275r26 278m47
+258a7 Tag{19|29A12} 272m46 274r42 278r42
+

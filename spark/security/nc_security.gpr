@@ -1,0 +1,57 @@
+--  NetizenCore SPARK Ada Security Core — Multi-Target GPR Project
+--  Supports:
+--    - Bare-metal AArch64 (aarch64-elf, light/zfp runtime) for ARMv8-A kernel
+--    - Bare-metal x86_64  (x86_64-elf, light/zfp runtime)  for x86_64 kernel
+--    - Native Linux host  (x86_64-linux-gnu)               for Cargo host tests & GNATprove
+
+library project NC_Security is
+
+   type Target_Arch_Type is ("aarch64", "x86_64", "host");
+   Target_Arch : Target_Arch_Type := external ("NC_SPARK_ARCH", "aarch64");
+
+   for Source_Dirs use ("src");
+   for Object_Dir  use "obj/" & Target_Arch;
+   for Library_Dir use "lib/" & Target_Arch;
+   for Library_Name use "nc_security";
+   for Library_Kind use "static";
+   for Languages use ("Ada");
+
+   package Compiler is
+      Common_Switches :=
+        ("-O2",
+         "-gnat2012",
+         "-gnatwa",
+         "-fno-exceptions",
+         "-ffunction-sections",
+         "-fdata-sections");
+
+      case Target_Arch is
+         when "aarch64" =>
+            for Default_Switches ("Ada") use Common_Switches &
+              ("-mgeneral-regs-only",
+               "-fno-pic",
+               "-mcmodel=small");
+         when "x86_64" =>
+            for Default_Switches ("Ada") use Common_Switches &
+              ("-mno-red-zone",
+               "-mno-mmx",
+               "-mno-sse",
+               "-mno-sse2",
+               "-fPIC",
+               "-mcmodel=small");
+         when "host" =>
+            for Default_Switches ("Ada") use Common_Switches &
+              ("-fPIC");
+      end case;
+   end Compiler;
+
+   package Prove is
+      for Proof_Switches ("Ada") use
+        ("--level=1",
+         "--timeout=5",
+         "--steps=5000",
+         "--warnings=continue",
+         "--report=statistics");
+   end Prove;
+
+end NC_Security;

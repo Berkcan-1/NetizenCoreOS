@@ -1,0 +1,7 @@
+id = "nc.keyboard"
+name = "Netizen Keyboard"
+version = "1.0.0"
+icon = "keyboard"
+width_units = 36
+height_units = 24
+capabilities = settings.read

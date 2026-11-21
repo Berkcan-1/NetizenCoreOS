@@ -1,0 +1,176 @@
+V "GNAT Lib v16"
+A -x
+A ada
+A -gnatA
+A -O2
+A -gnat2012
+A -gnatwa
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -fPIC
+A -gnatc
+A -gnatis
+P GP
+
+RN
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+
+U nc_security_types%b	nc_security_types.adb	fd6788a7 OO PK
+
+U nc_security_types%s	nc_security_types.ads	49924314 OO PU PK
+W interfaces%s		interfac.ads		interfac.ali
+
+D interfac.ads		20261121073825 9111f9c1 interfaces%s
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D nc_security_types.adb	20261121090941 25e43272 nc_security_types%b
+D system.ads		20261121073825 e2b7c99d system%s
+G a Z
+X 1 interfac.ads
+47K9*Interfaces 247e15 2|6w6 6r22
+81M9*Unsigned_8 2|23r20
+92M9*Unsigned_32 2|12r27
+X 2 nc_security_types.ads
+8K9*NC_Security_Types 156l5 156e22 3|5b14 84l5 84t22
+12m4*ABI_Version{1|92M9}
+15N4*Max_App_Id_Len 39r48 40r46 140r42 148r31
+16N4*Max_Publisher_Len 49r51 50r49 153r31
+17N4*Max_Path_Len
+18N4*Max_Secret_Len
+19N4*Max_Path_Depth
+20N4*Max_Registered_Apps
+21N4*Audit_Ring_Capacity
+23M12*Byte{1|81M9} 24r51 3|22r34
+24A9*Byte_Array(23M12)<integer> 26r25 27r25 28r25 29r25 30r25 31r26 40r29
+. 50r32 60r29
+26A12*Hash_256{24A9}<integer> 33r29
+27A12*Key_256{24A9}<integer> 34r29
+28A12*Nonce_96{24A9}<integer>
+29A12*Tag_128{24A9}<integer> 36r29
+30A12*Salt_128{24A9}<integer> 35r29
+31A12*Sector_512{24A9}<integer>
+33a4*Zero_Hash_256{26A12}
+34a4*Zero_Key_256{27A12}
+35a4*Zero_Salt_128{30A12}
+36a4*Zero_Tag_128{29A12}
+39I12*App_Id_Length{natural} 43r14
+40A12*App_Id_Buf{24A9}<integer> 44r14
+42R9*Bounded_App_Id 45e14 47r28 130r34 137r35 147r45 3|7r34 30r35 62r45 63r13
+43i7*Len{39I12} 47m47 132r11 132r19 133r30 140r14 140r35 141r33 149r38 3|9r12
+. 9r21 12r23 32r13 37r29 41r24 65m11 67r37
+44a7*Data{40A12} 47m57 133r39 133r52 142r17 143r17 144r17 3|14r42 14r55 15r15
+. 15r29 36r13 37r20 44r35 45r18 46r18 47r18 48r37 53r24 54r24 68m14
+47r4*Empty_App_Id{42R9} 3|63r31
+49I12*Publisher_Length{natural} 53r14
+50A12*Publisher_Buf{24A9}<integer> 54r14
+52R9*Bounded_Publisher 55e14 57r31 152r48 3|73r48 74r13
+53i7*Len{49I12} 57m53 154r41 3|76m11 78r37
+54a7*Data{50A12} 57m63 3|79m14
+57r4*Empty_Publisher{52R9} 3|74r34
+60A12*Audit_Tag_Buf{24A9}<integer> 61r30
+61a4*Zero_Audit_Tag{60A12}
+64E9*Auth_Decision 76e6 78r8
+65n7*Auth_Allow{64E9} 79r7
+66n7*Auth_Deny_Unknown_App{64E9} 80r7
+67n7*Auth_Deny_Revoked_App{64E9} 81r7
+68n7*Auth_Deny_Rollback_Version{64E9} 82r7
+69n7*Auth_Deny_Capability_Not_Granted{64E9} 83r7
+70n7*Auth_Deny_Policy_Locked{64E9} 84r7
+71n7*Auth_Deny_Invalid_Input{64E9} 85r7
+72n7*Auth_Deny_Impersonation{64E9} 86r7
+73n7*Auth_Deny_Table_Full{64E9} 87r7
+74n7*Auth_Deny_System_Only{64E9} 88r7
+75n7*Auth_Deny_Untrusted_Publisher{64E9} 89r7
+92E9*Fs_Op 93e6 95r8
+92n19*Fs_Op_Read{92E9} 96r7
+92n31*Fs_Op_Write{92E9} 97r7
+92n44*Fs_Op_Delete{92E9} 98r7
+100E9*Fs_Decision 105e6 107r8
+101n7*Fs_Allow{100E9} 108r7
+102n7*Fs_Deny_Bad_Path{100E9} 109r7
+103n7*Fs_Deny_Read_Only{100E9} 110r7
+104n7*Fs_Deny_Permission{100E9} 111r7
+114E9*Trust_Tier 115e6 117r8
+114n24*Tier_User{114E9} 118r7
+114n35*Tier_System{114E9} 119r7
+122E9*Install_Source 123e6 125r8
+122n28*Source_User_Data{122E9} 126r7
+122n46*Source_System_Image{122E9} 127r7
+130V13*Equal_App_Id{boolean} 130>27 130>30 131r19 3|7b13 20l8 20t20
+130r27 A{42R9} 132r9 133r28 133r37 3|7b27 9r10 12r21 14r40 15r13
+130r30 B{42R9} 132r17 133r50 3|7b30 9r19 14r53 15r27
+133i18 I{integer} 133r45 133r58
+137V13*Is_Valid_App_Id{boolean} 137>30 139r12 3|30b13 60l8 60t23
+137r30 Id{42R9} 140r11 140r32 141r30 142r14 143r14 144r14 3|30b30 32r10 36r10
+. 37r17 37r26 41r21 44r32 45r15 46r15 47r15 48r34 53r21 54r21
+141i20 I{integer} 142r23 143r23 144r23
+147V13*Make_App_Id{42R9} 147>26 149r19 3|62b13 71l8 71t19
+147a26 S{string} 148r19 149r44 3|62b26 65r18 66r21 67r43 68r41 68r44
+152V13*Make_Publisher{52R9} 152>29 154r19 3|73b13 82l8 82t22
+152a29 S{string} 153r19 154r47 3|73b29 76r18 77r21 78r43 79r41 79r44
+X 3 nc_security_types.adb
+12i11 I{integer} 14r31 15r21 15r35
+14i21 K{integer} 14r48 14r61
+22V13 Is_Safe_Id_Char{boolean} 22b13 22>30 44s15 48s17
+22m30 C{2|23M12} 23r8 23r42 24r16 24r50 25r16 25r50 26r15 27r15 28r15
+41i11 I{integer} 43r31 48r43 52r13 53r30 54r30
+43i21 K{integer} 44r41 45r24 46r24 47r24
+63r7 Res{2|42R9} 65m7 67r33 68m10 70r14
+66i11 I{integer} 68r20 68r55
+74r7 Res{2|52R9} 76m7 78r33 79m10 81r14
+77i11 I{integer} 79r20 79r55
+
+QQ SPARKVERSION FSF 16.1.0
+GG EK_DIRECT_CALLS nc_security_types__equal_app_id 0
+GG EK_PROOF_DEPENDENCIES nc_security_types__equal_app_id 0
+GG EK_GLOBALS nc_security_types__equal_app_id local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_types proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_types__is_valid_app_id 1 nc_security_types__is_safe_id_char
+GG EK_PROOF_DEPENDENCIES nc_security_types__is_valid_app_id 0
+GG EK_GLOBALS nc_security_types__is_valid_app_id local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_types proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_types__make_app_id 0
+GG EK_PROOF_DEPENDENCIES nc_security_types__make_app_id 0
+GG EK_GLOBALS nc_security_types__make_app_id local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_types proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_types__make_publisher 0
+GG EK_PROOF_DEPENDENCIES nc_security_types__make_publisher 0
+GG EK_GLOBALS nc_security_types__make_publisher local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_types proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_types__is_safe_id_char 0
+GG EK_PROOF_DEPENDENCIES nc_security_types__is_safe_id_char 0
+GG EK_GLOBALS nc_security_types__is_safe_id_char local TRUE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_types proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_types 0
+GG EK_PROOF_DEPENDENCIES nc_security_types 0
+GG EK_GLOBALS nc_security_types local FALSE E_PACKAGE TRUE ORIGIN_FLOW 0 proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 initializes 0 refined_initializes 0 calls_proof 0 calls 0 calls_conditional 0 local_packages 0 local_var 0 TRUE FALSE FALSE FALSE FALSE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__make_publisher FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE nc_security_types__is_safe_id_char FALSE FALSE FALSE FALSE TRUE nc_security_types BODY_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__is_valid_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__equal_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__make_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE interfaces__rotate_right__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_END_MARKER

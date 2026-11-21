@@ -1,0 +1,71 @@
+V "GNAT Lib v16"
+A -O2
+A -gnat2012
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -mgeneral-regs-only
+A -fno-pic
+A -mcmodel=small
+A --RTS=/home/berkcan/Masaüstü/NetizenCore/spark/rts/zfp-64
+A -mlittle-endian
+A -mabi=lp64
+P
+
+RN
+RV NO_IMPLEMENTATION_PRAGMAS
+
+U nc_security_rts%b	nc_security_rts.adb	190287eb NE OO PK
+
+U nc_security_rts%s	nc_security_rts.ads	df0ae3e4 EE NE OO PK
+W interfaces%s		interfac.ads		interfac.ali
+W system%s		system.ads		system.ali
+
+D interfac.ads		20261121074005 9111f9c1 interfaces%s
+D nc_security_rts.ads	20261121074155 aff39185 nc_security_rts%s
+D nc_security_rts.adb	20261121074157 b6f1166e nc_security_rts%b
+D system.ads		20261121074005 e1e88ba0 system%s
+G a e
+G c Z s b [rcheck_index nc_security_rts 13 14 none]
+G c Z s b [rcheck_range nc_security_rts 20 14 none]
+G c Z s b [rcheck_overflow nc_security_rts 27 14 none]
+G c Z s b [rcheck_invalid_data nc_security_rts 34 14 none]
+G c Z s b [rcheck_length nc_security_rts 41 14 none]
+G c Z s b [rcheck_divide_by_zero nc_security_rts 48 14 none]
+G c Z s b [last_chance_handler nc_security_rts 55 14 none]
+G c Z s s [kernel_fatal_trap nc_security_rts 62 14 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 2|8w6 8r22
+92M9*Unsigned_32 2|62r40
+X 2 nc_security_rts.ads
+11K9*NC_Security_RTS 68l5 68e20 3|5b14 49l5 49t20
+13U14*Rcheck_Index 14>7 14>30 3|7b14 11l8 11t20
+14m7 File{4|67M9} 3|7b28 8r28
+14i30 Line{integer} 3|7b51 10r29
+20U14*Rcheck_Range 21>7 21>30 3|13b14 17l8 17t20
+21m7 File{4|67M9} 3|13b28 14r28
+21i30 Line{integer} 3|13b51 16r29
+27U14*Rcheck_Overflow 28>7 28>30 3|19b14 23l8 23t23
+28m7 File{4|67M9} 3|19b31 20r28
+28i30 Line{integer} 3|19b54 22r29
+34U14*Rcheck_Invalid_Data 35>7 35>30 3|25b14 29l8 29t27
+35m7 File{4|67M9} 3|25b35 26r28
+35i30 Line{integer} 3|25b58 28r29
+41U14*Rcheck_Length 42>7 42>30 3|31b14 35l8 35t21
+42m7 File{4|67M9} 3|31b29 32r28
+42i30 Line{integer} 3|31b52 34r29
+48U14*Rcheck_Divide_By_Zero 49>7 49>30 3|37b14 41l8 41t29
+49m7 File{4|67M9} 3|37b37 38r28
+49i30 Line{integer} 3|37b60 40r29
+55U14*Last_Chance_Handler 56>7 56>29 3|43b14 47l8 47t27
+56m7 Msg{4|67M9} 3|43b35 44r28
+56i29 Line{integer} 3|43b57 46r30
+62U14*Kernel_Fatal_Trap 62>33 62>53 3|10s7 16s7 22s7 28s7 34s7 40s7 46s7
+62m33 Code{1|92M9}
+62i53 Line{integer}
+X 4 system.ads
+37K9*System 2|9w6 14r14 21r14 28r14 35r14 42r14 49r14 56r13 3|7r35 13r35
+. 19r38 25r42 31r36 37r44 43r41 4|155e11
+67M9*Address 2|14r21 21r21 28r21 35r21 42r21 49r21 56r20 3|7r42 13r42 19r45
+. 25r49 31r43 37r51 43r48
+

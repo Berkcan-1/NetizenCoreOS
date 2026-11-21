@@ -1,0 +1,87 @@
+V "GNAT Lib v16"
+A -O2
+A -gnatA
+A -gnat2012
+A -gnatwa
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -fPIC
+A -mtune=generic
+A -march=x86-64
+P ZX
+
+RN
+RV NO_IMPLEMENTATION_PRAGMAS
+
+U nc_security_capabilities%b  nc_security_capabilities.adb  7c9fd2a3 NE OO PK
+
+U nc_security_capabilities%s  nc_security_capabilities.ads  7836d680 NE OO PU PK
+W interfaces%s		interfac.ads		interfac.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D nc_security_capabilities.ads  20261121073905 e9272f41 nc_security_capabilities%s
+D nc_security_capabilities.adb  20261121073049 95b8fde2 nc_security_capabilities%b
+D system.ads		20260430083320 e2b7c99d system%s
+G a e
+G c Z s s [is_valid_mask nc_security_capabilities 74 13 none]
+G c Z s s [is_single_known_cap nc_security_capabilities 78 13 none]
+G c Z s b [clamp_user nc_security_capabilities 85 13 none]
+G c Z s b [dropped_for_user nc_security_capabilities 92 13 none]
+G c Z s b [compute_effective_grant nc_security_capabilities 99 13 none]
+G c Z s b [has_capability nc_security_capabilities 110 13 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 2|11w6 11r22
+95M9*Unsigned_64 2|16r24
+X 2 nc_security_capabilities.ads
+13K9*NC_Security_Capabilities 114l5 114e29 3|5b14 34l5 34t29
+16M12*Cap_Mask{1|95M9} 18r42 19r42 20r42 21r42 22r42 23r42 24r42 25r42 26r42
+. 27r42 28r42 29r42 30r42 31r42 32r42 33r42 34r42 35r42 36r42 37r42 38r42
+. 39r42 40r42 43r30 46r35 49r33 60r32 64r44 74r35 78r40 85r36 85r53 92r42
+. 92r59 100r19 101r19 102r19 102r36 110r36 110r52 3|7r36 7r53 12r42 12r59
+. 18r19 19r19 20r19 20r36 26r36 26r52
+18m4*Cap_None{16M12}
+19m4*Cap_Settings_Read{16M12} 50r6 65r6
+20m4*Cap_Settings_Write_Display{16M12}
+21m4*Cap_Settings_Write_Locale{16M12}
+22m4*Cap_Settings_Write_Keybd{16M12}
+23m4*Cap_Settings_Write_Network{16M12}
+24m4*Cap_Settings_Write_Drivers{16M12}
+25m4*Cap_Fs_User_Read{16M12} 51r9 66r9
+26m4*Cap_Fs_User_Write{16M12} 52r9 67r9
+27m4*Cap_Fs_User_Delete{16M12} 53r9
+28m4*Cap_Fs_Grant_Read{16M12}
+29m4*Cap_Fs_Grant_Write{16M12}
+30m4*Cap_Package_Install{16M12}
+31m4*Cap_Network_Client{16M12} 54r9 68r9
+32m4*Cap_System_Audit_Read{16M12}
+33m4*Cap_Ipc_Endpoint{16M12} 55r9 69r9
+34m4*Cap_Audio_Play{16M12} 56r9 70r9
+35m4*Cap_Notify_Post{16M12} 57r9 71r9
+36m4*Cap_Fs_All_Read{16M12}
+37m4*Cap_Fs_All_Write{16M12}
+38m4*Cap_Process_Launch{16M12}
+39m4*Cap_Package_Remove{16M12}
+40m4*Cap_Security_Manage{16M12}
+43m4*All_Known_Caps{16M12} 61r6 75r22 3|23r53
+46m4*Cap_Kernel_Internal{16M12}
+49m4*User_Allowed_Mask{16M12} 61r30 94r37 3|9r27 14r32
+60m4*System_Only_Mask{16M12} 87r31
+64m4*Third_Party_Verified_Ceiling{16M12}
+74V13*Is_Valid_Mask{boolean} 74b13 74>28 80s16 88s17 104s8
+74m28 Mask{16M12} 75r8
+78V13*Is_Single_Known_Cap{boolean} 78b13 78>34 112s16 3|28s14
+78m34 Cap{16M12} 79r7 80r31 81r17 81r26
+85V13*Clamp_User{16M12} 85>25 87r9 88r32 89r18 3|7b13 10l8 10t18
+85m25 Declared{16M12} 89r45 3|7b25 9r14
+92V13*Dropped_For_User{16M12} 92>31 94r9 3|12b13 15l8 15t24
+92m31 Declared{16M12} 3|12b31 14r14
+99V13*Compute_Effective_Grant{16M12} 100>7 101>7 102>7 104r23 105r18 106r18
+. 107r18 3|17b13 24l8 24t31
+100m7 Requested{16M12} 105r58 3|18b7 23r14
+101m7 Approved{16M12} 106r58 3|19b7 23r28
+102m7 Ceiling{16M12} 107r58 3|20b7 23r41
+110V13*Has_Capability{boolean} 110>29 110>46 112r51 3|26b13 32l8 32t22
+110m29 Mask{16M12} 3|26b29 31r15
+110m46 Cap{16M12} 112r37 3|26b46 28r35 31r24
+

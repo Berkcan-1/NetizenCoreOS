@@ -1,0 +1,7 @@
+id = "nc.files"
+name = "Dosyalar"
+version = "1.0.0"
+icon = "files"
+width_units = 36
+height_units = 24
+capabilities = fs.all.read, fs.all.write, fs.user.read, fs.user.write, fs.user.delete, settings.read, process.launch

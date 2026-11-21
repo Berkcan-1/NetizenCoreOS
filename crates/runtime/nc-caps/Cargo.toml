@@ -1,0 +1,11 @@
+[package]
+name = "nc-caps"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["spark"]
+spark = ["dep:nc-spark-sec"]
+
+[dependencies]
+nc-spark-sec = { path = "../../foundation/nc-spark-sec", optional = true }

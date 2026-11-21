@@ -1,0 +1,233 @@
+V "GNAT Lib v16"
+A -O2
+A -gnat2012
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -mno-red-zone
+A -mno-mmx
+A -mno-sse
+A -mno-sse2
+A -fPIC
+A -mcmodel=small
+A --RTS=/home/berkcan/Masaüstü/NetizenCore/spark/rts/zfp-64
+A -mtune=generic
+A -march=x86-64
+P
+
+RN
+RV NO_DEFAULT_INITIALIZATION
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_IMPLICIT_LOOPS
+
+U nc_security_encryption%b  nc_security_encryption.adb  a27469df NE OO PK
+W nc_security_crypto%s	nc_security_crypto.adb	nc_security_crypto.ali
+
+U nc_security_encryption%s  nc_security_encryption.ads  dff5b3f0 NE OO PU PK
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+
+D interfac.ads		20261121074005 9111f9c1 interfaces%s
+D nc_security_crypto.ads  20261121073351 d34bc6c8 nc_security_crypto%s
+D nc_security_encryption.ads  20261121073536 9667f0e4 nc_security_encryption%s
+D nc_security_encryption.adb  20261121091051 e7585ff3 nc_security_encryption%b
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20261121074005 e1e88ba0 system%s
+G a e
+G c Z s s [is_valid_kdf_iterations nc_security_encryption 62 13 none]
+G c Z s b [metadata_to_sector nc_security_encryption 66 14 none]
+G c Z s b [metadata_from_sector nc_security_encryption 72 14 none]
+G c Z s b [provision_volume nc_security_encryption 83 14 none]
+G c Z s b [load_metadata_sector nc_security_encryption 102 14 none]
+G c Z s b [unlock_volume nc_security_encryption 112 14 none]
+G c Z s b [lock_volume nc_security_encryption 126 14 none]
+G c Z s b [encrypt_block nc_security_encryption 132 14 none]
+G c Z s b [decrypt_block nc_security_encryption 145 14 none]
+G c Z s s [encryption_metadataIP nc_security_encryption 46 9 none]
+G c Z s s [encryption_stateIP nc_security_encryption 56 9 none]
+G r c none [metadata_to_sector nc_security_encryption 66 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [metadata_from_sector nc_security_encryption 72 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [metadata_from_sector nc_security_encryption 72 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [provision_volume nc_security_encryption 83 14 none] [pbkdf2_hmac_sha256 nc_security_crypto 73 14 none]
+G r c none [provision_volume nc_security_encryption 83 14 none] [chacha20_poly1305_encrypt nc_security_crypto 83 14 none]
+G r c none [provision_volume nc_security_encryption 83 14 none] [secure_zero nc_security_crypto 44 14 none]
+G r c none [provision_volume nc_security_encryption 83 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [load_metadata_sector nc_security_encryption 102 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [load_metadata_sector nc_security_encryption 102 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [unlock_volume nc_security_encryption 112 14 none] [secure_zero nc_security_crypto 44 14 none]
+G r c none [unlock_volume nc_security_encryption 112 14 none] [pbkdf2_hmac_sha256 nc_security_crypto 73 14 none]
+G r c none [unlock_volume nc_security_encryption 112 14 none] [chacha20_poly1305_decrypt nc_security_crypto 96 14 none]
+G r c none [lock_volume nc_security_encryption 126 14 none] [secure_zero nc_security_crypto 44 14 none]
+G r c none [encrypt_block nc_security_encryption 132 14 none] [chacha20_poly1305_encrypt nc_security_crypto 83 14 none]
+G r c none [decrypt_block nc_security_encryption 145 14 none] [secure_zero nc_security_crypto 44 14 none]
+G r c none [decrypt_block nc_security_encryption 145 14 none] [chacha20_poly1305_decrypt nc_security_crypto 96 14 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 3|22w6 22r29
+81M9*Unsigned_8
+92M9*Unsigned_32 3|29r33 30r33 31r33 48r24 62r46 88r24 4|18r54 19r7 20r22
+. 21r22 22r22 24r32 91r15 128r24
+95M9*Unsigned_64 3|53r24 134r20 147r20 4|35r49 38r13 41r36 46r32 260r20 290r20
+154V13*Shift_Left{92M9} 4|20s10 21s10 22s10
+159V13*Shift_Right{92M9} 4|30s36 31s36 32s36
+179V13*Shift_Left{95M9} 4|41s24
+184V13*Shift_Right{95M9} 4|52s39
+X 2 nc_security_crypto.ads
+23K9*NC_Security_Crypto 110e23 4|5w6 5r30
+36V13*Constant_Time_Eq{boolean} 4|96s14 103s14
+44U14*Secure_Zero 4|161s7 219s10 236s7 243s10 247s7 252s7 302s10
+62U14*Sha256_One_Shot 4|81s7 102s7
+73U14*Pbkdf2_Hmac_Sha256 4|153s7 226s7
+83U14*ChaCha20_Poly1305_Encrypt 4|154s7 278s7
+84a7 Key{5|27A12} 4|155r10 279r10
+85a7 Nonce{5|28A12} 4|156r10 280r10
+86a7 AAD{5|24A9} 4|157r10 281r10
+87a7 Plaintext{5|24A9} 4|158r10 282r10
+88a7 Ciphertext{5|24A9} 4|159r10 283r10
+89a7 Tag{5|29A12} 4|160r10 284r10
+96U14*ChaCha20_Poly1305_Decrypt 4|228s7 307s7
+97a7 Key{5|27A12} 4|229r10 308r10
+98a7 Nonce{5|28A12} 4|230r10 309r10
+99a7 AAD{5|24A9} 4|231r10 310r10
+100a7 Ciphertext{5|24A9} 4|232r10 311r10
+101a7 Tag{5|29A12} 4|233r10 312r10
+102a7 Plaintext{5|24A9} 4|234r10 313r10
+103b7 Valid{boolean} 4|235r10 314r10
+X 3 nc_security_encryption.ads
+25K9*NC_Security_Encryption 161l5 161e27 4|7b14 317l5 317t27
+28m4*Enc_Version_1{5|23M12} 69r33 78r26 4|97r31 113r28 164r28
+29m4*Min_Kdf_Iters{1|92M9} 63r16
+30m4*Default_Kdf_Iters{1|92M9}
+31m4*Max_Kdf_Iters{1|92M9} 63r48
+33E9*Encryption_Status 38e6 40r8 57r20
+34n7*Enc_Unconfigured{33E9} 41r7 57r43 95r31 4|138r24 186r24 191r26
+35n7*Enc_Locked{33E9} 42r7 4|198r26 215r26 221r29 244r26 254r26
+36n7*Enc_Unlocked{33E9} 43r7 99r31 107r33 119r32 123r31 129r33 142r39 156r33
+. 4|172r27 220r28 240r30 253r25 273r26 301r26
+37n7*Enc_Corrupted{33E9} 44r7 4|200r26
+46R9*Encryption_Metadata 54e14 58r20 67r16 74r20 4|67r16 87r20 182r15
+47m7*Version{5|23M12} 69r23 78r16 4|74r31 113m10 164m10
+48m7*Kdf_Iterations{1|92M9} 70r57 79r50 4|75r24 114m10 165m10 217r57 227r54
+49a7*Kdf_Salt{5|30A12} 4|76r33 115m10 166m10 227r33
+50a7*Wrap_Nonce{5|28A12} 4|77r33 116m10 167m10 230r35
+51a7*Wrapped_Dek{5|27A12} 4|78r33 117m10 168m10 232r35
+52a7*Wrap_Tag{5|29A12} 4|79r33 118m10 169m10 233r35
+53m7*Metadata_Gen{1|95M9} 4|80r24 119m10 170m10
+56R9*Encryption_State 60e14 89r28 104r25 113r27 126r42 133r20 146r20 4|129r28
+. 180r25 205r27 250r42 259r20 289r20
+57e7*Status{33E9} 95r22 99r22 107r23 119r22 123r22 129r23 142r29 156r23 4|138m10
+. 172m13 186m10 191m16 198m16 200m16 215r16 220r19 221m19 240m16 244m16 253r16
+. 254m16 273r16 301r16
+58r7*Meta{46R9} 4|139m10 163m13 174r33 187m10 197m16 217r52 227r28 227r49
+. 230r30 232r30 233r30
+59a7*Active_Dek{5|27A12} 96r31 106r14 120r31 128r14 4|140m10 171m13 188m10
+. 219m29 239m16 243m29 252m26 279r30 308r30
+62V13*Is_Valid_Kdf_Iterations{boolean} 62b13 62>38 70s27 79s20 4|108s14 146s21
+. 217s21
+62m38 Iters{1|92M9} 63r7 63r39
+66U14*Metadata_To_Sector 67>7 68<7 4|66b14 83l8 83t26 174s7
+67r7 Meta{46R9} 69r18 70r52 4|67b7 74r26 75r19 76r28 77r28 78r28 79r28 80r19
+68a7 Sector{5|31A12} 4|68b7 72m7 73m7 74m7 75m40 75r40 76m7 77m7 78m7 79m7
+. 80m38 80r38 81r24 82m7
+72U14*Metadata_From_Sector 73>7 74<7 75<7 4|85b14 121l8 121t28 195s7
+73a7 Sector{5|31A12} 4|86b7 96r32 97r17 102r24 103r38 107r27 107r40 107r53
+. 107r66 115r28 116r28 117r28 118r28 119r39
+74r7 Meta{46R9} 78r11 79r45 4|87b7 93m7 112m7
+75b7 Valid{boolean} 77r12 4|88b7 94m7 120m7
+83U14*Provision_Volume 84>7 85>7 86>7 87>7 88>7 89<7 90<7 91<7 4|123b14 176l8
+. 176t24
+84a7 Passphrase{5|24A9} 92r19 4|124b7 145r10 153r27
+85a7 Salt{5|30A12} 4|125b7 148r30 153r39 166r28
+86a7 Wrap_Nonce{5|28A12} 4|126b7 156r24 167r28
+87a7 Raw_Dek{5|27A12} 4|127b7 147r30 158r24 171r27
+88m7 Kdf_Iterations{1|92M9} 4|128b7 146r46 153r45 165r28
+89r7 State{56R9} 95r16 96r25 99r16 4|129b7 137m7 163m7 171m7 172m7 174r27
+90a7 Meta_Sector{5|31A12} 4|130b7 141m7 174m39
+91b7 Success{boolean} 94r21 98r17 4|131b7 142m7 175m7
+102U14*Load_Metadata_Sector 103>7 104<7 4|178b14 202l8 202t28
+103a7 Meta_Sector{5|31A12} 4|179b7 190r23 195r29
+104r7 State{56R9} 106r8 107r17 4|180b7 185m7 191m10 197m10 198m10 200m10
+112U14*Unlock_Volume 113=7 114>7 115<7 4|204b14 248l8 248t21
+113r7 State{56R9} 119r16 120r25 123r16 4|205b7 215r10 217r46 219m23 219r23
+. 220r13 221m13 227r22 227r43 230r24 232r24 233r24 239m10 240m10 243m23 243r23
+. 244m10
+114a7 Passphrase{5|24A9} 116r19 4|206b7 216r17 227r10
+115b7 Unlocked{boolean} 118r21 122r17 4|207b7 213m7 241m10 245m10
+126U14*Lock_Volume 126=27 4|250b14 256l8 256t19
+126r27 State{56R9} 128r8 129r17 4|250b27 252m20 252r20 253r10 254m10
+132U14*Encrypt_Block 133>7 134>7 135>7 136>7 137<7 138<7 139<7 4|258b14 286l8
+. 286t21
+133r7 State{56R9} 142r23 4|259b7 273r10 279r24
+134m7 Block_Id{1|95M9} 4|260b7 277r19
+135a7 Nonce{5|28A12} 4|261b7 280r24
+136a7 Plaintext{5|24A9} 140r39 141r28 4|262b7 282r24
+137a7 Ciphertext{5|24A9} 140r19 4|263b7 271m7 283m24
+138a7 Tag{5|29A12} 4|264b7 272m7 284m24
+139b7 Success{boolean} 142r61 4|265b7 274m10 285m7
+145U14*Decrypt_Block 146>7 147>7 148>7 149>7 150>7 151<7 152<7 4|288b14 315l8
+. 315t21
+146r7 State{56R9} 156r17 4|289b7 301r10 308r24
+147m7 Block_Id{1|95M9} 4|290b7 306r19
+148a7 Nonce{5|28A12} 4|291b7 309r24
+149a7 Ciphertext{5|24A9} 153r38 154r28 4|292b7 311r24
+150a7 Tag{5|29A12} 4|293b7 312r24
+151a7 Plaintext{5|24A9} 153r19 159r30 159r49 4|294b7 302m23 313m24
+152b7 Success{boolean} 156r55 158r21 4|295b7 303m10 314m24
+159i25 I{integer} 159r60
+X 4 nc_security_encryption.adb
+9a4 Enc_Magic{5|24A9} 73r26 96r49
+13a4 Wrap_AAD{5|24A9} 157r24 231r24
+18V13 Load_LE32{1|92M9} 18b13 18>24 18>28 18>32 18>36 107s16
+18m24 B0{5|23M12} 19r20
+18m28 B1{5|23M12} 20r35
+18m32 B2{5|23M12} 21r35
+18m36 B3{5|23M12} 22r35
+24U14 Store_LE32 24b14 24>26 24<45 33l8 33t18 75s7
+24m26 Val{1|92M9} 29r36 30r49 31r49 32r49
+24a45 Dst{5|24A9} 25r18 25r42 28m7 29m7 29r12 30m7 30r12 31m7 31r12 32m7
+. 32r12
+35V13 Load_LE64{1|95M9} 35b13 35>24 44l8 44t17 119s28
+35a24 Src{5|24A9} 36r18 41r49 41r54
+38m7 Res{1|95M9} 41m10 41r17 43r14
+40i11 I{integer} 41r66 41r71
+46U14 Store_LE64 46b14 46>26 46<45 54l8 54t18 80s7 277s7 306s7
+46m26 Val{1|95M9} 52r52
+46a45 Dst{5|24A9} 47r18 47r42 50m7 52m10 52r15
+51i11 I{integer} 52r27 52r57
+56V13 Is_All_Zero{boolean} 56b13 56>26 64l8 64t19 147s17 148s17 190s10
+56a26 Buf{5|24A9} 58r16 59r13
+58i11 I{integer} 59r18
+70a7 Tail{5|26A12} 81m43 82r30
+90a7 Tail{5|26A12} 102m43 103r32
+91m7 Iters{1|92M9} 107m7 108r39 114r28
+133a7 Kek{5|27A12} 153m61 155r24 161m20
+134a7 Wrapped_Dek{5|27A12} 159m24 168r28
+135a7 Wrap_Tag{5|29A12} 160m24 169r28
+182r7 Meta{3|46R9} 195m42 197r26
+183b7 Valid{boolean} 195m48 196r10
+209a7 Kek{5|27A12} 227m70 229r24 236m20
+210a7 Unwrap{5|27A12} 234m24 239r30 247m20
+211b7 Tag_Ok{boolean} 235m24 238r10
+267a7 Block_AAD{5|24A9} 277m29 277r29 281r24
+297a7 Block_AAD{5|24A9} 306m29 306r29 310r24
+X 5 nc_security_types.ads
+8K9*NC_Security_Types 3|23w6 23r29 5|156e22
+18N4*Max_Secret_Len 3|92r40 116r40
+23M12*Byte{1|81M9} 3|28r33 47r24 4|18r41 29r30 30r30 31r30 32r30 52r33
+24A9*Byte_Array(23M12)<integer> 3|84r24 114r20 136r20 137r24 149r20 151r24
+. 4|9r25 13r24 24r55 35r30 46r55 56r32 124r24 206r20 262r20 263r24 267r19
+. 292r20 294r24 297r19
+26A12*Hash_256{24A9}<integer> 4|70r14 90r15
+27A12*Key_256{24A9}<integer> 3|51r24 59r20 87r24 4|127r24 133r21 134r21 209r17
+. 210r17
+28A12*Nonce_96{24A9}<integer> 3|50r24 86r24 135r20 148r20 4|126r24 261r20
+. 291r20
+29A12*Tag_128{24A9}<integer> 3|52r24 138r24 150r20 4|135r21 264r24 293r20
+30A12*Salt_128{24A9}<integer> 3|49r24 85r24 4|125r24
+31A12*Sector_512{24A9}<integer> 3|68r20 73r16 90r28 103r21 4|68r20 86r16
+. 130r28 179r21
+34a4*Zero_Key_256{27A12} 3|51r39 59r43 96r44 106r27 120r44 128r27 4|140r24
+. 188r24
+35a4*Zero_Salt_128{30A12} 3|49r39
+36a4*Zero_Tag_128{29A12} 3|52r39 4|272r21
+

@@ -1,0 +1,225 @@
+V "GNAT Lib v16"
+A -O2
+A -gnatA
+A -gnat2012
+A -gnatwa
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -fPIC
+A -mtune=generic
+A -march=x86-64
+P ZX
+
+RN
+RV NO_DEFAULT_INITIALIZATION
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_IMPLICIT_LOOPS
+
+U nc_security_lock%b	nc_security_lock.adb	16a05768 NE OO PK
+W nc_security_crypto%s	nc_security_crypto.adb	nc_security_crypto.ali
+
+U nc_security_lock%s	nc_security_lock.ads	f060b28f NE OO PU PK
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D nc_security_crypto.ads  20261121073351 d34bc6c8 nc_security_crypto%s
+D nc_security_lock.ads	20261121073532 b9f2f19b nc_security_lock%s
+D nc_security_lock.adb	20261121073534 7c19603b nc_security_lock%b
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20260430083320 e2b7c99d system%s
+G a e
+G c Z s b [secret_is_valid nc_security_lock 78 13 none]
+G c Z s b [lockout_seconds_for nc_security_lock 86 13 none]
+G c Z s b [derive_record nc_security_lock 94 14 none]
+G c Z s b [verify_record nc_security_lock 104 14 none]
+G c Z s b [record_to_sector nc_security_lock 114 14 none]
+G c Z s b [record_from_sector nc_security_lock 118 14 none]
+G c Z s b [marker_to_sector nc_security_lock 124 14 none]
+G c Z s b [marker_from_sector nc_security_lock 128 14 none]
+G c Z s b [evaluate_sectors nc_security_lock 134 14 none]
+G c Z s b [load_machine nc_security_lock 143 14 none]
+G c Z s b [lock_now nc_security_lock 154 14 none]
+G c Z s b [authenticate nc_security_lock 163 14 none]
+G c Z s s [lock_recordIP nc_security_lock 31 9 none]
+G c Z s s [lock_markerIP nc_security_lock 38 9 none]
+G c Z s s [lock_machine_stateIP nc_security_lock 70 9 none]
+G r c none [derive_record nc_security_lock 94 14 none] [pbkdf2_hmac_sha256 nc_security_crypto 73 14 none]
+G r c none [verify_record nc_security_lock 104 14 none] [pbkdf2_hmac_sha256 nc_security_crypto 73 14 none]
+G r c none [verify_record nc_security_lock 104 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [verify_record nc_security_lock 104 14 none] [secure_zero nc_security_crypto 44 14 none]
+G r c none [record_to_sector nc_security_lock 114 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [record_from_sector nc_security_lock 118 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [record_from_sector nc_security_lock 118 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [marker_to_sector nc_security_lock 124 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [marker_from_sector nc_security_lock 128 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [marker_from_sector nc_security_lock 128 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [evaluate_sectors nc_security_lock 134 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [evaluate_sectors nc_security_lock 134 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [load_machine nc_security_lock 143 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [load_machine nc_security_lock 143 14 none] [sha256_one_shot nc_security_crypto 62 14 none]
+G r c none [authenticate nc_security_lock 163 14 none] [pbkdf2_hmac_sha256 nc_security_crypto 73 14 none]
+G r c none [authenticate nc_security_lock 163 14 none] [constant_time_eq nc_security_crypto 36 13 none]
+G r c none [authenticate nc_security_lock 163 14 none] [secure_zero nc_security_crypto 44 14 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 3|15w6 15r29
+81M9*Unsigned_8
+92M9*Unsigned_32 3|25r34 26r34 33r20 40r27 74r16 86r42 86r62 98r20 139r25
+. 168r28 4|17r54 18r7 19r22 20r22 21r22 23r32 67r42 67r62 84r20 139r15 226r25
+. 283r16 331r28 360r29
+154V13*Shift_Left{92M9} 4|19s10 20s10 21s10
+159V13*Shift_Right{92M9} 4|28s36 29s36 30s36
+X 2 nc_security_crypto.ads
+23K9*NC_Security_Crypto 110e23 4|5w6 5r30
+36V13*Constant_Time_Eq{boolean} 4|111s16 144s14 151s14 199s14 206s14 265s14
+44U14*Secure_Zero 4|112s7
+62U14*Sha256_One_Shot 4|128s7 150s7 185s7 205s7 264s7
+73U14*Pbkdf2_Hmac_Sha256 4|89s7 110s7
+X 3 nc_security_lock.ads
+18K9*NC_Security_Lock 177l5 177e21 4|7b14 372l5 372t21
+21m4*Kind_None{5|23M12} 32r35
+22m4*Kind_Pin{5|23M12} 82r20 4|48r17 156r18
+23m4*Kind_Password{5|23M12} 82r46 4|60r20 156r44
+25m4*Default_Iterations{1|92M9}
+26m4*Min_Iterations{1|92M9} 100r32 110r48 4|105r34 161r18
+27i4*Pin_Length{natural} 4|49r30
+28i4*Password_Min{natural} 4|61r34
+29i4*Password_Max{natural} 4|61r73
+31R9*Lock_Record 36e14 73r16 99r24 105r16 115r16 120r20 138r25 4|85r24 98r16
+. 116r16 134r20 225r25 282r16
+32m7*Kind{5|23M12} 109r48 4|91m10 104r35 124r30 166m10
+33m7*Iterations{1|92M9} 110r35 4|92m10 105r21 110r49 125r23 167m10
+34a7*Salt{5|30A12} 4|93m10 110r39 126r32 168m10
+35a7*Hash{5|26A12} 4|94m10 111r47 127r32 169m10
+38R9*Lock_Marker 42e14 125r16 130r20 4|174r16 191r20 230r21
+39b7*Enabled{boolean} 4|182r32 215m10 249r16
+40m7*Fails{1|92M9} 4|183r21 216m10 271r19
+41a7*Credential_Digest{5|26A12} 4|184r30 217m10 265r47
+44E9*Lock_Disk_Status 48e6 50r8 71r16 137r25 4|224r25 281r16
+45n7*Lock_Disabled{44E9} 51r7 71r36 4|239r20 251r23 287r15 289r26 321r15
+. 343r27
+46n7*Lock_Enabled{44E9} 52r7 151r29 4|272r17 293r15 295r26 315r15
+47n7*Lock_Destroyed{44E9} 53r7 149r29 159r38 171r34 4|245r20 253r23 260r20
+. 267r20 299r15 302r26 318r15 337r27
+55E9*Lock_Auth_Result 61e6 63r8 167r28 4|330r28
+56n7*Auth_Res_Unlocked{55E9} 64r7 4|358r28
+57n7*Auth_Res_Invalid_Secret{55E9} 65r7 174r26 4|367r23
+58n7*Auth_Res_Locked_Out{55E9} 66r7 174r67 4|350r20 365r23
+59n7*Auth_Res_Not_Enabled{55E9} 67r7 4|345r20
+60n7*Auth_Res_Destroyed{55E9} 68r7 172r25 4|339r20
+70R9*Lock_Machine_State 75e14 147r26 155r24 164r31 4|279r26 310r24 327r31
+71e7*Status{44E9} 149r20 151r20 159r29 171r25 4|289m16 295m16 302m16 314r20
+. 337r18 343r18
+72b7*Locked{boolean} 149r57 151r77 158r33 159r66 172r61 175r24 175r45 4|290m16
+. 296m16 303m16 316m21 319m21 338m18 344m18 356m18
+73r7*Rec{31R9} 4|291m16 297m16 304m16 354r30
+74m7*Fails{1|92M9} 4|292m16 298m16 305m16 357m18 360r21 361m21 361r38 363r56
+78V13*Secret_Is_Valid{boolean} 79>7 80>7 83r15 109s27 4|43b13 65l8 65t23
+. 104s14
+79m7 Kind{5|23M12} 82r12 82r38 4|44b7 48r10 60r13
+80a7 Secret{5|24A9} 4|45b7 49r13 52r19 53r16 54r23 61r17 61r56
+86V13*Lockout_Seconds_For{1|92M9} 86>34 88r27 89r30 90r31 91r14 4|67b13 78l8
+. 78t27 363s27
+86m34 Fails{1|92M9} 88r12 89r15 90r15 4|67b34 69r10 71r13 73r13
+94U14*Derive_Record 95>7 96>7 97>7 98>7 99<7 4|80b14 95l8 95t21
+95m7 Kind{5|23M12} 4|81b7 91r24
+96a7 Secret{5|24A9} 101r27 4|82b7 89r27
+97a7 Salt{5|30A12} 4|83b7 89r35 93r24
+98m7 Iterations{1|92M9} 100r18 4|84b7 89r41 92r24
+99r7 Rec{31R9} 4|85b7 90m7
+104U14*Verify_Record 105>7 106>7 107<7 4|97b14 113l8 113t21 354s7
+105r7 Rec{31R9} 109r44 110r31 4|98b7 104r31 105r17 110r35 110r45 111r43
+106a7 Secret{5|24A9} 108r19 109r54 4|99b7 104r41 110r27
+107b7 Match{boolean} 111r29 4|100b7 107m10 111m7
+114U14*Record_To_Sector 115>7 116<7 4|115b14 130l8 130t24
+115r7 Rec{31R9} 4|116b7 124r26 125r19 126r28 127r28
+116a7 Sector{5|31A12} 4|117b7 121m7 122m7 123m7 124m7 125m35 125r35 126m7
+. 127m7 128r24 129m7
+118U14*Record_From_Sector 119>7 120<7 121<7 4|132b14 171l8 171t26 258s7
+119a7 Sector{5|31A12} 4|133b7 144r32 145r17 150r24 151r38 155r15 160r27 160r40
+. 160r53 160r66 168r24 169r24
+120r7 Rec{31R9} 4|134b7 141m7 165m7
+121b7 Valid{boolean} 4|135b7 142m7 170m7
+124U14*Marker_To_Sector 125>7 126<7 4|173b14 187l8 187t24
+125r7 M{38R9} 4|174b7 182r30 183r19 184r28
+126a7 Sector{5|31A12} 4|175b7 179m7 180m7 181m7 182m7 183m28 183r28 184m7
+. 185r24 186m7
+128U14*Marker_From_Sector 129>7 130<7 131<7 4|189b14 219l8 219t26 243s7
+129a7 Sector{5|31A12} 4|190b7 199r32 200r17 205r24 206r38 210r10 210r35 215r31
+. 216r42 216r55 216r68 216r81 217r31
+130r7 M{38R9} 4|191b7 196m7 214m7
+131b7 Valid{boolean} 4|192b7 197m7 218m7
+134U14*Evaluate_Sectors 135>7 136>7 137<7 138<7 139<7 4|221b14 273l8 273t24
+. 285s7
+135a7 Cred_Sector{5|31A12} 4|222b7 228r54 258r27 264r24
+136a7 Mark_Sector{5|31A12} 4|223b7 229r54 243r27
+137e7 Status{44E9} 4|224b7 239m10 245m10 251m13 253m13 260m10 267m10 272m7
+138r7 Rec{31R9} 4|225b7 235m7 258m40 266m10
+139m7 Fails{1|92M9} 4|226b7 236m7 271m7
+143U14*Load_Machine 144>7 145>7 146>7 147<7 4|275b14 307l8 307t20
+144a7 Cred_Sector{5|31A12} 4|276b7 285r25
+145a7 Mark_Sector{5|31A12} 4|277b7 285r38
+146b7 Lock_On_Boot{boolean} 151r51 4|278b7 296r26
+147r7 Machine{70R9} 149r12 149r49 151r12 151r69 4|279b7 288m13 294m13 301m13
+154U14*Lock_Now 155=7 156<7 4|309b14 324l8 324t16
+155r7 Machine{70R9} 158r25 159r21 159r58 4|310b7 314r12 316m13 319m13
+156b7 Success{boolean} 158r12 4|311b7 317m13 320m13 322m13
+163U14*Authenticate 164=7 165>7 166>7 167<7 168<7 4|326b14 370l8 370t20
+164r7 Machine{70R9} 171r17 172r53 175r16 175r33 4|327b7 337r10 338m10 343r10
+. 344m10 354r22 356m10 357m10 360r13 361m13 361r30 363r48
+165a7 Secret{5|24A9} 169r19 4|328b7 354r35
+166b7 Lockout_Active{boolean} 4|329b7 349r10
+167e7 Result{55E9} 172r16 174r17 174r58 4|330b7 339m10 345m10 350m10 358m10
+. 365m13 367m13
+168m7 Delay_Seconds{1|92M9} 4|331b7 335m7 363m10 364r13
+X 4 nc_security_lock.adb
+9a4 Cred_Magic{5|24A9} 122r26 144r49
+13a4 Mark_Magic{5|24A9} 180r26 199r49
+17V13 Load_LE32{1|92M9} 17b13 17>24 17>28 17>32 17>36 160s16 216s31
+17m24 B0{5|23M12} 18r20
+17m28 B1{5|23M12} 19r35
+17m32 B2{5|23M12} 20r35
+17m36 B3{5|23M12} 21r35
+23U14 Store_LE32 23b14 23>26 23<45 31l8 31t18 125s7 183s7
+23m26 Val{1|92M9} 27r36 28r49 29r49 30r49
+23a45 Dst{5|24A9} 24r18 27m7 27r12 28m7 28r12 29m7 29r12 30m7 30r12
+33V13 Is_All_Zero{boolean} 33b13 33>26 41l8 41t19 228s41 229s41
+33a26 Sector{5|31A12} 35r16 36r13
+35i11 I{integer} 36r21
+52i14 I{integer} 53r24 54r31
+87a7 Derived{5|26A12} 89m53 94r24
+102a7 Derived{5|26A12} 110m61 111r34 112m20
+119a7 Tail{5|26A12} 128m43 129r30
+137a7 Tail{5|26A12} 150m43 151r32
+138m7 Kind{5|23M12} 155m7 156r10 156r36 166r24
+139m7 Iters{1|92M9} 160m7 161r10 167r24
+177a7 Tail{5|26A12} 185m43 186r30
+194a7 Tail{5|26A12} 205m43 206r32
+228b7 Cred_Blank{boolean} 238r10 250r13
+229b7 Mark_Blank{boolean} 238r30
+230r7 M{3|38R9} 243m40 249r14 265r45 271r17
+231b7 M_Valid{boolean} 243m43 244r14
+232b7 R_Valid{boolean} 258m45 259r14
+233a7 Cred_Digest{5|26A12} 264m37 265r32
+281e7 Status{3|44E9} 285m51 286r12
+282r7 Rec{3|31R9} 285m59 297r26
+283m7 Fails{1|92M9} 285m64 298r26
+333b7 Match{boolean} 354m43 355r10
+X 5 nc_security_types.ads
+8K9*NC_Security_Types 3|16w6 16r29 5|156e22
+18N4*Max_Secret_Len 3|101r44 108r36 169r36
+23M12*Byte{1|81M9} 3|21r29 22r29 23r29 32r20 79r16 95r20 4|17r41 27r30 28r30
+. 29r30 30r30 44r16 81r20 138r15
+24A9*Byte_Array(23M12)<integer> 3|80r16 96r20 106r16 165r24 4|9r26 13r26
+. 23r55 45r16 82r20 99r16 328r24
+26A12*Hash_256{24A9}<integer> 3|35r20 41r27 4|87r17 102r17 119r14 137r15
+. 177r14 194r14 233r21
+30A12*Salt_128{24A9}<integer> 3|34r20 97r20 4|83r20
+31A12*Sector_512{24A9}<integer> 3|116r20 119r16 126r20 129r16 135r21 136r21
+. 144r22 145r22 4|33r35 117r20 133r16 175r20 190r16 222r21 223r21 276r22
+. 277r22
+33a4*Zero_Hash_256{26A12} 3|35r35 41r42
+35a4*Zero_Salt_128{30A12} 3|34r35
+

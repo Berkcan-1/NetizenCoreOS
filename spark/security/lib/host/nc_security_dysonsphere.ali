@@ -1,0 +1,265 @@
+V "GNAT Lib v16"
+A -O2
+A -gnatA
+A -gnat2012
+A -gnatwa
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -fPIC
+A -mtune=generic
+A -march=x86-64
+P ZX
+
+RN
+RV NO_IMPLICIT_CONDITIONALS
+RV NO_DEFAULT_INITIALIZATION
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_IMPLICIT_LOOPS
+
+U nc_security_dysonsphere%b  nc_security_dysonsphere.adb  0f9f55bf NE OO PK
+W nc_security_policy%s	nc_security_policy.adb	nc_security_policy.ali
+
+U nc_security_dysonsphere%s  nc_security_dysonsphere.ads  030a32eb NE OO PR PK
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_capabilities%s  nc_security_capabilities.adb  nc_security_capabilities.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D nc_security_capabilities.ads  20261121073905 e9272f41 nc_security_capabilities%s
+D nc_security_dysonsphere.ads  20261121073147 a3bf5ebe nc_security_dysonsphere%s
+D nc_security_dysonsphere.adb  20261121073149 e80a3e42 nc_security_dysonsphere%b
+D nc_security_policy.ads  20261121073835 442a3543 nc_security_policy%s
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20260430083320 e2b7c99d system%s
+G a e
+G c Z s b [find_app_slot nc_security_dysonsphere 69 13 none]
+G c Z s b [initialize nc_security_dysonsphere 84 14 none]
+G c Z s b [register_package nc_security_dysonsphere 93 14 none]
+G c Z s b [check_authorization nc_security_dysonsphere 110 14 none]
+G c Z s b [revoke_app nc_security_dysonsphere 126 14 none]
+G c Z s b [query_granted_caps nc_security_dysonsphere 139 13 none]
+G c Z s s [app_identity_recordIP nc_security_dysonsphere 23 9 none]
+G c Z s s [audit_eventIP nc_security_dysonsphere 38 9 none]
+G c Z s s [Tapp_tableBIP nc_security_dysonsphere 48 4 none]
+G c Z s s [Taudit_ringBIP nc_security_dysonsphere 49 4 none]
+G c Z s s [engine_stateIP nc_security_dysonsphere 51 9 none]
+G c Z s s [auth_requestIP nc_security_dysonsphere 63 9 none]
+G r c none [find_app_slot nc_security_dysonsphere 69 13 none] [equal_app_id nc_security_types 130 13 none]
+G r c none [initialize nc_security_dysonsphere 84 14 none] [make_app_id nc_security_types 147 13 none]
+G r c none [initialize nc_security_dysonsphere 84 14 none] [make_publisher nc_security_types 152 13 none]
+G r c none [register_package nc_security_dysonsphere 93 14 none] [is_valid_app_id nc_security_types 137 13 none]
+G r c none [register_package nc_security_dysonsphere 93 14 none] [resolve_trust_tier nc_security_policy 22 13 none]
+G r c none [register_package nc_security_dysonsphere 93 14 none] [is_reserved_system_id nc_security_policy 16 13 none]
+G r c none [register_package nc_security_dysonsphere 93 14 none] [compute_effective_grant nc_security_capabilities 99 13 none]
+G r c none [register_package nc_security_dysonsphere 93 14 none] [equal_app_id nc_security_types 130 13 none]
+G r c none [check_authorization nc_security_dysonsphere 110 14 none] [is_single_known_cap nc_security_capabilities 78 13 none]
+G r c none [check_authorization nc_security_dysonsphere 110 14 none] [is_valid_app_id nc_security_types 137 13 none]
+G r c none [check_authorization nc_security_dysonsphere 110 14 none] [make_app_id nc_security_types 147 13 none]
+G r c none [check_authorization nc_security_dysonsphere 110 14 none] [equal_app_id nc_security_types 130 13 none]
+G r c none [check_authorization nc_security_dysonsphere 110 14 none] [has_capability nc_security_capabilities 110 13 none]
+G r c none [revoke_app nc_security_dysonsphere 126 14 none] [is_valid_app_id nc_security_types 137 13 none]
+G r c none [revoke_app nc_security_dysonsphere 126 14 none] [equal_app_id nc_security_types 130 13 none]
+G r c none [query_granted_caps nc_security_dysonsphere 139 13 none] [equal_app_id nc_security_types 130 13 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 3|16w6 16r36
+81M9*Unsigned_8
+92M9*Unsigned_32 3|27r29 28r29 39r23 53r25 58r25 97r25 4|162r25
+95M9*Unsigned_64 3|59r25 4|288r34 314r63
+X 2 nc_security_capabilities.ads
+13K9*NC_Security_Capabilities 114e29 3|18w6 18r36
+16M12*Cap_Mask{1|95M9} 3|30r29 31r29 32r29 41r23 65r23 99r25 100r25 141r39
+. 4|31r18 54r22 164r25 165r25 172r22 173r22 357r39
+18m4*Cap_None{16M12} 3|30r50 31r50 32r50 41r40 65r41 136r59 143r67 4|155r48
+. 205r21 334r44 343r63 348r47 351r39 362r17 366r17 371r17
+19m4*Cap_Settings_Read{16M12} 4|103r10 112r10 152r10
+20m4*Cap_Settings_Write_Display{16M12} 4|113r13
+21m4*Cap_Settings_Write_Locale{16M12} 4|114r13
+22m4*Cap_Settings_Write_Keybd{16M12} 4|115r13
+23m4*Cap_Settings_Write_Network{16M12} 4|116r13
+24m4*Cap_Settings_Write_Drivers{16M12} 4|117r13
+25m4*Cap_Fs_User_Read{16M12} 4|126r10 137r10 146r32
+26m4*Cap_Fs_User_Write{16M12} 4|127r13
+27m4*Cap_Fs_User_Delete{16M12} 4|128r13
+30m4*Cap_Package_Install{16M12} 4|131r13 139r13
+31m4*Cap_Network_Client{16M12} 4|146r10
+32m4*Cap_System_Audit_Read{16M12} 4|152r31
+33m4*Cap_Ipc_Endpoint{16M12} 4|105r13
+35m4*Cap_Notify_Post{16M12} 4|106r13
+36m4*Cap_Fs_All_Read{16M12} 4|129r13 138r13
+37m4*Cap_Fs_All_Write{16M12} 4|130r13
+38m4*Cap_Process_Launch{16M12} 4|104r13 120r13
+39m4*Cap_Package_Remove{16M12} 4|119r13 140r13
+40m4*Cap_Security_Manage{16M12} 4|118r13
+43m4*All_Known_Caps{16M12} 4|74r53 75r53 76r53 201r21 231r78 232r77 259r52
+. 260r51
+64m4*Third_Party_Verified_Ceiling{16M12} 4|203r21
+78V13*Is_Single_Known_Cap{boolean} 3|118s16 4|284s21
+99V13*Compute_Effective_Grant{16M12} 4|208s20
+110V13*Has_Capability{boolean} 4|307s13
+X 3 nc_security_dysonsphere.ads
+20K9*NC_Security_DysonSphere 145l5 145e28 4|7b14 376l5 376t28
+23R9*App_Identity_Record 36e14 48r49
+24b7*In_Use{boolean} 76r45 80r34 133r33 4|17r35 19r28 61r32 68m13 240r32
+. 253m10 340r37 344r31
+25r7*App_Id{6|42R9} 77r68 81r57 134r56 4|18r58 20r50 69m13 254m10 341r60
+. 345r53
+26r7*Publisher{6|52R9} 4|70m13 227m36 255m10
+27m7*Version_Code{1|92M9} 4|71m13 228m36 256m10 305r31 369r35
+28m7*Min_Allowed_Version{1|92M9} 4|72m13 220r54 229m36 257m10 305r64 369r68
+29a7*Payload_Hash{6|26A12} 4|73m13 230m36 258m10
+30m7*Requested_Caps{2|16M12} 4|74m13 231m36 259m10
+31m7*Approved_Caps{2|16M12} 4|75m13 232m36 260m10
+32m7*Granted_Caps{2|16M12} 136r44 4|76m13 233m36 261m10 307r47 334m28 343r48
+. 348m31 373r32
+33e7*Tier{6|114E9} 4|77m13 234m36 262m10
+34b7*Revoked{boolean} 135r35 4|78m13 213r39 263m10 303r31 333m28 342r39 347m31
+. 368r28
+35b7*Is_Builtin{boolean} 4|79m13 264m10 332r64
+38R9*Audit_Event 43e14 49r51
+39m7*Seq{1|92M9} 4|44m10
+40a7*App_Id_Tag{6|60A12} 4|45m10
+41m7*Requested_Cap{2|16M12} 4|46m10
+42e7*Decision{6|64E9} 4|47m10
+45I12*App_Slot_Index{natural} 48r30 75r36 79r25 132r25 4|14r16 60r16 66r23
+. 211r26 239r16 246r27 301r22 332r18 337r19 365r22
+46I12*Audit_Ring_Index{natural} 49r30 57r25
+48A9*App_Table(23R9)<integer> 54r25
+49A9*Audit_Ring(38R9)<integer> 56r25
+51R9*Engine_State 60e14 70r16 84r38 94r32 111r25 127r24 140r16 4|10r16 29r25
+. 52r29 86r38 159r32 272r25 320r24 356r16
+52b7*Initialized{boolean} 86r14 106r22 115r22 143r22 4|89m10 177r20 278r20
+. 327r20 361r20
+53m7*Policy_Version{1|92M9} 87r23 4|90m10
+54a7*Apps{48A9} 76r17 77r40 80r25 81r48 133r24 134r47 135r26 136r35 4|17r26
+. 18r49 19r19 20r41 61r23 67m16 91m10 213r19 220r34 227m16 228m16 229m16
+. 230m16 231m16 232m16 233m16 234m16 240r23 252m13 303r19 305r19 305r52 307r35
+. 332r52 333m16 334m16 340r28 341r51 342r30 343r39 344r22 345r44 347m22 348m22
+. 368r16 369r23 369r56 373r20
+55i7*App_Count{natural} 4|80r19 81m19 81r38 92m10 265r16 266m16 266r35
+56a7*Audit{49A9} 4|43m13 93m10
+57i7*Audit_Write_Idx{46I12} 4|43r26 48m13 48r39 94m10
+58m7*Audit_Seq{1|92M9} 4|42m13 42r32 44r33 95m10
+59m7*Denied_Count{1|95M9} 88r23 4|96m10 288r19 289m19 289r41 314r48 315m16
+. 315r38
+63R9*Auth_Request 66e14 112r18 4|273r18
+64r7*Caller_Id{6|42R9} 121r41 4|283r39 287r39 295r32 300r45 313r36
+65m7*Requested_Cap{2|16M12} 118r45 4|284r50 287r58 307r69 313r55
+69V13*Find_App_Slot{natural} 70>7 71>7 73r8 75r12 76r23 77r46 4|9b13 26l8
+. 26t21 210s23 300s15 331s15 364s15
+70r7 State{51R9} 76r11 77r34 80r19 81r42 4|10b7 17r20 18r43 19r13 20r35
+71r7 App_Id{6|42R9} 77r76 81r65 4|11b7 18r66 20r58
+79i20 I{45I12} 80r31 81r54
+84U14*Initialize 84<26 4|86b14 156l8 156t18
+84r26 State{51R9} 86r8 87r17 88r17 4|86b26 88m7 101m10 110m10 124m10 135m10
+. 144m10 150m10 155m25
+93U14*Register_Package 94=7 95>7 96>7 97>7 98>7 99>7 100>7 101>7 102>7 103>7
+. 104<7 4|158b14 269l8 269t24
+94r7 State{51R9} 106r16 4|159b7 177r14 183m24 191m24 210r38 213r13 214m27
+. 220r28 221m27 227m10 228m10 229m10 230m10 231m10 232m10 233m10 234m10 240r17
+. 247m24 252m7 265r10 266m10 266r29
+95r7 App_Id{6|42R9} 107r42 4|160b7 182r31 183r31 190r33 191r31 210r45 214r34
+. 221r34 247r31 254r33
+96r7 Publisher{6|52R9} 4|161b7 227r59 255r33
+97m7 Version_Code{1|92M9} 4|162b7 182r47 220r13 228r59 229r59 256r33 257r33
+98a7 Payload_Hash{6|26A12} 4|163b7 230r59 258r33
+99m7 Requested_Caps{2|16M12} 4|164b7 183r39 191r39 208r45 231r59 259r33
+100m7 Approved_Caps{2|16M12} 4|165b7 208r61 232r59 260r33
+101e7 Source{6|122E9} 4|166b7 189r35
+102b7 Is_Verified_V2{boolean} 4|167b7 189r43 202r13
+103b7 Platform_Signed{boolean} 4|168b7 189r59
+104e7 Decision{6|64E9} 106r39 107r55 4|169b7 178m10 184m10 192m10 215m13
+. 222m13 235m10 248m10 268m7
+110U14*Check_Authorization 111=7 112>7 113<7 4|271b14 317l8 317t27
+111r7 State{51R9} 115r16 4|272b7 278r14 287m24 288r13 289m13 289r35 300r30
+. 303r13 305r13 305r46 307r29 313m21 314r42 315m10 315r32
+112r7 Request{63R9} 118r37 121r33 4|273b7 283r31 284r42 287r31 287r50 295r24
+. 300r37 307r61 313r28 313r47
+113e7 Decision{6|64E9} 116r11 119r11 122r11 4|274b7 279m10 286m10 287r73
+. 296m10 302m10 304m10 306m10 308m10 310m10 313r70 314r10
+126U14*Revoke_App 127=7 128>7 129<7 4|319b14 353l8 353t18
+127r7 State{51R9} 133r18 134r41 135r20 136r29 4|320b7 327r14 331r30 332r46
+. 333m10 334m10 340r22 341r45 342r24 343r33 344r16 345r38 347m16 348m16 351m24
+128r7 App_Id{6|42R9} 134r64 4|321b7 327r61 331r37 341r68 345r61 351r31
+129b7 Revoked{boolean} 131r12 4|322b7 326m7 335m10
+132i20 I{45I12} 133r30 134r53 135r32 136r41
+139V13*Query_Granted_Caps{2|16M12} 140>7 141>7 143r39 4|355b13 374l8 374t26
+140r7 State{51R9} 143r16 4|356b7 361r14 364r30 368r10 369r17 369r50 373r14
+141r7 App_Id{6|42R9} 4|357b7 364r37
+X 4 nc_security_dysonsphere.adb
+14i11 I{3|45I12} 16r31 19r25 20r47 22r20
+16i21 K{integer} 17r32 18r55
+28U14 Record_Audit 28b14 29=7 30>7 31>7 32>7 49l8 49t20 183s10 191s10 214s13
+. 221s13 247s10 287s10 313s7 351s10
+29r7 State{3|51R9} 42m7 42r26 43m7 43r20 44r27 48m7 48r33
+30r7 App_Id{6|42R9} 36r13 36r34 39r21
+31m7 Cap_Bits{2|16M12} 46r27
+32e7 Decision{6|64E9} 47r27
+34a7 Tag{6|60A12} 39m10 45r27
+35i7 Copy_Len{natural} 38r21
+38i11 I{integer} 39r15 39r34
+51U14 Register_Builtin 51b14 52=7 53>7 54>7 84l8 84t24 100s7 109s7 123s7
+. 134s7 143s7 149s7 155s7
+52r7 State{3|51R9} 61r17 67m10 80r13 81m13 81r32
+53a7 App_Id_Str{string} 55r18 57r52
+54m7 Granted_Caps{2|16M12} 74r36 75r36 76r36
+57r7 Id{6|42R9} 69r36
+58i7 Free_Slot{natural} 62m13 66r10 67r22
+60i11 I{3|45I12} 61r29 62r26
+171e7 Tier{6|114E9} 189m7 190r50 200r10 234r59 262r33
+172m7 Ceiling{2|16M12} 201m10 203m10 205m10 208r76
+173m7 Effective{2|16M12} 208m7 214r42 221r42 233r59 247r39 261r33
+174i7 Existing_Idx{natural} 210m7 211r10 213r25 220r40 227r22 228r22 229r22
+. 230r22 231r22 232r22 233r22 234r22
+175i7 Free_Slot{natural} 241m13 246r10 252r19
+239i11 I{3|45I12} 240r29 241r26
+276i7 Slot{natural} 300m7 301r10 303r25 305r25 305r58 307r41
+324i7 Slot{natural} 331m7 332r10 332r58 333r22 334r22
+337i14 I{3|45I12} 339r34 344r28 345r50 347r28 348r28
+339i24 K{integer} 340r34 341r57 342r36 343r45
+359i7 Slot{natural} 364m7 365r10 368r22 369r29 369r62 373r26
+X 5 nc_security_policy.ads
+11K9*NC_Security_Policy 4|5w6 5r30 5|70e23
+16V13*Is_Reserved_System_Id{boolean} 4|190s10
+22V13*Resolve_Trust_Tier{6|114E9} 4|189s15
+X 6 nc_security_types.ads
+8K9*NC_Security_Types 3|17w6 17r36 6|156e22
+15N4*Max_App_Id_Len 4|55r39
+20N4*Max_Registered_Apps 3|45r51 73r32 4|80r31 265r28
+21N4*Audit_Ring_Capacity 3|46r51 4|48r64
+23M12*Byte{1|81M9}
+24A9*Byte_Array(23M12)<integer>
+26A12*Hash_256{24A9}<integer> 3|29r29 98r25 4|163r25
+33a4*Zero_Hash_256{26A12} 3|29r50 4|73r36
+39I12*App_Id_Length{natural}
+42R9*Bounded_App_Id 3|25r29 64r23 71r16 95r25 128r17 141r16 4|11r16 30r18
+. 57r21 160r25 321r17 357r16 6|45e14
+43i7*Len{39I12} 4|36r20 36r41
+44a7*Data{40A12} 4|39r28
+47r4*Empty_App_Id{42R9} 3|25r50 64r41
+52R9*Bounded_Publisher 3|26r29 96r25 4|161r25 6|55e14
+57r4*Empty_Publisher{52R9} 3|26r50
+60A12*Audit_Tag_Buf{24A9}<integer> 3|40r23 4|34r18
+61a4*Zero_Audit_Tag{60A12} 3|40r40 4|34r35
+64E9*Auth_Decision 3|42r23 104r29 113r22 4|32r18 169r29 274r22 6|76e6
+65n7*Auth_Allow{64E9} 3|107r67 119r23 122r23 4|235r22 268r19 296r22 308r22
+. 314r22
+66n7*Auth_Deny_Unknown_App{64E9} 4|302r22
+67n7*Auth_Deny_Revoked_App{64E9} 4|214r53 215r25 304r22 351r49
+68n7*Auth_Deny_Rollback_Version{64E9} 4|221r53 222r25 306r22
+69n7*Auth_Deny_Capability_Not_Granted{64E9} 4|310r22
+70n7*Auth_Deny_Policy_Locked{64E9} 3|42r40 106r50 116r22 4|178r22 279r22
+71n7*Auth_Deny_Invalid_Input{64E9} 4|183r55 184r22 286r22
+72n7*Auth_Deny_Impersonation{64E9} 4|191r55 192r22
+73n7*Auth_Deny_Table_Full{64E9} 4|247r50 248r22
+114E9*Trust_Tier 3|33r29 4|171r22 6|115e6
+114n24*Tier_User{114E9} 3|33r50
+114n35*Tier_System{114E9} 4|77r36 190r58 200r17
+122E9*Install_Source 3|101r25 4|166r25 6|123e6
+130V13*Equal_App_Id{boolean} 3|77s20 81s28 134s27 4|18s29 20s21 295s10 341s31
+. 345s24
+137V13*Is_Valid_App_Id{boolean} 3|107s25 121s16 4|182s14 283s14 327s44
+147V13*Make_App_Id{42R9} 4|57s39 295s43
+152V13*Make_Publisher{52R9} 4|70s36
+

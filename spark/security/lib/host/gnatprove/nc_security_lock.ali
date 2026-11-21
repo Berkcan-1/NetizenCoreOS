@@ -1,0 +1,304 @@
+V "GNAT Lib v16"
+A -x
+A ada
+A -gnatA
+A -O2
+A -gnat2012
+A -gnatwa
+A -fno-exceptions
+A -ffunction-sections
+A -fdata-sections
+A -fPIC
+A -gnatc
+A -gnatis
+P GP
+
+RN
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+
+U nc_security_lock%b	nc_security_lock.adb	63a786ce OO PK
+W nc_security_crypto%s	nc_security_crypto.adb	nc_security_crypto.ali
+
+U nc_security_lock%s	nc_security_lock.ads	f060b28f OO PU PK
+W interfaces%s		interfac.ads		interfac.ali
+W nc_security_types%s	nc_security_types.adb	nc_security_types.ali
+
+D interfac.ads		20261121073825 9111f9c1 interfaces%s
+D nc_security_crypto.ads  20261121073351 d34bc6c8 nc_security_crypto%s
+D nc_security_lock.ads	20261121073532 b9f2f19b nc_security_lock%s
+D nc_security_lock.adb	20261121091048 091eb19d nc_security_lock%b
+D nc_security_types.ads	20261121073044 d883bad5 nc_security_types%s
+D system.ads		20261121073825 e2b7c99d system%s
+G a Z
+X 1 interfac.ads
+47K9*Interfaces 247e15 3|15w6 15r29
+81M9*Unsigned_8
+92M9*Unsigned_32 3|25r34 26r34 33r20 40r27 74r16 86r42 86r62 98r20 139r25
+. 168r28 4|17r54 18r7 19r22 20r22 21r22 23r32 72r42 72r62 89r20 144r15 231r25
+. 288r16 336r28 365r29
+154V13*Shift_Left{92M9} 4|19s10 20s10 21s10
+159V13*Shift_Right{92M9} 4|29s36 30s36 31s36
+X 2 nc_security_crypto.ads
+23K9*NC_Security_Crypto 110e23 4|5w6 5r30
+36V13*Constant_Time_Eq{boolean} 4|116s16 149s14 156s14 204s14 211s14 270s14
+44U14*Secure_Zero 4|117s7
+62U14*Sha256_One_Shot 4|133s7 155s7 190s7 210s7 269s7
+73U14*Pbkdf2_Hmac_Sha256 4|94s7 115s7
+X 3 nc_security_lock.ads
+18K9*NC_Security_Lock 177l5 177e21 4|7b14 377l5 377t21
+21m4*Kind_None{5|23M12} 32r35
+22m4*Kind_Pin{5|23M12} 82r20 4|52r17 161r18
+23m4*Kind_Password{5|23M12} 82r46 4|64r20 161r44
+25m4*Default_Iterations{1|92M9}
+26m4*Min_Iterations{1|92M9} 100r32 110r48 4|110r34 166r18
+27i4*Pin_Length{natural} 4|53r43
+28i4*Password_Min{natural} 4|65r49
+29i4*Password_Max{natural} 4|66r53
+31R9*Lock_Record 36e14 73r16 99r24 105r16 115r16 120r20 138r25 4|90r24 103r16
+. 121r16 139r20 230r25 287r16
+32m7*Kind{5|23M12} 109r48 4|96m10 109r35 129r30 171m10
+33m7*Iterations{1|92M9} 110r35 4|97m10 110r21 115r49 130r23 172m10
+34a7*Salt{5|30A12} 4|98m10 115r39 131r32 173m10
+35a7*Hash{5|26A12} 4|99m10 116r47 132r32 174m10
+38R9*Lock_Marker 42e14 125r16 130r20 4|179r16 196r20 235r21
+39b7*Enabled{boolean} 4|187r32 220m10 254r16
+40m7*Fails{1|92M9} 4|188r21 221m10 276r19
+41a7*Credential_Digest{5|26A12} 4|189r30 222m10 270r47
+44E9*Lock_Disk_Status 48e6 50r8 71r16 137r25 4|229r25 286r16
+45n7*Lock_Disabled{44E9} 51r7 71r36 4|244r20 256r23 292r15 294r26 326r15
+. 348r27
+46n7*Lock_Enabled{44E9} 52r7 151r29 4|277r17 298r15 300r26 320r15
+47n7*Lock_Destroyed{44E9} 53r7 149r29 159r38 171r34 4|250r20 258r23 265r20
+. 272r20 304r15 307r26 323r15 342r27
+55E9*Lock_Auth_Result 61e6 63r8 167r28 4|335r28
+56n7*Auth_Res_Unlocked{55E9} 64r7 4|363r28
+57n7*Auth_Res_Invalid_Secret{55E9} 65r7 174r26 4|372r23
+58n7*Auth_Res_Locked_Out{55E9} 66r7 174r67 4|355r20 370r23
+59n7*Auth_Res_Not_Enabled{55E9} 67r7 4|350r20
+60n7*Auth_Res_Destroyed{55E9} 68r7 172r25 4|344r20
+70R9*Lock_Machine_State 75e14 147r26 155r24 164r31 4|284r26 315r24 332r31
+71e7*Status{44E9} 149r20 151r20 159r29 171r25 4|294m16 300m16 307m16 319r20
+. 342r18 348r18
+72b7*Locked{boolean} 149r57 151r77 158r33 159r66 172r61 175r24 175r45 4|295m16
+. 301m16 308m16 321m21 324m21 343m18 349m18 361m18
+73r7*Rec{31R9} 4|296m16 302m16 309m16 359r30
+74m7*Fails{1|92M9} 4|297m16 303m16 310m16 362m18 365r21 366m21 366r38 368r56
+78V13*Secret_Is_Valid{boolean} 79>7 80>7 83r15 109s27 4|44b13 70l8 70t23
+. 109s14
+79m7 Kind{5|23M12} 82r12 82r38 4|45b7 52r10 64r13
+80a7 Secret{5|24A9} 4|46b7 49r10 49r24 53r13 53r27 56r19 57r16 58r23 65r18
+. 65r32 66r22 66r36
+86V13*Lockout_Seconds_For{1|92M9} 86>34 88r27 89r30 90r31 91r14 4|72b13 83l8
+. 83t27 368s27
+86m34 Fails{1|92M9} 88r12 89r15 90r15 4|72b34 74r10 76r13 78r13
+94U14*Derive_Record 95>7 96>7 97>7 98>7 99<7 4|85b14 100l8 100t21
+95m7 Kind{5|23M12} 4|86b7 96r24
+96a7 Secret{5|24A9} 101r27 4|87b7 94r27
+97a7 Salt{5|30A12} 4|88b7 94r35 98r24
+98m7 Iterations{1|92M9} 100r18 4|89b7 94r41 97r24
+99r7 Rec{31R9} 4|90b7 95m7
+104U14*Verify_Record 105>7 106>7 107<7 4|102b14 118l8 118t21 359s7
+105r7 Rec{31R9} 109r44 110r31 4|103b7 109r31 110r17 115r35 115r45 116r43
+106a7 Secret{5|24A9} 108r19 109r54 4|104b7 109r41 115r27
+107b7 Match{boolean} 111r29 4|105b7 112m10 116m7
+114U14*Record_To_Sector 115>7 116<7 4|120b14 135l8 135t24
+115r7 Rec{31R9} 4|121b7 129r26 130r19 131r28 132r28
+116a7 Sector{5|31A12} 4|122b7 126m7 127m7 128m7 129m7 130m35 130r35 131m7
+. 132m7 133r24 134m7
+118U14*Record_From_Sector 119>7 120<7 121<7 4|137b14 176l8 176t26 263s7
+119a7 Sector{5|31A12} 4|138b7 149r32 150r17 155r24 156r38 160r15 165r27 165r40
+. 165r53 165r66 173r24 174r24
+120r7 Rec{31R9} 4|139b7 146m7 170m7
+121b7 Valid{boolean} 4|140b7 147m7 175m7
+124U14*Marker_To_Sector 125>7 126<7 4|178b14 192l8 192t24
+125r7 M{38R9} 4|179b7 187r30 188r19 189r28
+126a7 Sector{5|31A12} 4|180b7 184m7 185m7 186m7 187m7 188m28 188r28 189m7
+. 190r24 191m7
+128U14*Marker_From_Sector 129>7 130<7 131<7 4|194b14 224l8 224t26 248s7
+129a7 Sector{5|31A12} 4|195b7 204r32 205r17 210r24 211r38 215r10 215r35 220r31
+. 221r42 221r55 221r68 221r81 222r31
+130r7 M{38R9} 4|196b7 201m7 219m7
+131b7 Valid{boolean} 4|197b7 202m7 223m7
+134U14*Evaluate_Sectors 135>7 136>7 137<7 138<7 139<7 4|226b14 278l8 278t24
+. 290s7
+135a7 Cred_Sector{5|31A12} 4|227b7 233r54 263r27 269r24
+136a7 Mark_Sector{5|31A12} 4|228b7 234r54 248r27
+137e7 Status{44E9} 4|229b7 244m10 250m10 256m13 258m13 265m10 272m10 277m7
+138r7 Rec{31R9} 4|230b7 240m7 263m40 271m10
+139m7 Fails{1|92M9} 4|231b7 241m7 276m7
+143U14*Load_Machine 144>7 145>7 146>7 147<7 4|280b14 312l8 312t20
+144a7 Cred_Sector{5|31A12} 4|281b7 290r25
+145a7 Mark_Sector{5|31A12} 4|282b7 290r38
+146b7 Lock_On_Boot{boolean} 151r51 4|283b7 301r26
+147r7 Machine{70R9} 149r12 149r49 151r12 151r69 4|284b7 293m13 299m13 306m13
+154U14*Lock_Now 155=7 156<7 4|314b14 329l8 329t16
+155r7 Machine{70R9} 158r25 159r21 159r58 4|315b7 319r12 321m13 324m13
+156b7 Success{boolean} 158r12 4|316b7 322m13 325m13 327m13
+163U14*Authenticate 164=7 165>7 166>7 167<7 168<7 4|331b14 375l8 375t20
+164r7 Machine{70R9} 171r17 172r53 175r16 175r33 4|332b7 342r10 343m10 348r10
+. 349m10 359r22 361m10 362m10 365r13 366m13 366r30 368r48
+165a7 Secret{5|24A9} 169r19 4|333b7 359r35
+166b7 Lockout_Active{boolean} 4|334b7 354r10
+167e7 Result{55E9} 172r16 174r17 174r58 4|335b7 344m10 350m10 355m10 363m10
+. 370m13 372m13
+168m7 Delay_Seconds{1|92M9} 4|336b7 340m7 368m10 369r13
+X 4 nc_security_lock.adb
+9a4 Cred_Magic{5|24A9} 127r26 149r49
+13a4 Mark_Magic{5|24A9} 185r26 204r49
+17V13 Load_LE32{1|92M9} 17b13 17>24 17>28 17>32 17>36 165s16 221s31
+17m24 B0{5|23M12} 18r20
+17m28 B1{5|23M12} 19r35
+17m32 B2{5|23M12} 20r35
+17m36 B3{5|23M12} 21r35
+23U14 Store_LE32 23b14 23>26 23<45 32l8 32t18 130s7 188s7
+23m26 Val{1|92M9} 28r36 29r49 30r49 31r49
+23a45 Dst{5|24A9} 24r18 24r42 27m7 28m7 28r12 29m7 29r12 30m7 30r12 31m7
+. 31r12
+34V13 Is_All_Zero{boolean} 42l8 42t19 233s41 234s41
+34a26 Sector{5|31A12} 36r16 37r13
+36i11 I{integer} 37r21
+56i14 I{integer} 57r24 58r31
+92a7 Derived{5|26A12} 94m53 99r24
+107a7 Derived{5|26A12} 115m61 116r34 117m20
+124a7 Tail{5|26A12} 133m43 134r30
+142a7 Tail{5|26A12} 155m43 156r32
+143m7 Kind{5|23M12} 160m7 161r10 161r36 171r24
+144m7 Iters{1|92M9} 165m7 166r10 172r24
+182a7 Tail{5|26A12} 190m43 191r30
+199a7 Tail{5|26A12} 210m43 211r32
+233b7 Cred_Blank{boolean} 243r10 255r13
+234b7 Mark_Blank{boolean} 243r30
+235r7 M{3|38R9} 248m40 254r14 270r45 276r17
+236b7 M_Valid{boolean} 248m43 249r14
+237b7 R_Valid{boolean} 263m45 264r14
+238a7 Cred_Digest{5|26A12} 269m37 270r32
+286e7 Status{3|44E9} 290m51 291r12
+287r7 Rec{3|31R9} 290m59 302r26
+288m7 Fails{1|92M9} 290m64 303r26
+338b7 Match{boolean} 359m43 360r10
+X 5 nc_security_types.ads
+8K9*NC_Security_Types 3|16w6 16r29 5|156e22
+18N4*Max_Secret_Len 3|101r44 108r36 169r36
+23M12*Byte{1|81M9} 3|21r29 22r29 23r29 32r20 79r16 95r20 4|17r41 28r30 29r30
+. 30r30 31r30 45r16 86r20 143r15
+24A9*Byte_Array(23M12)<integer> 3|80r16 96r20 106r16 165r24 4|9r26 13r26
+. 23r55 46r16 87r20 104r16 333r24
+26A12*Hash_256{24A9}<integer> 3|35r20 41r27 4|92r17 107r17 124r14 142r15
+. 182r14 199r14 238r21
+30A12*Salt_128{24A9}<integer> 3|34r20 97r20 4|88r20
+31A12*Sector_512{24A9}<integer> 3|116r20 119r16 126r20 129r16 135r21 136r21
+. 144r22 145r22 4|34r35 122r20 138r16 180r20 195r16 227r21 228r21 281r22
+. 282r22
+33a4*Zero_Hash_256{26A12} 3|35r35 41r42
+35a4*Zero_Salt_128{30A12} 3|34r35
+
+QQ SPARKVERSION FSF 16.1.0
+GG EK_DIRECT_CALLS nc_security_lock__secret_is_valid 0
+GG EK_PROOF_DEPENDENCIES nc_security_lock__secret_is_valid 0
+GG EK_GLOBALS nc_security_lock__secret_is_valid local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__lockout_seconds_for 0
+GG EK_PROOF_DEPENDENCIES nc_security_lock__lockout_seconds_for 0
+GG EK_GLOBALS nc_security_lock__lockout_seconds_for local FALSE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__derive_record 1 nc_security_crypto__pbkdf2_hmac_sha256
+GG EK_PROOF_DEPENDENCIES nc_security_lock__derive_record 0
+GG EK_GLOBALS nc_security_lock__derive_record local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__verify_record 4 nc_security_lock__secret_is_valid nc_security_crypto__constant_time_eq nc_security_crypto__secure_zero nc_security_crypto__pbkdf2_hmac_sha256
+GG EK_PROOF_DEPENDENCIES nc_security_lock__verify_record 0
+GG EK_GLOBALS nc_security_lock__verify_record local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__record_to_sector 2 nc_security_lock__store_le32 nc_security_crypto__sha256_one_shot
+GG EK_PROOF_DEPENDENCIES nc_security_lock__record_to_sector 0
+GG EK_GLOBALS nc_security_lock__record_to_sector local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__record_from_sector 3 nc_security_lock__load_le32 nc_security_crypto__constant_time_eq nc_security_crypto__sha256_one_shot
+GG EK_PROOF_DEPENDENCIES nc_security_lock__record_from_sector 0
+GG EK_GLOBALS nc_security_lock__record_from_sector local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__marker_to_sector 2 nc_security_lock__store_le32 nc_security_crypto__sha256_one_shot
+GG EK_PROOF_DEPENDENCIES nc_security_lock__marker_to_sector 0
+GG EK_GLOBALS nc_security_lock__marker_to_sector local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__marker_from_sector 3 nc_security_lock__load_le32 nc_security_crypto__constant_time_eq nc_security_crypto__sha256_one_shot
+GG EK_PROOF_DEPENDENCIES nc_security_lock__marker_from_sector 0
+GG EK_GLOBALS nc_security_lock__marker_from_sector local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__evaluate_sectors 4 nc_security_lock__record_from_sector nc_security_lock__marker_from_sector nc_security_crypto__constant_time_eq nc_security_crypto__sha256_one_shot
+GG EK_PROOF_DEPENDENCIES nc_security_lock__evaluate_sectors 0
+GG EK_GLOBALS nc_security_lock__evaluate_sectors local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__load_machine 1 nc_security_lock__evaluate_sectors
+GG EK_PROOF_DEPENDENCIES nc_security_lock__load_machine 0
+GG EK_GLOBALS nc_security_lock__load_machine local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__lock_now 0
+GG EK_PROOF_DEPENDENCIES nc_security_lock__lock_now 0
+GG EK_GLOBALS nc_security_lock__lock_now local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__authenticate 2 nc_security_lock__lockout_seconds_for nc_security_lock__verify_record
+GG EK_PROOF_DEPENDENCIES nc_security_lock__authenticate 0
+GG EK_GLOBALS nc_security_lock__authenticate local FALSE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__load_le32 1 interfaces__shift_left__3
+GG EK_PROOF_DEPENDENCIES nc_security_lock__load_le32 0
+GG EK_GLOBALS nc_security_lock__load_le32 local TRUE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__store_le32 1 interfaces__shift_right__3
+GG EK_PROOF_DEPENDENCIES nc_security_lock__store_le32 0
+GG EK_GLOBALS nc_security_lock__store_le32 local TRUE E_PROCEDURE FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 FALSE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock__is_all_zero 0
+GG EK_PROOF_DEPENDENCIES nc_security_lock__is_all_zero 0
+GG EK_GLOBALS nc_security_lock__is_all_zero local TRUE E_FUNCTION FALSE ORIGIN_FLOW 1 nc_security_lock proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 calls_proof 0 calls 0 calls_conditional 0 TRUE FALSE FALSE FALSE TRUE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_DIRECT_CALLS nc_security_lock 0
+GG EK_PROOF_DEPENDENCIES nc_security_lock 0
+GG EK_GLOBALS nc_security_lock local FALSE E_PACKAGE TRUE ORIGIN_FLOW 0 proper_proof_in 0 proper_input 0 proper_output 0 refined_proof_in 0 refined_input 0 refined_output 0 initializes 0 refined_initializes 0 calls_proof 0 calls 0 calls_conditional 0 local_packages 0 local_var 0 TRUE FALSE FALSE FALSE FALSE FALSE ENTRY_CALLS 0 SUSPENDS_ON 0 UNSYNCH_ACCESSES 0
+GG EK_FLOW_SCOPE nc_security_crypto__secure_zero FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__lockout_seconds_for FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__equal_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE nc_security_crypto__pbkdf2_hmac_sha256 FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__make_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right_arithmetic FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__record_to_sector FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE nc_security_lock__lock_now FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto__sha256_init FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__record_from_sector FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_left FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__marker_to_sector FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__make_publisher FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto__sha256_update FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto__chacha20_poly1305_encrypt FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__derive_record FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_types__is_valid_app_id FALSE FALSE FALSE FALSE TRUE nc_security_types VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__marker_from_sector FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto__constant_time_eq FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__authenticate FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__rotate_right FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__load_le32 FALSE FALSE FALSE FALSE TRUE nc_security_lock BODY_PART
+GG EK_FLOW_SCOPE nc_security_lock__evaluate_sectors FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto__sha256_finalize FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_left FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__secret_is_valid FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__verify_record FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__load_machine FALSE FALSE FALSE FALSE TRUE nc_security_lock VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__5 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__is_all_zero FALSE FALSE FALSE FALSE TRUE nc_security_lock BODY_PART
+GG EK_FLOW_SCOPE nc_security_crypto__sha256_one_shot FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__4 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto__chacha20_poly1305_decrypt FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__3 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE interfaces__shift_right__2 FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto TRUE FALSE FALSE FALSE FALSE __standard
+GG EK_FLOW_SCOPE interfaces__shift_right FALSE FALSE FALSE FALSE TRUE interfaces VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_crypto__hmac_sha256 FALSE FALSE FALSE FALSE TRUE nc_security_crypto VISIBLE_PART
+GG EK_FLOW_SCOPE nc_security_lock__store_le32 FALSE FALSE FALSE FALSE TRUE nc_security_lock BODY_PART
+GG EK_END_MARKER

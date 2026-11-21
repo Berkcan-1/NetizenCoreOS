@@ -1,0 +1,7 @@
+Ana Bilgisayardan (Host PC) NetizenCore'a Aktarilan Dosya!
+==========================================================
+Proje klasorundeki 'host_usb/' dizinine attiginiz her dosya,
+harici USB/SSD surucusu (/usb) uzerinden NetizenCore icinde acilir!
+
+Dosyalara sag tiklayip Kopyala diyerek Masaustu (/data/desktop)
+veya Belgelerim (/data/documents) klasorune aktarabilirsiniz.

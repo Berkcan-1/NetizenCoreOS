@@ -1,0 +1,8 @@
+[package]
+name = "nc-dev-x6826c"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-device = { path = "../../hardware/nc-device" }
+nc-hal = { path = "../../../crates/foundation/nc-hal" }

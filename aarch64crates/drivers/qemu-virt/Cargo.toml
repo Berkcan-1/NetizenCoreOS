@@ -1,0 +1,7 @@
+[package]
+name = "nc-dev-qemu-virt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-device = { path = "../../hardware/nc-device" }

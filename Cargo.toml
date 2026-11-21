@@ -1,0 +1,88 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    # bootloader
+    "bootloader/uefi",
+    # crates/foundation
+    "crates/foundation/nc-hal",
+    "crates/foundation/nc-abi",
+    "crates/foundation/nc-efra",
+    "crates/foundation/nc-math",
+    "crates/foundation/nc-spark-sec",
+    "crates/foundation/nc-crypto",
+    "crates/foundation/nc-inflate",
+    "crates/foundation/nc-i18n",
+    # crates/hardware
+    "crates/hardware/nc-arch",
+    "crates/hardware/nc-arch-x86_64",
+    "crates/hardware/nc-driver",
+    "crates/hardware/nc-input",
+    "crates/hardware/nc-storage",
+    "crates/hardware/nc-platform-qemu",
+    "crates/hardware/nc-platform-generic",
+    # crates/services
+    "crates/services/nc-mem",
+    "crates/services/nc-fs",
+    "crates/services/nc-net",
+    # crates/graphics
+    "crates/graphics/nc-gfx",
+    "crates/graphics/nc-font",
+    "crates/graphics/nc-media",
+    "crates/graphics/nc-assets",
+    "crates/graphics/nc-audio",
+    # crates/ui
+    "crates/ui/nc-ui",
+    "crates/ui/nc-app",
+    "crates/ui/nc-splash",
+    "crates/ui/nc-setup",
+    "crates/ui/nc-desktop",
+    # crates/runtime
+    "crates/runtime/nc-caps",
+    "crates/runtime/nc-elf",
+    "crates/runtime/nc-pkg",
+    "crates/runtime/nc-app-sdk",
+    "crates/runtime/nc-app-host",
+    "crates/runtime/nc-fs-facade",
+    "crates/runtime/nc-net-facade",
+    "crates/runtime/nc-sys-facade",
+    # apps/files
+    "apps/files/nc-app-files",
+    # apps/settings
+    "apps/settings/nc-app-settings",
+    # apps/system
+    "apps/system/nc-app-system",
+    # apps/stopwatch
+    "apps/stopwatch/nc-app-stopwatch",
+    "apps/stopwatch/nc-r3-stopwatch",
+    # apps/browser
+    "apps/browser/nc-app-browser",
+    "apps/browser/nc-js",
+    # apps/registry
+    "apps/registry/nc-apps",
+    # aarch64crates/hardware
+    "aarch64crates/hardware/nc-arch-aarch64",
+    "aarch64crates/hardware/nc-device",
+    "aarch64crates/hardware/nc-device-select",
+    # aarch64crates/graphics
+    "aarch64crates/graphics/nc-mobile-assets",
+    # aarch64crates/runtime
+    "aarch64crates/runtime/nc-fs-policy",
+    "aarch64crates/runtime/nc-mobile-ui",
+    "aarch64crates/runtime/nc-brand",
+    # aarch64crates/drivers
+    "aarch64crates/drivers/qemu-virt",
+    "aarch64crates/drivers/x6826c",
+    "aarch64crates/drivers/rpi4",
+    # aarch64kernel
+    "aarch64kernel",
+]
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = false

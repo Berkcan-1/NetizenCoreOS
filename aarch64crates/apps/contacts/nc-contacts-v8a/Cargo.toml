@@ -1,0 +1,19 @@
+[package]
+name = "nc-contacts-v8a"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nc-abi = { path = "../../../../crates/foundation/nc-abi" }
+nc-app-sdk = { path = "../../../../crates/runtime/nc-app-sdk" }
+nc-mobile-ui = { path = "../../../runtime/nc-mobile-ui" }
+
+[workspace]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = false
+codegen-units = 1
+debug = false
+strip = "symbols"
